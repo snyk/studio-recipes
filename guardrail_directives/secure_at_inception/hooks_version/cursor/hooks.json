@@ -3,7 +3,7 @@
     "hooks": {
       "stop": [
         {
-          "command": "./hooks/snyk-audit.sh"
+          "command": "./hooks/snyk_sai_sast_sca_script.sh"
         }
       ]
     }

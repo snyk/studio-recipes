@@ -1,0 +1,105 @@
+name: Quality Gates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Secret scanning with Gitleaks
+  secrets-scan:
+    name: Secret Scanning
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Gitleaks
+        run: |
+          wget -qO- https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz | tar xz
+          sudo mv gitleaks /usr/local/bin/
+
+      - name: Run Gitleaks
+        run: gitleaks detect --source . --verbose
+
+  # YAML and JSON validation
+  validate-configs:
+    name: Validate Configuration Files
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate YAML files
+        run: |
+          echo "Validating YAML files..."
+          for file in $(find . -name "*.yaml" -o -name "*.yml" | grep -v node_modules); do
+            echo "Checking $file"
+            python3 -c "import yaml; yaml.safe_load(open('$file'))" || exit 1
+          done
+          echo "All YAML files are valid!"
+
+      - name: Validate JSON files
+        run: |
+          echo "Validating JSON files..."
+          for file in $(find . -name "*.json" | grep -v node_modules); do
+            echo "Checking $file"
+            python3 -c "import json; json.load(open('$file'))" || exit 1
+          done
+          echo "All JSON files are valid!"
+
+  # CODEOWNERS validation
+  validate-codeowners:
+    name: Validate CODEOWNERS
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check CODEOWNERS exists
+        run: |
+          if [ -f ".github/CODEOWNERS" ] || [ -f "CODEOWNERS" ]; then
+            echo "✅ CODEOWNERS file found"
+          else
+            echo "❌ CODEOWNERS file not found"
+            exit 1
+          fi
+
+  # Catalog-info validation
+  validate-catalog-info:
+    name: Validate Catalog Info
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check catalog-info.yaml exists and is valid
+        run: |
+          if [ -f "catalog-info.yaml" ]; then
+            echo "✅ catalog-info.yaml found"
+            echo "Validating YAML syntax..."
+            python3 -c "import yaml; yaml.safe_load(open('catalog-info.yaml'))" || exit 1
+            echo "✅ catalog-info.yaml is valid YAML"
+          else
+            echo "❌ catalog-info.yaml not found"
+            echo "This file is required per ProdSec Asset Classification policy"
+            exit 1
+          fi
+
+  # Shell script linting
+  lint-shell:
+    name: Lint Shell Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run ShellCheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: '.'
+          severity: warning
+

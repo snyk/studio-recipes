@@ -2,11 +2,13 @@
 name: snyk-fix
 description: |
   Complete security remediation workflow. Scans code for vulnerabilities using Snyk, 
-  fixes them, validates the fix, and optionally creates a PR. Use this skill when:
+  fixes them, validates the fix, and optionally creates a PR. Supports both single-issue
+  and batch mode for multiple vulnerabilities. Use this skill when:
   - User asks to fix security vulnerabilities
   - User mentions "snyk fix", "security fix", or "remediate vulnerabilities"
   - User wants to fix a specific CVE, Snyk ID, or vulnerability type (XSS, SQL injection, path traversal, etc.)
   - User wants to upgrade a vulnerable dependency
+  - User asks to "fix all" vulnerabilities or "fix all high/critical" issues (batch mode)
 allowed-tools:
   - mcp_snyk_snyk_code_scan
   - mcp_snyk_snyk_sca_scan
@@ -25,7 +27,13 @@ Complete security remediation workflow in a single command. Scans for vulnerabil
 
 **Workflow**: Parse → Scan → Analyze → Fix → Validate → Summary → (Optional) PR
 
+**Modes**:
+- **Single Mode** (default): Fix one vulnerability type at a time
+- **Batch Mode**: Fix multiple vulnerabilities in priority order
+
 ## Example Triggers
+
+### Single Mode (One Issue)
 
 | User Request | Behavior |
 |--------------|----------|
@@ -39,14 +47,83 @@ Complete security remediation workflow in a single command. Scans for vulnerabil
 | "fix XSS vulnerabilities" | Fix all XSS vulnerabilities in highest priority file |
 | "fix path traversal" | Fix all path traversal vulnerabilities |
 
+### Batch Mode (Multiple Issues)
+
+| User Request | Behavior |
+|--------------|----------|
+| "fix all security issues" | Fix ALL vulnerabilities by priority (Critical → Low) |
+| "fix all critical vulnerabilities" | Fix only Critical severity issues |
+| "fix all high and critical" | Fix Critical and High severity issues |
+| "fix all code vulnerabilities" | Fix all SAST issues in the project |
+| "fix all dependency issues" | Fix all SCA issues in the project |
+| "fix top 5 vulnerabilities" | Fix the 5 highest priority issues |
+| "fix all issues in src/" | Fix all vulnerabilities in specified directory |
+
+---
+
+## Batch Mode Overview
+
+Batch mode fixes multiple vulnerabilities in a single session. Use when the user says "all", "batch", or specifies a severity filter.
+
+### Batch Mode Workflow
+
+```
+1. Scan entire project (SAST + SCA)
+2. Filter by severity/type if specified
+3. Group vulnerabilities by type and priority
+4. For each group (in priority order):
+   a. Fix all instances of that vulnerability type
+   b. Validate the fix
+   c. Track results
+5. Generate comprehensive summary
+6. Prompt for single PR with all fixes
+```
+
+### Batch Mode Limits
+
+| Setting | Value | Notes |
+|---------|-------|-------|
+| Max vulnerabilities | 20 | To avoid overwhelming changes |
+| Max files modified | 15 | To keep PRs reviewable |
+| Timeout per fix | 3 attempts | Same as single mode |
+| Stop on failure | Configurable | Can continue or stop |
+
+### Batch Priority Order
+
+1. Critical with known exploit
+2. Critical without exploit
+3. High with known exploit
+4. High without exploit
+5. Medium severity
+6. Low severity
+
+Within same priority: Code (SAST) issues before SCA issues (code fixes are typically more urgent).
+
 ---
 
 ## Phase 1: Input Parsing
 
 Parse user input to extract:
+- **mode**: Single (default) or Batch (if user says "all", "batch", or specifies count/severity filter)
 - **scan_type**: Explicit (`code`, `sca`, `both`) or infer from context
 - **target_vulnerability**: Specific issue ID, CVE, package name, file reference, or vulnerability type
 - **target_path**: File or directory to focus on (defaults to project root)
+- **severity_filter**: For batch mode - which severities to include
+- **max_fixes**: For batch mode - maximum vulnerabilities to fix (default: 20)
+
+### Mode Detection Rules
+
+**Batch Mode Indicators**:
+- User says "all" (e.g., "fix all vulnerabilities")
+- User specifies severity filter (e.g., "fix all high and critical")
+- User specifies count (e.g., "fix top 5")
+- User says "batch" explicitly
+
+**Single Mode** (default):
+- User specifies a single vulnerability ID
+- User mentions one vulnerability type
+- User references a specific file
+- No batch indicators present
 
 ### Scan Type Detection Rules (in priority order)
 
@@ -59,6 +136,85 @@ Parse user input to extract:
 5. **File reference**: User mentions `.ts`, `.js`, `.py`, etc. file → Code scan on that file
 6. **Package reference**: User mentions known package name (e.g., "lodash", "express") → SCA scan
 7. **Default (no hints)**: Run BOTH scans, select highest priority issue
+
+---
+
+## Phase 1B: Batch Mode Planning (Skip if Single Mode)
+
+**Only execute this phase if Batch Mode was detected in Phase 1.**
+
+### Step 1B.1: Run Full Project Scan
+
+Run comprehensive scans to discover all vulnerabilities:
+
+```
+Run both scans:
+- mcp_snyk_snyk_code_scan with path = project root
+- mcp_snyk_snyk_sca_scan with path = project root
+```
+
+### Step 1B.2: Filter Results
+
+Apply user-specified filters:
+
+| Filter | Example | Result |
+|--------|---------|--------|
+| Severity | "critical only" | Only Critical vulns |
+| Severity | "high and critical" | Critical + High |
+| Type | "code vulnerabilities" | Only SAST results |
+| Type | "dependency issues" | Only SCA results |
+| Path | "in src/" | Only vulns in src/ |
+| Count | "top 5" | First 5 by priority |
+
+### Step 1B.3: Group and Prioritize
+
+Group vulnerabilities for efficient fixing:
+
+1. **Group by type**: Same vulnerability ID in same file (code) or same package (SCA)
+2. **Sort by priority**: Critical > High > Medium > Low
+3. **Within priority**: Prefer issues with available fixes
+
+### Step 1B.4: Generate Fix Plan
+
+Display the batch fix plan to user:
+
+```
+## Batch Fix Plan
+
+**Mode**: Batch Remediation
+**Filter**: [severity/type/path filter if any]
+**Total Vulnerabilities**: [count]
+
+### Fix Order
+
+| # | Type | Severity | Target | Instances |
+|---|------|----------|--------|-----------|
+| 1 | Code | High | SQL Injection in db.ts | 3 |
+| 2 | SCA | Critical | log4j-core@2.14.1 | 1 |
+| 3 | Code | High | XSS in api/render.ts | 2 |
+| 4 | SCA | High | lodash@4.17.15 | 1 |
+| 5 | Code | High | Path Traversal in files.ts | 4 |
+
+**Estimated Changes**: [X files, Y packages]
+
+### Proceed with batch fix? (yes/no/adjust)
+```
+
+**Wait for user confirmation before proceeding.**
+
+If user says "adjust", allow them to modify the plan (exclude items, change order, etc.).
+
+### Step 1B.5: Execute Batch Fixes
+
+For each vulnerability group in the plan:
+
+1. Execute the appropriate fix phase (Phase 3 for Code, Phase 4 for SCA)
+2. Validate the fix (Phase 5)
+3. Track result (success/failure/partial)
+4. If failure and `stop_on_failure=true`: Stop and report
+5. If failure and `stop_on_failure=false`: Continue to next item
+
+**After all fixes attempted, proceed to Phase 6B (Batch Summary).**
 
 ---
 
@@ -395,6 +551,136 @@ After successful fix, report the remediation using `mcp_snyk_snyk_send_feedback`
 
 ---
 
+## Phase 6B: Batch Summary (Batch Mode Only)
+
+**Only execute this phase after completing all batch fixes.**
+
+### Step 6B.1: Generate Comprehensive Summary
+
+```
+## Batch Remediation Summary
+
+### Overall Results
+| Metric | Count |
+|--------|-------|
+| Vulnerabilities Attempted | [total] |
+| Successfully Fixed | [count] |
+| Partially Fixed | [count] |
+| Failed | [count] |
+| Skipped | [count] |
+
+### Issues Fixed by Severity
+| Severity | Fixed | Remaining |
+|----------|-------|-----------|
+| Critical | X/Y | Z |
+| High | X/Y | Z |
+| Medium | X/Y | Z |
+| Low | X/Y | Z |
+
+### Detailed Results
+
+#### Code Vulnerabilities Fixed
+| # | Vulnerability | File | Instances | Status |
+|---|---------------|------|-----------|--------|
+| 1 | SQL Injection | db.ts | 3/3 | ✅ Fixed |
+| 2 | XSS | api/render.ts | 2/2 | ✅ Fixed |
+| 3 | Path Traversal | files.ts | 3/4 | ⚠️ Partial |
+
+#### Dependency Vulnerabilities Fixed
+| # | Package | Old → New | CVEs Fixed | Status |
+|---|---------|-----------|------------|--------|
+| 1 | log4j-core | 2.14.1 → 2.17.1 | 3 | ✅ Fixed |
+| 2 | lodash | 4.17.15 → 4.17.21 | 2 | ✅ Fixed |
+
+### Files Modified
+- src/db.ts
+- src/api/render.ts
+- src/files.ts
+- package.json
+- package-lock.json
+
+### Validation Results
+| Check | Result |
+|-------|--------|
+| Snyk Code Re-scan | ✅ [X] issues resolved |
+| Snyk SCA Re-scan | ✅ [Y] issues resolved |
+| Build | ✅ Pass |
+| Tests | ✅ Pass |
+| Lint | ✅ Pass |
+
+### Issues NOT Fixed
+| Vulnerability | Reason |
+|---------------|--------|
+| SSRF in external.ts | Complex refactoring required |
+| minimist@1.2.5 | No fix version available |
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## Should I create a single PR for all these fixes? (yes / no)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+### Step 6B.2: Send Batch Feedback
+
+Report all fixes to Snyk:
+
+```
+Run mcp_snyk_snyk_send_feedback with:
+- path: [project root]
+- fixedExistingIssuesCount: [total issues fixed across all vulns]
+- preventedIssuesCount: 0
+```
+
+### Step 6B.3: Batch PR Handling
+
+If user confirms PR for batch fixes:
+
+**Branch naming for batch**:
+- `fix/security-batch-YYYYMMDD`
+- `fix/security-critical-high-batch`
+
+**Commit strategy**:
+- **Option 1**: Single commit with all changes
+- **Option 2**: One commit per vulnerability type (cleaner history)
+
+Default to Option 1 unless user prefers separate commits.
+
+**PR Body for Batch**:
+```markdown
+## Security Fixes (Batch)
+
+This PR addresses multiple security vulnerabilities identified by Snyk.
+
+### Summary
+- **Code vulnerabilities fixed**: [count]
+- **Dependency vulnerabilities fixed**: [count]
+- **Total CVEs resolved**: [count]
+
+### Code Fixes
+
+| Vulnerability | File | CWE | Severity |
+|---------------|------|-----|----------|
+| SQL Injection | db.ts | CWE-89 | Critical |
+| XSS | render.ts | CWE-79 | High |
+| Path Traversal | files.ts | CWE-22 | High |
+
+### Dependency Upgrades
+
+| Package | Old | New | CVEs Fixed |
+|---------|-----|-----|------------|
+| log4j-core | 2.14.1 | 2.17.1 | 3 |
+| lodash | 4.17.15 | 4.17.21 | 2 |
+
+### Validation
+- [x] Snyk scans pass
+- [x] Tests pass
+- [x] No new vulnerabilities introduced
+
+### Review Notes
+Each fix was validated independently before inclusion in this batch.
+```
+
+---
+
 ## Phase 7: Create PR (If Confirmed)
 
 **Only execute if user says "yes" to PR prompt.**
@@ -552,6 +838,7 @@ Revert ALL changes if:
 
 ## Constraints
 
+### Single Mode
 1. **One vulnerability TYPE per run** - Fix all instances of ONE vulnerability type (Code) or ONE dependency issue (SCA)
 2. **Minimal changes** - Only modify what's necessary
 3. **No new vulnerabilities** - Fixes must be clean (or net improvement for SCA)
@@ -561,9 +848,20 @@ Revert ALL changes if:
 7. **User confirmation for PR** - Never auto-create PRs
 8. **Always prompt for PR** - Every successful fix MUST end with the PR prompt question
 
+### Batch Mode Additional Constraints
+9. **User approval required** - Must confirm batch plan before starting
+10. **Max 20 vulnerabilities** - Keep batch fixes manageable
+11. **Max 15 files** - Keep PRs reviewable
+12. **Validate each fix** - Each vulnerability fix is validated before proceeding to next
+13. **Partial success allowed** - Can complete batch even if some fixes fail
+14. **Single PR for batch** - All batch fixes go into one PR (unless user requests otherwise)
+15. **Detailed tracking** - Track success/failure for each item in batch
+
 ---
 
 ## Completion Checklist
+
+### Single Mode Checklist
 
 Before ending the conversation, verify ALL are complete:
 
@@ -575,4 +873,19 @@ Before ending the conversation, verify ALL are complete:
 - [ ] Snyk feedback sent with correct count
 - [ ] **PR prompt asked** ← Do NOT skip this step
 - [ ] PR created (if user confirmed)
+
+### Batch Mode Checklist
+
+Before ending the conversation, verify ALL are complete:
+
+- [ ] Full project scan completed (SAST + SCA)
+- [ ] Batch plan generated and shown to user
+- [ ] User approved the batch plan
+- [ ] Each vulnerability in plan was attempted
+- [ ] Each fix was validated before proceeding to next
+- [ ] Results tracked for all items (success/partial/failed)
+- [ ] Comprehensive batch summary displayed
+- [ ] Total fix count sent to Snyk feedback
+- [ ] **PR prompt asked** with all batch changes
+- [ ] Single PR created with all fixes (if user confirmed)
 

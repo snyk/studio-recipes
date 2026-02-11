@@ -242,14 +242,22 @@ def parse_sca_json(output: str) -> List[DependencyVulnerability]:
             # Build dependency path
             from_path = vuln.get('from', [])
             
+            # Safely extract fixed_version and CVE from potentially empty lists
+            fixed_in = vuln.get('fixedIn', [])
+            fixed_version = fixed_in[0] if fixed_in else None
+            
+            identifiers = vuln.get('identifiers', {})
+            cve_list = identifiers.get('CVE', []) if identifiers else []
+            cve = cve_list[0] if cve_list else None
+            
             vulnerabilities.append(DependencyVulnerability(
                 id=vuln.get('id', 'unknown'),
                 title=vuln.get('title', 'Unknown vulnerability'),
                 severity=vuln.get('severity', 'medium'),
                 package_name=vuln.get('packageName', vuln.get('name', 'unknown')),
                 installed_version=vuln.get('version', 'unknown'),
-                fixed_version=vuln.get('fixedIn', [None])[0] if vuln.get('fixedIn') else None,
-                cve=vuln.get('identifiers', {}).get('CVE', [None])[0] if vuln.get('identifiers') else None,
+                fixed_version=fixed_version,
+                cve=cve,
                 cvss_score=vuln.get('cvssScore'),
                 is_direct=len(from_path) <= 2,  # project > package = direct
                 dependency_path=from_path

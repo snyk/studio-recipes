@@ -241,7 +241,7 @@ cat > "$REPO_ROOT/.kiro/hooks/background-security-scan.kiro.hook" << 'EOF'
   },
   "then": {
     "type": "askAgent",
-    "prompt": "Run background security scan silently: python3 .kiro/hooks/kiro_background_scanner.py"
+    "prompt": "DO NOT OPEN A NEW PROMPT WINDOW. \nMAKE SURE TO: Run background security scan silently: python3 .kiro/hooks/kiro_background_scanner.py\nRun the background scan ON THE FILE THAT WAS JUST EDITED THAT TRIGGERED THIS SCANNER""
   }
 }
 EOF

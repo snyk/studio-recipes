@@ -373,7 +373,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     if args.sast:
-        print("=== SAST Scan ===")
+        print("=== Snyk SAST Scan ===")
         result = run_sast_scan(args.path)
         if not result.success:
             print(f"Error: {result.error_message}")
@@ -387,7 +387,7 @@ if __name__ == '__main__':
                 print(f"  - {v}")
     
     if args.sca:
-        print("\n=== SCA Scan ===")
+        print("\n=== Snyk SCA Scan ===")
         result = run_sca_scan(args.path)
         if not result.success:
             print(f"Error: {result.error_message}")

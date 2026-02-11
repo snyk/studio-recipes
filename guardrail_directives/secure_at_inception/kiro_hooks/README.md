@@ -15,22 +15,35 @@ A pre-commit hook system that prevents developers from committing code that intr
 ## Quick Start
 
 ```bash
-# 1. Run the installer (installs both git and Kiro hooks)
-cd your-project
-bash /path/to/studio-recipes/guardrail_directives/secure_at_inception/kiro_hooks/install.sh
+# 1. Clone the studio-recipes repository (one time)
+git clone https://github.com/snyk-labs/studio-recipes.git
 
-# 2. Code as normal - hooks run automatically
+# 2. Run the installer from your project
+cd your-project
+bash ../studio-recipes/guardrail_directives/secure_at_inception/kiro_hooks/install.sh
+
+# 3. Code as normal - hooks run automatically
 # - Kiro: Scans on file save (background)
 # - Git: Scans on commit (uses cached results)
 
 git add .
 git commit -m "my changes"
 
-# 3. If blocked, copy the fix command into your AI assistant
+# 4. If blocked, copy the fix command into your AI assistant
 /snyk-fix-batch javascript/PT@server.ts:45, sca:lodash
 ```
 
 ## Installation
+
+### Step 1: Clone studio-recipes (one time)
+
+```bash
+# Clone to a location accessible to all your projects
+cd ~/repos  # or wherever you keep repos
+git clone https://github.com/snyk-labs/studio-recipes.git
+```
+
+### Step 2: Run the installer in your project
 
 The installer sets up both git pre-commit hooks and Kiro background scanning:
 
@@ -38,8 +51,11 @@ The installer sets up both git pre-commit hooks and Kiro background scanning:
 # From your project directory
 cd my-project
 
-# Run the installer from studio-recipes
-bash /path/to/studio-recipes/guardrail_directives/secure_at_inception/kiro_hooks/install.sh
+# Run the installer (adjust path to where you cloned studio-recipes)
+bash ../studio-recipes/guardrail_directives/secure_at_inception/kiro_hooks/install.sh
+
+# Or with full path
+bash ~/repos/studio-recipes/guardrail_directives/secure_at_inception/kiro_hooks/install.sh
 ```
 
 **What gets installed:**

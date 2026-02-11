@@ -32,9 +32,19 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 # Add lib directory to path
-SCRIPT_DIR = Path(__file__).parent.resolve()
+# Resolve symlinks to get the actual script location
+SCRIPT_PATH = Path(__file__).resolve()
+SCRIPT_DIR = SCRIPT_PATH.parent
 LIB_DIR = SCRIPT_DIR / "lib"
 sys.path.insert(0, str(LIB_DIR))
+
+# Debug: Print paths if there's an import error
+if not LIB_DIR.exists():
+    print(f"ERROR: LIB_DIR does not exist: {LIB_DIR}")
+    print(f"SCRIPT_DIR: {SCRIPT_DIR}")
+    print(f"SCRIPT_PATH: {SCRIPT_PATH}")
+    print(f"__file__: {__file__}")
+    sys.exit(1)
 
 from analyze_diff import get_staged_changes, StagedChanges
 from run_snyk_scan import (
@@ -272,7 +282,13 @@ def get_sast_with_cache(
     print_info("Checking SAST cache...")
     
     for file_path in staged.changed_code_files:
+        # DEBUG: Log cache lookup details
+        file_hash = cache.compute_file_hash(file_path)
+        if DEBUG:
+            print(f"  DEBUG: Looking up cache for {file_path}, hash={file_hash}")
         cached = cache.get_sast_result(file_path)
+        if DEBUG:
+            print(f"  DEBUG: Cache result: {cached is not None}, NO_CACHE={NO_CACHE}")
         
         if cached and not NO_CACHE:
             cache_hits += 1
@@ -440,10 +456,13 @@ def run_hook() -> int:
     
     # Initialize cache (uses temp directory with workspace hash)
     workspace = os.getcwd()
+    workspace_abs = os.path.abspath(workspace)
     cache_dir = get_cache_dir(workspace)
     cache = SnykCache(cache_dir=cache_dir)
     
     if DEBUG:
+        print(f"  Workspace (cwd): {workspace}")
+        print(f"  Workspace (abs): {workspace_abs}")
         print(f"  Cache: {cache_dir}")
     
     # Step 1: Analyze staged changes

@@ -15,19 +15,44 @@ A pre-commit hook system that prevents developers from committing code that intr
 ## Quick Start
 
 ```bash
-# 1. Install the Git hook
-./kiro_hooks/git/install.sh
+# 1. Run the installer (installs both git and Kiro hooks)
+cd your-project
+bash /path/to/studio-recipes/guardrail_directives/secure_at_inception/kiro_hooks/install.sh
 
-# 2. (Optional) Enable Kiro background scanning
-# Copy kiro_hooks/kiro/hooks.json to your Kiro hooks config
+# 2. Code as normal - hooks run automatically
+# - Kiro: Scans on file save (background)
+# - Git: Scans on commit (uses cached results)
 
-# 3. Code as normal - the hook runs automatically on commit
 git add .
 git commit -m "my changes"
 
-# 4. If blocked, copy the fix command into your AI assistant
+# 3. If blocked, copy the fix command into your AI assistant
 /snyk-fix-batch javascript/PT@server.ts:45, sca:lodash
 ```
+
+## Installation
+
+The installer sets up both git pre-commit hooks and Kiro background scanning:
+
+```bash
+# From your project directory
+cd my-project
+
+# Run the installer from studio-recipes
+bash /path/to/studio-recipes/guardrail_directives/secure_at_inception/kiro_hooks/install.sh
+```
+
+**What gets installed:**
+- Git pre-commit hook → `.git/hooks/pre-commit`
+- Hook libraries → `.git/hooks/lib/*.py`
+- Kiro background scanner → `.kiro/hooks/kiro_background_scanner.py`
+- Kiro hook configuration → `.kiro/hooks/background-security-scan.kiro.hook`
+
+**Chaining with existing hooks:**
+If you already have a pre-commit hook, the installer will ask if you want to:
+1. Replace it (backs up to `pre-commit.backup`)
+2. Chain both hooks (runs both)
+3. Cancel installation
 
 ## Requirements
 
@@ -200,27 +225,24 @@ SNYK_HOOK_DEBUG=1 git commit -m "test"
 SNYK_HOOK_NO_CACHE=1 git commit -m "test"
 ```
 
-## Kiro Background Scanner Setup
+## Kiro Background Scanner
 
-To enable background scanning on file save:
+The background scanner is **automatically installed** by the installer and configured to run on file saves.
 
-1. **Copy the hooks configuration** to your Kiro hooks directory:
-   ```bash
-   cp kiro_hooks/kiro/hooks.json ~/.kiro/hooks.json
-   # Or merge with existing hooks.json
-   ```
+**How it works:**
+1. You save a file in Kiro
+2. Scanner waits 2 seconds (debouncing)
+3. Launches background scan via `scan_worker.py`
+4. Results cached to `/tmp/snyk-cache-{hash}/`
+5. Next commit uses cached results (instant!)
 
-2. **What it does**:
-   - Monitors file saves in the IDE
-   - Debounces rapid saves (waits 2s)
-   - Runs Snyk scans in the background
-   - Caches results for fast commits
-   - Shows notification if issues found
+**File patterns monitored:**
+- Code: `*.js`, `*.ts`, `*.py`, `*.java`, `*.go`, etc.
+- Packages: `package.json`, `requirements.txt`, `pom.xml`, etc.
 
-3. **Notifications**: When background scan finds issues, you'll see:
-   - A system notification (macOS toast)
-   - Entry in `{cache_dir}/notifications.json`
-   - Log entry in `/tmp/snyk-scan-worker.log`
+**Logs:**
+- Scanner activity: Check Kiro's output panel
+- Scan worker: `/tmp/snyk-scan-worker.log`
 
 ## Bypassing the Hook
 
@@ -234,23 +256,42 @@ git commit --no-verify -m "emergency fix"
 
 ## File Structure
 
+**In studio-recipes repository:**
 ```
-kiro_hooks/
-├── git/
-│   ├── pre-commit              # Main hook script
-│   ├── install.sh              # Installation script
-│   └── lib/
-│       ├── __init__.py
-│       ├── analyze_diff.py     # Git diff parsing
-│       ├── run_snyk_scan.py    # Snyk CLI wrapper
-│       ├── filter_new_vulns.py # Vulnerability filtering
-│       ├── cache.py            # Cache management
-│       └── scan_worker.py      # Background scan worker
-├── kiro/
-│   ├── __init__.py
-│   ├── background_scanner.py   # Kiro hook for file saves
-│   └── hooks.json              # Kiro hook configuration
-└── README.md
+studio-recipes/
+└── guardrail_directives/
+    └── secure_at_inception/
+        └── kiro_hooks/
+            ├── install.sh              # Main installer (git + Kiro)
+            ├── git/
+            │   ├── pre-commit          # Main hook script
+            │   └── lib/
+            │       ├── analyze_diff.py     # Git diff parsing
+            │       ├── run_snyk_scan.py    # Snyk CLI wrapper
+            │       ├── filter_new_vulns.py # Vulnerability filtering
+            │       ├── cache.py            # Cache management
+            │       └── scan_worker.py      # Background scan worker
+            ├── kiro/
+            │   └── background_scanner.py   # Kiro hook for file saves
+            └── README.md
+```
+
+**After installation in your project:**
+```
+your-project/
+├── .git/
+│   └── hooks/
+│       ├── pre-commit          # Copied from kiro_hooks/git/pre-commit
+│       └── lib/                # Copied from kiro_hooks/git/lib/
+│           ├── analyze_diff.py
+│           ├── cache.py
+│           ├── filter_new_vulns.py
+│           ├── run_snyk_scan.py
+│           └── scan_worker.py
+└── .kiro/
+    └── hooks/
+        ├── kiro_background_scanner.py              # Copied from kiro_hooks/kiro/
+        └── background-security-scan.kiro.hook      # Generated by installer
 ```
 
 ## Related Commands
@@ -282,10 +323,13 @@ snyk auth
 ### Slow commits (cache not working)
 Check if cache is populated:
 ```bash
-python3 kiro_hooks/git/lib/cache.py --stats
+python3 .git/hooks/lib/cache.py --stats
 ```
 
-If cache is empty, ensure Kiro background scanner is configured, or files will be scanned on-demand.
+If cache is empty, ensure:
+1. Kiro background scanner is running (check `.kiro/hooks/`)
+2. Files are being saved in Kiro (triggers background scans)
+3. Wait 2+ seconds after save for debounce to trigger scan
 
 ### Force fresh scan (skip cache)
 ```bash
@@ -307,18 +351,23 @@ The hook is designed to fail-open. Check the error message and:
 ```bash
 # Remove the git hook
 rm .git/hooks/pre-commit
+rm -rf .git/hooks/lib
+
+# Remove Kiro hooks
+rm -rf .kiro/hooks/
 
 # Clear cache (optional - it's in temp anyway)
-python3 kiro_hooks/git/lib/cache.py --clear
+python3 .git/hooks/lib/cache.py --clear
 ```
 
 ## Contributing
 
-To modify the hook:
+To modify the hooks:
 
 1. Edit files in `kiro_hooks/git/lib/` or `kiro_hooks/kiro/`
 2. Test manually: `python3 kiro_hooks/git/pre-commit`
-3. The hook uses a symlink, so changes take effect immediately
+3. Run `kiro_hooks/install.sh` to test installation
+4. Files are copied (not symlinked) so reinstall to test changes
 
 ## License
 

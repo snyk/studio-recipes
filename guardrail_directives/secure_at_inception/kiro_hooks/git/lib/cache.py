@@ -72,7 +72,8 @@ def get_cache_dir(workspace: str = None) -> str:
     workspace = os.path.abspath(workspace)
     
     # Create workspace-specific hash to avoid collisions between projects
-    workspace_hash = hashlib.md5(workspace.encode()).hexdigest()[:8]
+    # SHA256 to match the hash in other places
+    workspace_hash = hashlib.sha256(workspace.encode()).hexdigest()[:8]
     
     return os.path.join(tempfile.gettempdir(), f"snyk-cache-{workspace_hash}")
 

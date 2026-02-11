@@ -76,7 +76,8 @@ MANIFEST_FILES = {
 def get_workspace_hash(workspace: str) -> str:
     """Generate a unique hash for the workspace."""
     import hashlib
-    return hashlib.md5(workspace.encode()).hexdigest()[:8]
+    # Security fix: Use SHA-256 instead of MD5 for better security
+    return hashlib.sha256(workspace.encode()).hexdigest()[:8]
 
 
 def get_state_file(workspace: str) -> Path:
@@ -164,9 +165,27 @@ class DebounceTracker:
     
     def add_file(self, file_path: str) -> None:
         """Add a file to pending scan list."""
+        # Normalize path to be relative to workspace for consistent cache keys
+        file_path = self._normalize_path(file_path)
         state = self.read_state()
         state["pending_files"][file_path] = datetime.now().isoformat()
         self.write_state(state)
+    
+    def _normalize_path(self, file_path: str) -> str:
+        """Normalize file path to be relative to workspace."""
+        path = Path(file_path)
+        workspace_path = Path(self.workspace)
+        
+        # Convert to absolute first
+        if not path.is_absolute():
+            path = workspace_path / path
+        
+        # Make relative to workspace
+        try:
+            return str(path.relative_to(workspace_path))
+        except ValueError:
+            # If outside workspace, use absolute
+            return str(path.resolve())
     
     def add_packages(self) -> None:
         """Mark packages as needing scan."""
@@ -236,12 +255,29 @@ def launch_background_scan(workspace: str, scan_type: str, target: str) -> None:
     
     The worker runs detached from this process and writes results to cache.
     """
-    script_dir = Path(__file__).parent.parent / "git" / "lib"
-    worker_script = script_dir / "scan_worker.py"
+    # Look for scan_worker.py in .git/hooks/lib/ where installer puts it
+    git_hooks_lib = Path(workspace) / ".git" / "hooks" / "lib"
+    worker_script = git_hooks_lib / "scan_worker.py"
     
     if not worker_script.exists():
         log_to_panel(f"[ERROR] Scan worker not found: {worker_script}")
         return
+    
+    # Normalize target path to be relative to workspace
+    # This ensures cache keys match between background scans and commit-time checks
+    if scan_type == "sast":
+        target_path = Path(target)
+        workspace_path = Path(workspace)
+        
+        # Convert to absolute first, then make relative to workspace
+        if not target_path.is_absolute():
+            target_path = workspace_path / target_path
+        
+        try:
+            target = str(target_path.relative_to(workspace_path))
+        except ValueError:
+            # If target is outside workspace, use absolute path
+            target = str(target_path.resolve())
     
     # Launch detached subprocess
     cmd = [
@@ -378,29 +414,122 @@ def handle_scan_complete(data: Dict[str, Any], workspace: str) -> Dict[str, Any]
 
 def main() -> None:
     """Main entry point for the hook."""
-    # Read JSON input from stdin
+    log_to_panel("=== KIRO BACKGROUND SCANNER STARTED ===")
+    
     try:
-        input_data = sys.stdin.read()
-        data = json.loads(input_data) if input_data.strip() else {}
-    except json.JSONDecodeError as e:
-        log_to_panel(f"[ERROR] Failed to parse hook input: {e}")
-        output_response({"exit_code": 1})
-        sys.exit(1)
-    
-    # Get hook event and workspace
-    hook_event = data.get("hook_event_name", "")
-    workspace = get_workspace(data)
-    
-    # Dispatch to handler
-    if hook_event == "afterFileEdit":
-        response = handle_after_file_edit(data, workspace)
-    elif hook_event == "scanComplete":
-        # Custom event from scan worker
-        response = handle_scan_complete(data, workspace)
-    else:
-        response = {"exit_code": 0}
-    
-    output_response(response)
+        # Get workspace (current directory)
+        workspace = os.getcwd()
+        log_to_panel(f"Workspace: {workspace}")
+        
+        # Kiro hooks can receive file info via environment variables or args
+        # Check common environment variables that Kiro might set
+        file_path = None
+        
+        # Try to get file path from various sources
+        if len(sys.argv) > 1:
+            file_path = sys.argv[1]
+            log_to_panel(f"File from args: {file_path}")
+        elif 'KIRO_EDITED_FILE' in os.environ:
+            file_path = os.environ['KIRO_EDITED_FILE']
+            log_to_panel(f"File from KIRO_EDITED_FILE: {file_path}")
+        elif 'KIRO_FILE_PATH' in os.environ:
+            file_path = os.environ['KIRO_FILE_PATH']
+            log_to_panel(f"File from KIRO_FILE_PATH: {file_path}")
+        elif 'FILE_PATH' in os.environ:
+            file_path = os.environ['FILE_PATH']
+            log_to_panel(f"File from FILE_PATH: {file_path}")
+        elif 'EDITED_FILE' in os.environ:
+            file_path = os.environ['EDITED_FILE']
+            log_to_panel(f"File from EDITED_FILE: {file_path}")
+        
+        # If no specific file, scan recently modified files
+        if not file_path:
+            log_to_panel("No specific file provided, scanning recently modified files")
+            # Find recently modified code files (last 5 minutes)
+            import time
+            current_time = time.time()
+            recent_files = []
+            
+            for ext in CODE_EXTENSIONS:
+                for file in Path(workspace).rglob(f"*{ext}"):
+                    if file.is_file() and (current_time - file.stat().st_mtime) < 300:  # 5 minutes
+                        recent_files.append(str(file.relative_to(workspace)))
+            
+            if recent_files:
+                file_path = recent_files[0]  # Scan the most recently modified
+                log_to_panel(f"Found recent file: {file_path}")
+        
+        if not file_path:
+            log_to_panel("No file to scan, exiting")
+            return
+        
+        # Use debounce tracker for sophisticated handling
+        tracker = DebounceTracker(workspace)
+        
+        # Normalize the current file path
+        if is_code_file(file_path):
+            normalized_path = tracker._normalize_path(file_path)
+        else:
+            normalized_path = file_path
+        
+        # FIRST: Check and launch any pending scans that have passed debounce
+        # This must happen BEFORE we update timestamps for the current file
+        launched = check_and_launch_pending_scans(workspace)
+        if launched:
+            log_to_panel(f"[SCAN] Launched {len(launched)} debounced scan(s)")
+        
+        # Check if the current file was just launched via debounce
+        current_file_just_launched = any(normalized_path in item for item in launched)
+        
+        # THEN: Handle the current file edit
+        if is_code_file(file_path):
+            if current_file_just_launched:
+                # File was just scanned via debounce, don't launch again
+                log_to_panel(f"[SCAN] {Path(file_path).name} already scanned via debounce")
+                # But add it back to tracker for next edit
+                tracker.add_file(file_path)
+            else:
+                # Check if this file was already pending
+                state = tracker.read_state()
+                was_pending = normalized_path in state.get("pending_files", {})
+                
+                if was_pending:
+                    # File was already queued, just update timestamp (debounce)
+                    tracker.add_file(file_path)
+                    log_to_panel(f"[DEBOUNCE] Scan delayed for: {Path(file_path).name}")
+                else:
+                    # First edit of this file - launch scan immediately
+                    log_to_panel(f"[SCAN] Launching immediate scan for: {Path(file_path).name}")
+                    launch_background_scan(workspace, "sast", normalized_path)
+                    
+                    # Also add to tracker for future debouncing
+                    tracker.add_file(file_path)
+                
+        elif is_manifest_file(file_path):
+            # Check if packages were already pending
+            state = tracker.read_state()
+            was_pending = state.get("pending_packages", False)
+            
+            if was_pending:
+                # Already queued, just update timestamp
+                tracker.add_packages()
+                log_to_panel(f"[DEBOUNCE] SCA scan delayed")
+            else:
+                # First change - launch immediately
+                log_to_panel(f"[SCAN] Launching immediate SCA scan")
+                launch_background_scan(workspace, "sca", workspace)
+                tracker.add_packages()
+        else:
+            # Not a scannable file
+            log_to_panel(f"File not scannable: {file_path}")
+            return
+        
+        log_to_panel("=== KIRO BACKGROUND SCANNER COMPLETED ===")
+        
+    except Exception as e:
+        log_to_panel(f"ERROR: {e}")
+        import traceback
+        log_to_panel(f"Traceback: {traceback.format_exc()}")
 
 
 if __name__ == "__main__":

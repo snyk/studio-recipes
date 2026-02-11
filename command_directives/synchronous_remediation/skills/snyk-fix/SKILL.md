@@ -19,6 +19,14 @@ allowed-tools:
   - Edit
   - Bash
   - Grep
+license: Apache-2.0
+compatibility: |
+  Requires Snyk MCP server connection and authenticated Snyk account.
+  GitHub CLI (gh) required for PR creation. Git repository required.
+  Supports SAST for 20+ languages and SCA for all major package managers.
+metadata:
+  author: Snyk
+  version: 1.0.0
 ---
 
 # Snyk Fix (All-in-One)

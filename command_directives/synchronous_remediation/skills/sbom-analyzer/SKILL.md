@@ -8,6 +8,20 @@ description: |
   - User needs to validate a supplier's SBOM
   - User wants to check SBOM for vulnerabilities
   - User asks about CycloneDX or SPDX formats
+allowed-tools:
+  - mcp_snyk_snyk_sbom_scan
+  - Read
+  - Write
+  - Bash
+  - Grep
+license: Apache-2.0
+compatibility: |
+  Requires Snyk MCP server connection and authenticated Snyk account.
+  SBOM must be in CycloneDX (1.4-1.6) or SPDX (2.3) JSON format.
+  Components must include Package URLs (purls) for vulnerability identification.
+metadata:
+  author: Snyk
+  version: 1.0.0
 ---
 
 # SBOM Security Analyzer

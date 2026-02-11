@@ -9,6 +9,20 @@ description: |
   - User mentions "AI BOM", "AI inventory", or "ML security"
   - User is working with Python AI/ML projects (PyTorch, TensorFlow, HuggingFace)
   - User needs AI component compliance documentation
+allowed-tools:
+  - mcp_snyk_snyk_aibom
+  - Read
+  - Write
+  - Bash
+  - Grep
+license: Apache-2.0
+compatibility: |
+  Requires Snyk MCP server connection and authenticated Snyk account.
+  Python projects only. Internet connection required for AIBOM analysis.
+  Snyk experimental features must be enabled.
+metadata:
+  author: Snyk
+  version: 1.0.0
 ---
 
 # AI Component Inventory

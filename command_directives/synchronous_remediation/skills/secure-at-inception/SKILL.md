@@ -9,6 +9,23 @@ description: |
   - User asks to "scan for security issues" or "check my changes"
   - Before committing changes
   - User mentions "secure at inception", "proactive scan", or "security check"
+allowed-tools:
+  - mcp_snyk_snyk_code_scan
+  - mcp_snyk_snyk_sca_scan
+  - mcp_snyk_snyk_iac_scan
+  - mcp_snyk_snyk_send_feedback
+  - Read
+  - Bash
+  - Grep
+license: Apache-2.0
+compatibility: |
+  Requires Snyk MCP server connection and authenticated Snyk account.
+  Git repository recommended for change detection (git diff).
+  Supports 20+ programming languages for SAST, all major package managers for SCA,
+  and Terraform/Kubernetes/CloudFormation/ARM for IaC scanning.
+metadata:
+  author: Snyk
+  version: 1.0.0
 ---
 
 # Secure At Inception

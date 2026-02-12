@@ -8,6 +8,19 @@ description: |
   - User mentions "drift detection" or "Terraform drift"
   - User asks to compare cloud state to IaC
   - User wants to audit infrastructure changes
+allowed-tools:
+  - Bash
+  - Read
+  - Write
+  - Grep
+license: Apache-2.0
+compatibility: |
+  Requires Snyk CLI installed and authenticated. Uses `snyk iac describe` CLI command
+  (shell execution). Cloud provider credentials must be configured (AWS, Azure, or GCP).
+  Terraform state file (local or remote) required.
+metadata:
+  author: Snyk
+  version: 1.0.0
 ---
 
 # Infrastructure Drift Detector

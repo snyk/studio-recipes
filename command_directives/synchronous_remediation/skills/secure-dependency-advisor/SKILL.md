@@ -9,6 +9,20 @@ description: |
   - Agent needs to import a new dependency
   - User asks for a "secure alternative" to a package
   - User mentions "dependency advisor", "package chooser", or "package security"
+allowed-tools:
+  - mcp_snyk_snyk_sca_scan
+  - Read
+  - Write
+  - Bash
+  - Grep
+license: Apache-2.0
+compatibility: |
+  Requires Snyk MCP server connection and authenticated Snyk account.
+  Works with any package ecosystem supported by Snyk SCA (npm, pip, Maven, Gradle,
+  RubyGems, Go modules, Cargo, NuGet, Composer, and more).
+metadata:
+  author: Snyk
+  version: 1.0.0
 ---
 
 # Secure Dependency Advisor

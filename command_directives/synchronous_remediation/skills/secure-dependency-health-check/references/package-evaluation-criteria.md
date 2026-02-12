@@ -4,18 +4,9 @@ Detailed criteria for evaluating open-source package security and health.
 
 ## Security Criteria
 
-### Vulnerability Scoring
+### Overall Rating
 
-| Factor | Points Deducted | Notes |
-|--------|-----------------|-------|
-| Critical CVE | -25 | Per vulnerability |
-| High CVE | -10 | Per vulnerability |
-| Medium CVE | -3 | Per vulnerability |
-| Low CVE | -1 | Per vulnerability |
-| Known Exploit | -100 | Automatic disqualification |
-| No Fix Available | -5 | Additional for unfixable vulns |
-
-**Formula**: `Score = 100 - (sum of deductions)`
+Use the `overall_rating` returned by `snyk_package_health_check` as the primary evaluation metric. The tool returns "Healthy" or "Review recommended" based on an internal assessment of vulnerability severity, maintenance signals, and community health. Do not compute a manual score. Additionally review the per-category ratings: `security.rating`, `maintenance.rating`, `community.rating`, and `popularity.rating`.
 
 ### Dependency Tree Risk
 
@@ -106,32 +97,6 @@ Consider the package's security track record:
 
 ---
 
-## License Criteria
-
-### License Compatibility Matrix
-
-| Your Project | Compatible Deps | Incompatible Deps |
-|--------------|-----------------|-------------------|
-| MIT | MIT, BSD, Apache, ISC | GPL (maybe) |
-| Apache 2.0 | MIT, BSD, Apache | GPL |
-| GPL | MIT, BSD, Apache, GPL | Proprietary |
-| Proprietary | MIT, BSD, Apache, ISC | GPL, AGPL |
-
-### License Risk Levels
-
-| License | Risk | Notes |
-|---------|------|-------|
-| MIT, ISC, BSD | Low | Very permissive |
-| Apache 2.0 | Low | Permissive with patent grant |
-| LGPL | Medium | OK if dynamically linked |
-| MPL | Medium | File-level copyleft |
-| GPL | High | Requires source disclosure |
-| AGPL | High | Network use triggers copyleft |
-| Unlicensed | Very High | No rights granted |
-| Custom | Variable | Requires legal review |
-
----
-
 ## Size and Performance Criteria
 
 ### Bundle Size (for frontend packages)
@@ -154,29 +119,64 @@ Consider the package's security track record:
 
 ---
 
-## Scoring Weights
+## Decision Framework
 
-### Default Weights
+### When to Recommend
 
-| Criteria Category | Weight |
-|-------------------|--------|
-| Security | 40% |
-| Maintenance | 25% |
-| Community | 15% |
-| License | 10% |
-| Performance | 10% |
+| Overall Rating | Security Rating | Maintenance Rating | Recommendation |
+|----------------|-----------------|---------------------|----------------|
+| Healthy | No known security issues | Healthy | **Strongly Recommend** |
+| Healthy | Security issues found (low/medium only) | Healthy/Sustainable | **Recommend** with notes |
+| Review recommended | Security issues found | Sustainable | **Caution** - document risks |
+| Any | Critical/High vulns present | Any | **Do Not Recommend** |
+| Any | Any | Inactive | **Do Not Recommend** |
 
-### Security-First Weights
+### Tie-Breakers
 
-For security-critical projects:
+When overall ratings are the same, prefer:
+1. Fewer total dependencies (smaller attack surface)
+2. More recent updates (active maintenance)
+3. Larger community (more security review)
 
-| Criteria Category | Weight |
-|-------------------|--------|
-| Security | 60% |
-| Maintenance | 20% |
-| Community | 10% |
-| License | 5% |
-| Performance | 5% |
+---
+
+## Common Scenarios
+
+### Scenario 1: "Which HTTP client should I use?"
+
+```
+User: Which HTTP client should I use for Node.js?
+
+Process:
+1. Identify candidates: axios, node-fetch, got, undici
+2. Scan each for vulnerabilities
+3. Compare maintenance and size
+4. Recommend based on security + features needed
+```
+
+### Scenario 2: "Is lodash safe to use?"
+
+```
+User: Is lodash safe to use?
+
+Process:
+1. Scan lodash@latest for vulnerabilities
+2. Check for historical security issues
+3. Evaluate current fix availability
+4. Provide yes/no with specific version recommendation
+```
+
+### Scenario 3: "Find a secure alternative to X"
+
+```
+User: I need a secure alternative to vulnerable-package
+
+Process:
+1. Identify what vulnerable-package does
+2. Find packages with similar functionality
+3. Scan and compare alternatives
+4. Recommend most secure option with migration notes
+```
 
 ---
 
@@ -191,4 +191,3 @@ Immediately disqualify if:
 - [ ] Typosquatting name pattern
 - [ ] Malware detected
 - [ ] Deprecated by maintainer
-- [ ] License incompatible with project

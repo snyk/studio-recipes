@@ -10,7 +10,7 @@ WORKFLOW:
 ---------
 1. AI edits package.json → afterFileEdit records the change
 2. AI attempts npm/yarn/pnpm install → beforeShellExecution BLOCKS it
-3. AI runs snyk_sca_scan → beforeMCPExecution clears the block
+3. AI runs snyk_package_health_check → beforeMCPExecution clears the block
 4. AI can now run install commands
 
 SUPPORTED HOOK EVENTS:
@@ -98,7 +98,7 @@ INSTALL_COMMANDS = [
 ]
 
 # MCP tool that satisfy the security scan requirement
-SCAN_TOOL = "snyk_sca_scan"
+SCAN_TOOL = "snyk_package_health_check"
 
 
 # =============================================================================
@@ -226,7 +226,7 @@ def handle_after_file_edit(data: Dict[str, Any], workspace: str) -> None:
         log_to_panel(f"Time: {timestamp}")
         log_to_panel("")
         log_to_panel("Install commands will be blocked until security scan.")
-        log_to_panel("Run snyk_sca_scan before npm/yarn/pnpm install.")
+        log_to_panel("Run snyk_package_health_check before npm/yarn/pnpm install.")
         log_to_panel("=" * 60)
     
     # Always return success (afterFileEdit cannot block)
@@ -273,7 +273,7 @@ def handle_before_shell_execution(data: Dict[str, Any], workspace: str) -> None:
     log_to_panel(f"Blocked command: {command}")
     log_to_panel("")
     log_to_panel("RESOLUTION:")
-    log_to_panel(f"  1. Run: snyk_sca_scan on {workspace}")
+    log_to_panel(f"  1. Run: snyk_package_health_check on {workspace}")
     log_to_panel("  2. Review and address any vulnerabilities")
     log_to_panel("  3. Retry the install command")
     log_to_panel("=" * 60)
@@ -283,11 +283,11 @@ def handle_before_shell_execution(data: Dict[str, Any], workspace: str) -> None:
         "permission": "deny",
         "user_message": (
             f"Install blocked: Security scan required. "
-            f"Run snyk_sca_scan on {workspace} first."
+            f"Run snyk_package_health_check on {workspace} first."
         ),
         "agent_message": (
             f"INSTALL BLOCKED: Dependency manifests were modified but not scanned. "
-            f"You MUST run snyk_sca_scan on {workspace} before running install commands. "
+            f"You MUST run snyk_package_health_check on {workspace} before running install commands. "
             f"Modified files: {changes}"
         ),
     }
@@ -349,14 +349,14 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
     log_to_panel("The following manifest changes were not scanned:")
     log_to_panel(changes)
     log_to_panel("")
-    log_to_panel(f"Please run: snyk_sca_scan on {workspace}")
+    log_to_panel(f"Please run: snyk_package_health_check on {workspace}")
     log_to_panel("=" * 60)
     
     # Use followup_message which works reliably in the stop hook
     response = {
         "followup_message": (
             f"SECURITY ALERT: Dependency manifests were modified but not scanned "
-            f"during this session. Please run snyk_sca_scan on {workspace} to check "
+            f"during this session. Please run snyk_package_health_check on {workspace} to check "
             f"for vulnerabilities before deploying."
         ),
     }

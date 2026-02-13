@@ -32,16 +32,16 @@ HOOKS.JSON EXAMPLE:
   "version": 1,
   "hooks": {
     "afterFileEdit": [
-      {"command": "python3 .cursor/hooks/enforce_security_scan_on_new_packages.py"}
+      {"command": "python3 hooks/enforce_security_scan_on_new_packages.py"}
     ],
     "beforeShellExecution": [
-      {"command": "python3 .cursor/hooks/enforce_security_scan_on_new_packages.py"}
+      {"command": "python3 hooks/enforce_security_scan_on_new_packages.py"}
     ],
     "beforeMCPExecution": [
-      {"command": "python3 .cursor/hooks/enforce_security_scan_on_new_packages.py"}
+      {"command": "python3 hooks/enforce_security_scan_on_new_packages.py"}
     ],
     "stop": [
-      {"command": "python3 .cursor/hooks/enforce_security_scan_on_new_packages.py"}
+      {"command": "python3 hooks/enforce_security_scan_on_new_packages.py"}
     ]
   }
 }

@@ -8,51 +8,13 @@ The hooks approach uses coding assistant lifecycle events to prompt the AI agent
 
 ## Available Implementations
 
-| Implementation | Coding Assistant | Hook Event | How It Works |
-|----------------|-----------------|------------|--------------|
-| **[Cursor](./cursor/)** | Cursor IDE | `stop` (task completion) | Sends follow-up message prompting scans at session end |
-| **[Claude Code](./claude/sync_mcp_version/)** | Claude Code | `PostToolUse` (after file edits) | Injects scan context after every code file write |
+| Implementation | Coding Assistant | Hook Events | How It Works |
+|----------------|-----------------|-------------|--------------|
+| **[Cursor - Async CLI](./cursor/async_cli_version/)** | Cursor IDE | `afterFileEdit`, `stop` | Runs `snyk code test` in the background, filters results to agent-modified lines, blocks agent if new vulns found |
+| **[Cursor - Sync MCP](./cursor/sync_mcp_version/)** | Cursor IDE | `afterFileEdit`, `beforeMCPExecution`, `stop` | Tracks file changes, prompts agent to invoke Snyk MCP tools at session end |
+| **[Claude Code - Async CLI](./claude/async_cli_version/)** | Claude Code | `PostToolUse` (Edit\|Write), `Stop` | Runs `snyk code test` in the background, filters results to agent-modified lines, blocks Claude if new vulns found |
+| **[Claude Code - Sync MCP](./claude/sync_mcp_version/)** | Claude Code | `PostToolUse` (Edit\|Write) | Injects `additionalContext` prompting Claude to run Snyk MCP tools after every code file edit |
 
-## How It Works
-
-### Cursor (Session-End Hook)
-
-```
-    AI generates code during session
-          │
-          ▼
-    AI completes task
-          │
-          ▼
-    ┌───────────────────────────────────┐
-    │  stop hook fires                  │
-    │  "If you changed code, run       │
-    │   snyk_code_scan..."             │
-    └───────────────────────────────────┘
-          │
-          ▼
-    AI runs security scans and fixes issues
-```
-
-### Claude Code (Post-Edit Hook)
-
-```
-    AI edits a source code file
-          │
-          ▼
-    ┌───────────────────────────────────┐
-    │  PostToolUse hook fires           │
-    │  Checks file extension            │
-    │  Injects scan context             │
-    └───────────────────────────────────┘
-          │
-          ▼
-    AI runs snyk_code_scan immediately
-          │
-          ▼
-    Fixes issues, re-edit triggers hook again
-    Cycle repeats until clean
-```
 
 ## Coding Assistant Documentation
 
@@ -73,32 +35,19 @@ Consult your coding assistant's official documentation for how to implement hook
 
 ## Limitations
 
-1. **Timing varies** - Cursor fires at session end; Claude Code fires after each edit
+1. **Timing varies** - Async CLI versions scan in the background and evaluate at session end; Cursor Sync MCP prompts at session end; Claude Code Sync MCP injects context after every edit
 2. **Extra Turn** - May require additional AI turn for fixes
 3. **User Experience** - Session may "extend" beyond initial completion
 
-## Combining with Rules
-
-For maximum coverage, use both hooks and rules:
-
-```
-┌─────────────────────────────────────────────┐
-│  SAI Rule (inline)                          │
-│  - Real-time scanning during generation     │
-│  - Immediate fix before presenting code     │
-└─────────────────────────────────────────────┘
-                    +
-┌─────────────────────────────────────────────┐
-│  SAI Hook (lifecycle event)                 │
-│  - Catch anything missed by rule            │
-│  - Guaranteed final check                   │
-└─────────────────────────────────────────────┘
-```
 
 ## See Also
 
-- [Cursor Implementation](cursor/) - Cursor hooks installation guide
-- [Claude Code Implementation](claude/sync_mcp_version/) - Claude Code hooks setup
+- [Cursor Hooks Overview](cursor/) - Comparison of both Cursor versions
+- [Cursor Async CLI](cursor/async_cli_version/) - Background CLI scanning with line-level filtering
+- [Cursor Sync MCP](cursor/sync_mcp_version/) - Lightweight MCP-based scan prompting
+- [Claude Code Hooks Overview](claude/) - Comparison of both Claude Code versions
+- [Claude Code Async CLI](claude/async_cli_version/) - Background CLI scanning with line-level filtering
+- [Claude Code Sync MCP](claude/sync_mcp_version/) - Post-edit context injection for MCP scans
 - [Rule Version](../rule_version/) - Inline scanning alternative
 - [Kiro/Git Hooks](../kiro_hooks/) - Git pre-commit hook approach
 - [Secure At Inception Overview](../) - Comparison of all approaches

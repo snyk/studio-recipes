@@ -1,119 +1,59 @@
 # Cursor Hooks - Secure At Inception
 
-This directory contains the Cursor IDE hook implementation for Secure At Inception. Install these files to enable automatic security scan prompts at the end of each AI agent session.
+This directory contains two Cursor IDE hook implementations for Secure At Inception. Both automatically enforce security scanning when the AI agent modifies code, but they differ in scanning strategy.
 
-## Files
+## Versions
 
-| File | Purpose |
-|------|---------|
-| `hooks.json` | Hook configuration for Cursor |
-| `snyk_sai_sast_sca_script.sh` | Shell script that sends follow-up message |
+| Version | Scanning Approach | Hook Events | Dependencies |
+|---------|------------------|-------------|--------------|
+| **[Async CLI](./async_cli_version/)** | Runs `snyk code test` in the background via CLI, filters results to agent-modified lines | `afterFileEdit`, `stop` | Python 3.8+, Snyk CLI |
+| **[Sync MCP](./sync_mcp_version/)** | Tracks file changes, prompts the agent to invoke Snyk MCP tools at session end | `afterFileEdit`, `beforeMCPExecution`, `stop` | Python 3.8+, Snyk MCP server |
 
-## Installation
+## Choosing a Version
 
-### Step 1: Create Hooks Directory
+**Async CLI** is best when you want:
+- Scans running in the background while the agent keeps working
+- Vulnerability filtering to only agent-modified lines (ignores pre-existing issues)
+- Direct CLI-based scanning with no MCP dependency
+- Automatic fix loops that block the agent until issues are resolved
 
-```bash
-mkdir -p /path/to/project/.cursor/hooks
-```
+**Sync MCP** is best when you want:
+- A lightweight, single-file setup with no `lib/` dependencies
+- Scanning delegated to the Snyk MCP server (already connected to Cursor)
+- State tracking that clears automatically when the agent invokes scan tools
+- Simpler configuration with no Snyk CLI installation required
 
-### Step 2: Copy Configuration
+## How They Work
 
-```bash
-cp hooks.json /path/to/project/.cursor/
-
-cp snyk_sai_sast_sca_script.sh /path/to/project/.cursor/hooks/
-
-chmod +x /path/to/project/.cursor/hooks/snyk_sai_sast_sca_script.sh
-```
-
-### Step 3: Verify Structure
-
-Your project should have:
-```
-your-project/
-├── .cursor/
-│   ├── hooks.json
-│   └── hooks/
-│       └── snyk_sai_sast_sca_script.sh
-└── ... (your project files)
-```
-
-## Configuration
-
-### hooks.json
-
-```json
-{
-  "version": 1,
-  "hooks": {
-    "stop": [
-      {
-        "command": "./hooks/snyk_sai_sast_sca_script.sh"
-      }
-    ]
-  }
-}
-```
-
-The `stop` hook fires when:
-- AI agent marks task as complete
-- Session ends (timeout or user action)
-
-### Script Behavior
-
-The script:
-1. Reads JSON input from stdin (hook event data)
-2. Checks if this is the first completion (`loop_count`)
-3. Returns a `followup_message` prompting security scans
-
-### Loop Prevention
-
-The script checks `loop_count` to prevent infinite loops:
-- `loop_count == 0`: First completion, send follow-up
-- `loop_count > 0`: AI already responded to follow-up, exit
-
-## How It Works
+### Async CLI Version
 
 ```
-┌─────────────────────────────────────────┐
-│  AI completes task                      │
-└─────────────────┬───────────────────────┘
-                  │
-                  ▼
-┌─────────────────────────────────────────┐
-│  Cursor fires "stop" hook               │
-│                                         │
-│  Passes JSON to script:                 │
-│  {                                      │
-│    "hook_event_name": "stop",          │
-│    "status": "completed",              │
-│    "loop_count": 0                     │
-│  }                                      │
-└─────────────────┬───────────────────────┘
-                  │ (first completion)
-                  ▼
-┌─────────────────────────────────────────┐
-│  Script outputs:                        │
-│  {                                      │
-│    "followup_message": "If you changed │
-│     any code, run snyk_code_scan..."   │
-│  }                                      │
-└─────────────────┬───────────────────────┘
-                  │
-                  ▼
-┌─────────────────────────────────────────┐
-│  AI receives follow-up                  │
-│  AI runs appropriate scans              │
-│  AI fixes any issues found              │
-│  Session truly completes                │
-└─────────────────────────────────────────┘
+Agent edits a file
+  → afterFileEdit tracks modified line ranges, launches background scan
+  → Agent keeps working (non-blocking)
+
+Agent finishes responding
+  → stop hook waits for scan results
+  → Filters to only vulns on lines the agent modified
+  → New vulns found?  → block with fix instructions (up to 3 cycles)
+  → No new vulns?     → pass silently
+  → Scan failed?      → fall back to MCP snyk_code_scan prompt
 ```
 
+### Sync MCP Version
 
-## See Also
+```
+Agent edits a code file
+  → afterFileEdit records it as needing SAST scan
 
-- [Hooks Version Overview](../) - How the hook approach works
-- [Claude Code Implementation](../claude/sync_mcp_version/) - Alternative for Claude Code users
-- [Rule Version](../../rule_version/) - Alternative inline approach
-- [Cursor Hooks Documentation](https://docs.cursor.com/hooks)
+Agent edits a manifest file
+  → afterFileEdit records it as needing SCA scan
+
+Agent runs snyk_code_scan or snyk_sca_scan
+  → beforeMCPExecution clears the corresponding tracked state
+
+Agent finishes responding
+  → stop hook checks for unscanned changes
+  → Pending changes?  → send followup_message prompting scans
+  → All scanned?      → pass silently
+```

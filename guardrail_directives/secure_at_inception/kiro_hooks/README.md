@@ -16,7 +16,7 @@ A pre-commit hook system that prevents developers from committing code that intr
 
 ```bash
 # 1. Clone the studio-recipes repository (one time)
-git clone https://github.com/snyk-labs/studio-recipes.git
+git clone https://github.com/snyk/studio-recipes.git
 
 # 2. Run the installer from your project
 cd your-project
@@ -40,7 +40,7 @@ git commit -m "my changes"
 ```bash
 # Clone to a location accessible to all your projects
 cd ~/repos  # or wherever you keep repos
-git clone https://github.com/snyk-labs/studio-recipes.git
+git clone https://github.com/snyk/studio-recipes.git
 ```
 
 ### Step 2: Run the installer in your project

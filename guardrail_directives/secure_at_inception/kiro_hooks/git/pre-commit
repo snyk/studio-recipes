@@ -355,6 +355,38 @@ def get_sast_with_cache(
     return SastScanResult(success=True, vulnerabilities=all_vulns), cache_hits, cache_misses
 
 
+def resolve_installed_version(package_name: str, semver_range: str) -> str:
+    """
+    Resolve the actual installed version from package-lock.json.
+    Falls back to the semver range if resolution fails.
+    """
+    import json
+    
+    try:
+        # Try to read package-lock.json
+        lock_file = Path("package-lock.json")
+        if not lock_file.exists():
+            return semver_range.lstrip('^~>=<')
+        
+        with open(lock_file, 'r') as f:
+            lock_data = json.load(f)
+        
+        # Check in packages (lockfileVersion 2+)
+        if "packages" in lock_data:
+            pkg_key = f"node_modules/{package_name}"
+            if pkg_key in lock_data["packages"]:
+                return lock_data["packages"][pkg_key].get("version", semver_range.lstrip('^~>=<'))
+        
+        # Check in dependencies (lockfileVersion 1)
+        if "dependencies" in lock_data and package_name in lock_data["dependencies"]:
+            return lock_data["dependencies"][package_name].get("version", semver_range.lstrip('^~>=<'))
+        
+    except Exception:
+        pass  # Fall back to semver range
+    
+    return semver_range.lstrip('^~>=<')
+
+
 def get_sca_with_cache(
     staged: StagedChanges,
     cache: SnykCache
@@ -376,7 +408,8 @@ def get_sca_with_cache(
         if pkg_change.new_version is None:
             continue  # Skip removed packages
         
-        version = pkg_change.new_version.lstrip('^~>=<')
+        # Resolve actual installed version from package-lock.json
+        version = resolve_installed_version(pkg_name, pkg_change.new_version)
         cached = cache.get_sca_result(pkg_name, version)
         
         if cached and not NO_CACHE:

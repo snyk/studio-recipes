@@ -1,0 +1,27 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/snyk_secure_at_inception.py",
+            "statusMessage": "Tracking code changes for security scan..."
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/snyk_secure_at_inception.py",
+            "statusMessage": "Evaluating security scan results..."
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -21,7 +21,7 @@ Skills are a mechanism for teaching AI agents specialized workflows. A skill con
 | **[iac-security](./iac-security/)** | Infrastructure as Code security | IaC scanning requests |
 | **[sbom-analyzer](./sbom-analyzer/)** | Software Bill of Materials analysis | SBOM generation requests |
 | **[secure-at-inception](./secure-at-inception/)** | Real-time code security scanning | Code generation with security |
-| **[secure-dependency-advisor](./secure-dependency-advisor/)** | Dependency security evaluation | Package evaluation requests |
+| **[secure-dependency-health-check](./secure-dependency-health-check/)** | Package health check via `snyk_package_health_check` | "which package", "is X safe", "compare packages" |
 
 ## How Skills Are Invoked
 

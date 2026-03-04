@@ -9,12 +9,7 @@ description: |
   - User mentions "AI BOM", "AI inventory", or "ML security"
   - User is working with Python AI/ML projects (PyTorch, TensorFlow, HuggingFace)
   - User needs AI component compliance documentation
-allowed-tools:
-  - mcp_snyk_snyk_aibom
-  - Read
-  - Write
-  - Bash
-  - Grep
+allowed-tools: "mcp_snyk_snyk_aibom Read Write Bash Grep"
 license: Apache-2.0
 compatibility: |
   Requires Snyk MCP server connection and authenticated Snyk account.
@@ -38,10 +33,17 @@ Generate and analyze AI Bill of Materials (AIBOM) for Python projects to track A
 ## Quick Start
 
 ```
-1. Verify Python project with AI/ML dependencies
-2. Run snyk_aibom on project directory
-3. Review identified AI components
-4. Document findings for compliance/governance
+# Step 1: Generate AIBOM for the project
+mcp_snyk_snyk_aibom(path="/absolute/path/to/project")
+
+# Step 2: (Optional) Save AIBOM to file for documentation
+mcp_snyk_snyk_aibom(
+  path="/absolute/path/to/project",
+  json_file_output="/absolute/path/to/output/aibom.json"
+)
+
+# Step 3: Verify the returned JSON contains component entries before proceeding
+# Step 4: Summarize findings and flag license/risk issues
 ```
 
 ---
@@ -60,28 +62,16 @@ Generate and analyze AI Bill of Materials (AIBOM) for Python projects to track A
 
 ### Step 1.1: Verify Python Project
 
-Check for Python project indicators:
-- `requirements.txt`
-- `setup.py`
-- `pyproject.toml`
-- `Pipfile`
-- `.py` files
+Check for Python project indicators: `requirements.txt`, `setup.py`, `pyproject.toml`, `Pipfile`, or `.py` files.
+
+> **Error — Not a Python Project**: If no Python indicators are found, stop and report:
+> - Verify path contains Python files
+> - Check for `requirements.txt` or `pyproject.toml`
+> - This feature only supports Python projects
 
 ### Step 1.2: Check for AI/ML Indicators
 
-Look for common AI/ML dependencies:
-
-| Framework | Package Names |
-|-----------|---------------|
-| **PyTorch** | `torch`, `torchvision`, `torchaudio` |
-| **TensorFlow** | `tensorflow`, `tensorflow-gpu`, `keras` |
-| **HuggingFace** | `transformers`, `datasets`, `tokenizers` |
-| **Scikit-learn** | `scikit-learn`, `sklearn` |
-| **JAX** | `jax`, `jaxlib`, `flax` |
-| **MLflow** | `mlflow` |
-| **Weights & Biases** | `wandb` |
-| **OpenAI** | `openai` |
-| **LangChain** | `langchain`, `langchain-core` |
+Scan dependency files for known AI/ML packages — common examples include `torch`, `tensorflow`, `keras`, `transformers`, `datasets`, `scikit-learn`, `jax`, `openai`, `langchain`, `mlflow`, and `wandb`. This list is illustrative; use judgment for other AI/ML packages encountered.
 
 ### Step 1.3: Report if Not Applicable
 
@@ -89,12 +79,9 @@ If no AI components detected:
 
 ```
 ## AI Inventory Result
-
 **Project**: /path/to/project
 **Status**: No AI components detected
-
-This project does not appear to use AI/ML frameworks.
-AI BOM generation is not applicable.
+This project does not appear to use AI/ML frameworks. AI BOM generation is not applicable.
 ```
 
 ---
@@ -105,80 +92,78 @@ AI BOM generation is not applicable.
 
 ### Step 2.1: Run AIBOM Generation
 
-```
-Run snyk_aibom with:
-- path: <absolute path to Python project>
-```
-
-### Step 2.2: Save Output (Optional)
-
-To save the AIBOM for documentation:
+Invoke the `mcp_snyk_snyk_aibom` tool with the absolute path to the Python project:
 
 ```
-Run snyk_aibom with:
-- path: <project path>
-- json_file_output: <output file path>
+mcp_snyk_snyk_aibom(path="/absolute/path/to/project")
+```
+
+> **Error — Network Error**: If the tool cannot connect, report:
+> - Check internet connection and firewall (HTTPS must be allowed)
+> - Retry after a few minutes
+
+> **Error — Experimental Feature Not Enabled**: If access is denied, report:
+> - Contact Snyk support for experimental access
+> - Check organization settings and verify CLI version supports AIBOM
+
+### Step 2.2: Validate AIBOM Output
+
+Before proceeding, verify the returned JSON is valid and contains at least one component entry. If the response is empty or malformed, report the error and do not continue to Phase 3.
+
+### Step 2.3: Save Output (Optional)
+
+To persist the AIBOM as a file for documentation or downstream tooling:
+
+```
+mcp_snyk_snyk_aibom(
+  path="/absolute/path/to/project",
+  json_file_output="/absolute/path/to/output/aibom.json"
+)
 ```
 
 ---
 
 ## Phase 3: Analyze Components
 
-**Goal**: Understand and categorize AI components.
+**Goal**: Understand and categorize AI components from the validated AIBOM output.
 
 ### Step 3.1: Component Categories
 
-AIBOM identifies several types of AI components:
-
-| Category | Description | Examples |
-|----------|-------------|----------|
-| **Models** | Pre-trained ML models | GPT-4, BERT, ResNet |
-| **Datasets** | Training/evaluation data | ImageNet, COCO, GLUE |
-| **Frameworks** | ML/AI libraries | PyTorch, TensorFlow |
-| **Tools** | AI development tools | MLflow, Weights & Biases |
-| **Services** | AI API services | OpenAI API, Anthropic API |
+AIBOM identifies five component types: **Models**, **Datasets**, **Frameworks**, **Tools**, and **Services**.
 
 ### Step 3.2: Generate Summary Report
 
+Present findings using the structure below, populated with actual scan results:
+
 ```
 ## AI Component Inventory
-
-**Project**: my-ai-project
-**Scan Date**: 2024-01-15
+**Project**: <project name>
+**Scan Date**: <date>
 **Format**: CycloneDX v1.6
 
 ### Component Summary
-| Category | Count |
-|----------|-------|
-| AI Models | 3 |
-| Datasets | 2 |
-| Frameworks | 4 |
-| Tools | 2 |
-| **Total** | 11 |
+| Category  | Count |
+|-----------|-------|
+| AI Models | N     |
+| Datasets  | N     |
+| Frameworks| N     |
+| Tools     | N     |
+| **Total** | N     |
 
 ### AI Models Detected
-
 | Model | Source | License | Risk |
 |-------|--------|---------|------|
-| gpt-4 | OpenAI API | Proprietary | Review ToS |
-| bert-base-uncased | HuggingFace | Apache 2.0 | Low |
-| resnet50 | torchvision | BSD | Low |
+| <from scan results> | ... | ... | ... |
 
 ### Datasets Referenced
-
 | Dataset | Source | License | PII Risk |
 |---------|--------|---------|----------|
-| COCO | cocodataset.org | CC BY 4.0 | Low |
-| custom-training | Internal | N/A | Review |
+| <from scan results> | ... | ... | ... |
 
 ### Frameworks & Tools
-
 | Component | Version | License |
 |-----------|---------|---------|
-| torch | 2.1.0 | BSD |
-| transformers | 4.35.0 | Apache 2.0 |
-| openai | 1.3.0 | MIT |
-| mlflow | 2.9.0 | Apache 2.0 |
+| <from scan results> | ... | ... |
 ```
 
 ---
@@ -189,57 +174,15 @@ AIBOM identifies several types of AI components:
 
 ### Step 4.1: License Compliance
 
-Check AI component licenses:
-
-| License Type | Risk Level | Notes |
-|--------------|------------|-------|
-| Open source (MIT, Apache) | Low | Standard compliance |
-| Proprietary API | Medium | Review terms of service |
-| Unknown/Unclear | High | Investigate before use |
-| Research-only | High | May not allow commercial use |
+Flag components by risk level: **Low** (MIT, Apache), **Medium** (proprietary APIs — review terms of service), **High** (unknown/unclear licenses or research-only terms that may prohibit commercial use).
 
 ### Step 4.2: Data Privacy Concerns
 
-Flag potential PII or sensitive data:
-
-```
-## Data Privacy Assessment
-
-### Potential Concerns
-
-| Dataset/Model | Concern | Recommendation |
-|---------------|---------|----------------|
-| custom-training | Unknown data source | Document data provenance |
-| user-embeddings | May contain PII | Review data handling |
-| fine-tuned-bert | Training data unknown | Verify no PII in fine-tuning |
-
-### Recommendations
-1. Document data sources for all custom datasets
-2. Review PII handling for user-related data
-3. Implement data retention policies
-```
+Flag datasets or models where data provenance or PII handling is unclear. Recommend: documenting data sources, reviewing PII handling procedures, and verifying data retention policies.
 
 ### Step 4.3: Model Security
 
-Assess model-specific risks:
-
-```
-## Model Security Assessment
-
-### Risk Factors
-
-| Risk | Affected Models | Mitigation |
-|------|-----------------|------------|
-| Prompt injection | GPT-4 | Input validation |
-| Model extraction | Custom models | Access controls |
-| Adversarial inputs | ResNet50 | Input validation |
-| Bias/fairness | BERT, GPT-4 | Bias testing |
-
-### Recommendations
-1. Implement input validation for all model inputs
-2. Monitor for unusual query patterns
-3. Conduct bias testing before deployment
-```
+Assess model-specific risks: prompt injection (LLM-based models — mitigate with input validation), model extraction (custom/fine-tuned models — apply access controls), adversarial inputs (vision models — input validation), and bias/fairness (consider bias testing).
 
 ---
 
@@ -251,9 +194,8 @@ Assess model-specific risks:
 
 ```
 ## AI Compliance Report
-
-**Project**: my-ai-project
-**Generated**: 2024-01-15
+**Project**: <project name>
+**Generated**: <date>
 **Standard**: EU AI Act / Internal Governance
 
 ### AI System Classification
@@ -266,7 +208,7 @@ Assess model-specific risks:
 ### License Compliance
 - All components licensed: Yes/No
 - Commercial use permitted: Yes/No
-- Attribution required: List components
+- Attribution required: [list components]
 
 ### Data Governance
 - Data sources documented: Yes/No
@@ -289,119 +231,9 @@ Assess model-specific risks:
 
 ## Use Cases
 
-### Use Case 1: Pre-Deployment Audit
-
-```
-User: We need to audit AI components before production
-
-Process:
-1. Generate AIBOM for project
-2. Review all AI models and their licenses
-3. Check data sources and PII handling
-4. Document findings for audit trail
-```
-
-### Use Case 2: Regulatory Compliance
-
-```
-User: Prepare AI inventory for EU AI Act compliance
-
-Process:
-1. Generate comprehensive AIBOM
-2. Classify AI system risk level
-3. Document model capabilities and limitations
-4. Create compliance checklist
-```
-
-### Use Case 3: Third-Party AI Review
-
-```
-User: Review AI components in a vendor's software
-
-Process:
-1. Request AIBOM from vendor (or generate if source available)
-2. Analyze models for license compliance
-3. Assess data handling practices
-4. Document risks and mitigations
-```
-
----
-
-## Common AI/ML Packages
-
-### Deep Learning Frameworks
-
-| Package | Use Case | License |
-|---------|----------|---------|
-| `torch` | PyTorch deep learning | BSD |
-| `tensorflow` | TensorFlow deep learning | Apache 2.0 |
-| `jax` | Differentiable computing | Apache 2.0 |
-| `keras` | High-level neural networks | Apache 2.0 |
-
-### NLP & LLMs
-
-| Package | Use Case | License |
-|---------|----------|---------|
-| `transformers` | Pre-trained NLP models | Apache 2.0 |
-| `openai` | OpenAI API client | MIT |
-| `anthropic` | Anthropic API client | MIT |
-| `langchain` | LLM application framework | MIT |
-| `sentence-transformers` | Sentence embeddings | Apache 2.0 |
-
-### Computer Vision
-
-| Package | Use Case | License |
-|---------|----------|---------|
-| `torchvision` | Computer vision models | BSD |
-| `opencv-python` | Image processing | Apache 2.0 |
-| `pillow` | Image handling | HPND |
-| `ultralytics` | YOLO object detection | AGPL-3.0 |
-
-### ML Operations
-
-| Package | Use Case | License |
-|---------|----------|---------|
-| `mlflow` | ML lifecycle management | Apache 2.0 |
-| `wandb` | Experiment tracking | MIT |
-| `dvc` | Data version control | Apache 2.0 |
-| `ray` | Distributed computing | Apache 2.0 |
-
----
-
-## Error Handling
-
-### Not a Python Project
-
-```
-Error: No Python project found
-
-Solutions:
-1. Verify path contains Python files
-2. Check for requirements.txt or pyproject.toml
-3. This feature only supports Python projects
-```
-
-### Network Error
-
-```
-Error: Could not connect to analysis service
-
-Solutions:
-1. Check internet connection
-2. Verify firewall allows HTTPS
-3. Retry after a few minutes
-```
-
-### Experimental Feature Not Enabled
-
-```
-Error: AIBOM feature requires experimental access
-
-Solutions:
-1. Contact Snyk support for access
-2. Check organization settings
-3. Verify CLI version supports AIBOM
-```
+- **Pre-Deployment Audit**: Generate AIBOM → review licenses → check data/PII handling → document for audit trail
+- **Regulatory Compliance (EU AI Act)**: Generate AIBOM → classify AI system risk level → document capabilities/limitations → create compliance checklist
+- **Third-Party AI Review**: Generate AIBOM → analyze licenses → assess data handling → document risks and mitigations
 
 ---
 
@@ -411,4 +243,4 @@ Solutions:
 2. **Experimental**: Feature may change or have limitations
 3. **Network required**: Needs internet for analysis
 4. **CycloneDX output**: Generates CycloneDX v1.6 format only
-5. **Point-in-time**: Reflects current state - regenerate on updates
+5. **Point-in-time**: Reflects current state — regenerate on updates

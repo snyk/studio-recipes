@@ -1,0 +1,16 @@
+{
+  "name": "snyk-studio-recipes",
+  "owner": {
+    "name": "Snyk"
+  },
+  "metadata": {
+    "description": "Security recipes for AI coding assistants, powered by Snyk"
+  },
+  "plugins": [
+    {
+      "name": "snyk-secure-development",
+      "source": "plugins/cursor",
+      "description": "Snyk security scanning, remediation, and dependency health for Cursor"
+    }
+  ]
+}

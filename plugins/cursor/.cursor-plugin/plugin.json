@@ -1,0 +1,9 @@
+{
+  "name": "snyk-secure-development",
+  "version": "1.0.0",
+  "description": "Snyk security scanning, remediation, and dependency health for Cursor",
+  "author": {
+    "name": "Snyk"
+  },
+  "keywords": ["snyk", "security", "sast", "sca", "remediation"]
+}

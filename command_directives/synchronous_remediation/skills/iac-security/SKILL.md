@@ -2,19 +2,13 @@
 name: iac-security
 description: |
   Infrastructure as Code security scanning for Terraform, Kubernetes, CloudFormation, and Azure ARM.
-  Detects misconfigurations, security risks, and compliance violations before deployment. Use this skill when:
+  Detects misconfigurations, security risks, and compliance violations before deployment. Use when:
   - User asks to scan Terraform files or modules
   - User mentions "infrastructure security" or "IaC scan"
   - User is working with Kubernetes manifests
   - User asks about CloudFormation or ARM template security
   - Agent is generating or modifying infrastructure code
-allowed-tools:
-  - mcp_snyk_snyk_iac_scan
-  - Read
-  - Write
-  - Edit
-  - Bash
-  - Grep
+allowed-tools: "mcp_snyk_snyk_iac_scan Read Write Edit Bash Grep"
 license: Apache-2.0
 compatibility: |
   Requires Snyk MCP server connection and authenticated Snyk account.
@@ -46,16 +40,15 @@ Comprehensive security scanning for Infrastructure as Code to catch misconfigura
 
 ## Supported IaC Formats
 
-| Platform | File Types | Detection Method |
-|----------|-----------|------------------|
-| **Terraform** | `.tf`, `.tf.json` | HCL syntax |
-| **Terraform Plan** | JSON plan output | `terraform plan -out=plan && terraform show -json plan` |
-| **Terraform Variables** | `.tfvars` | Variable definitions |
-| **Kubernetes** | `.yaml`, `.yml` | `apiVersion` + `kind` fields |
-| **Helm** | Chart templates | `Chart.yaml` presence |
-| **AWS CloudFormation** | `.json`, `.yaml` | `AWSTemplateFormatVersion` |
-| **Azure ARM** | `.json` | `$schema` with ARM URL |
-| **Serverless Framework** | `serverless.yml` | Serverless structure |
+| Platform | File Types |
+|----------|-----------|
+| **Terraform** | `.tf`, `.tf.json`, `.tfvars` |
+| **Terraform Plan** | JSON plan output (`terraform show -json`) |
+| **Kubernetes** | `.yaml` / `.yml` with `apiVersion` + `kind` |
+| **Helm** | Chart templates (requires `Chart.yaml`) |
+| **AWS CloudFormation** | `.json` / `.yaml` with `AWSTemplateFormatVersion` |
+| **Azure ARM** | `.json` with `$schema` ARM URL |
+| **Serverless Framework** | `serverless.yml` |
 
 ---
 
@@ -63,35 +56,14 @@ Comprehensive security scanning for Infrastructure as Code to catch misconfigura
 
 **Goal**: Identify all IaC files that need scanning.
 
-### Step 1.1: Detect IaC Type
+Check for these indicators to confirm IaC type:
 
-Look for indicators:
+- **Terraform**: `.tf` files, `terraform.tfstate`, `provider` blocks
+- **Kubernetes**: YAML with `apiVersion`/`kind`, directories named `k8s`, `manifests`
+- **CloudFormation**: `AWSTemplateFormatVersion` key, `Resources` section with AWS types
+- **Azure ARM**: `$schema` containing `deploymentTemplate`
 
-**Terraform**:
-- Files with `.tf` extension
-- `terraform.tfstate` or `terraform.tfvars`
-- `provider` blocks in files
-
-**Kubernetes**:
-- YAML with `apiVersion` and `kind`
-- Directories named `k8s`, `kubernetes`, `manifests`
-- `Deployment`, `Service`, `ConfigMap` resources
-
-**CloudFormation**:
-- `AWSTemplateFormatVersion` in YAML/JSON
-- `template.yaml` or `template.json`
-- `Resources` section with AWS types
-
-**Azure ARM**:
-- `$schema` containing `deploymentTemplate`
-- `resources` array with ARM types
-
-### Step 1.2: Scope the Scan
-
-Determine scan boundaries:
-- Single file: Scan just that file
-- Directory: Scan all IaC in directory
-- Recursive: Scan directory and subdirectories
+Then determine scan scope: single file, directory, or recursive.
 
 ---
 
@@ -99,16 +71,14 @@ Determine scan boundaries:
 
 **Goal**: Run appropriate IaC security scan.
 
-### Step 2.1: Basic Scan
+### Basic Scan
 
 ```
 Run snyk_iac_scan with:
 - path: <directory or file path>
 ```
 
-### Step 2.2: Terraform-Specific Options
-
-For Terraform configurations:
+### Terraform with Variables
 
 ```
 Run snyk_iac_scan with:
@@ -116,22 +86,20 @@ Run snyk_iac_scan with:
 - var_file: <path to .tfvars if using variables>
 ```
 
-For Terraform plan analysis (more accurate):
+### Terraform Plan (more accurate)
 
-```
-# First generate plan
+```bash
 terraform plan -out=tfplan
 terraform show -json tfplan > tfplan.json
+```
 
-# Then scan the plan
+```
 Run snyk_iac_scan with:
 - path: tfplan.json
 - scan: "planned-values"  # or "resource-changes"
 ```
 
-### Step 2.3: Custom Rules
-
-If organization has custom policies:
+### Custom Rules
 
 ```
 Run snyk_iac_scan with:
@@ -145,7 +113,7 @@ Run snyk_iac_scan with:
 
 **Goal**: Understand and categorize misconfigurations.
 
-### Step 3.1: Severity Assessment
+### Severity Assessment
 
 | Severity | Risk Level | Examples |
 |----------|------------|----------|
@@ -154,7 +122,7 @@ Run snyk_iac_scan with:
 | **Medium** | Moderate risk | Missing logging, broad IAM |
 | **Low** | Best practice | Missing tags, suboptimal config |
 
-### Step 3.2: Generate Summary
+### Generate Summary
 
 ```
 ## IaC Security Scan Results
@@ -179,42 +147,24 @@ Run snyk_iac_scan with:
 | aws_rds_instance.db | Encryption not enabled | database.tf:12 |
 ```
 
-### Step 3.3: Categorize by Domain
+### Categorize by Domain
 
 Group issues for easier remediation:
 
-**Network Security**:
-- Security groups
-- Network ACLs
-- Load balancer config
-- VPC settings
-
-**Data Protection**:
-- Encryption at rest
-- Encryption in transit
-- Backup configuration
-- Key management
-
-**Access Control**:
-- IAM policies
-- Service accounts
-- RBAC settings
-- API permissions
-
-**Logging & Monitoring**:
-- CloudTrail/audit logs
-- Access logging
-- Alerting config
+- **Network Security**: Security groups, Network ACLs, Load balancer config, VPC settings
+- **Data Protection**: Encryption at rest/in transit, Backup configuration, Key management
+- **Access Control**: IAM policies, Service accounts, RBAC settings, API permissions
+- **Logging & Monitoring**: CloudTrail/audit logs, Access logging, Alerting config
 
 ---
 
 ## Phase 4: Remediation
 
-**Goal**: Provide secure configuration fixes.
+**Goal**: Provide secure configuration fixes. Apply the pattern below to each finding; representative examples follow.
 
 ### Terraform Fixes
 
-#### S3 Bucket - Block Public Access
+#### S3 Bucket — Block Public Access
 
 ```hcl
 # Insecure
@@ -237,7 +187,7 @@ resource "aws_s3_bucket_public_access_block" "data" {
 }
 ```
 
-#### Security Group - Restrict Access
+#### Security Group — Restrict Access
 
 ```hcl
 # Insecure - open to world
@@ -250,50 +200,35 @@ resource "aws_security_group" "web" {
   }
 }
 
-# Secure - restricted to VPN
+# Secure - restricted to VPN/internal range
 resource "aws_security_group" "web" {
   ingress {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["10.0.0.0/8"]  # Internal only
+    cidr_blocks = ["10.0.0.0/8"]
   }
 }
 ```
 
-#### RDS - Enable Encryption
+#### RDS — Enable Encryption
 
 ```hcl
-# Insecure
-resource "aws_db_instance" "main" {
-  engine         = "postgres"
-  instance_class = "db.t3.micro"
-}
-
 # Secure
 resource "aws_db_instance" "main" {
-  engine               = "postgres"
-  instance_class       = "db.t3.micro"
-  storage_encrypted    = true
-  kms_key_id           = aws_kms_key.rds.arn
-  deletion_protection  = true
+  engine              = "postgres"
+  instance_class      = "db.t3.micro"
+  storage_encrypted   = true
+  kms_key_id          = aws_kms_key.rds.arn
+  deletion_protection = true
 }
 ```
 
 ### Kubernetes Fixes
 
-#### Pod Security - Non-Root User
+#### Pod Security — Non-Root User & Resource Limits
 
 ```yaml
-# Insecure
-apiVersion: v1
-kind: Pod
-spec:
-  containers:
-  - name: app
-    image: myapp
-
-# Secure
 apiVersion: v1
 kind: Pod
 spec:
@@ -309,33 +244,18 @@ spec:
       capabilities:
         drop:
           - ALL
+    resources:
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+      requests:
+        cpu: "200m"
+        memory: "256Mi"
 ```
 
-#### Resource Limits
+#### Network Policy — Restrict Traffic
 
 ```yaml
-# Insecure - no limits
-containers:
-- name: app
-  image: myapp
-
-# Secure - with limits
-containers:
-- name: app
-  image: myapp
-  resources:
-    limits:
-      cpu: "500m"
-      memory: "512Mi"
-    requests:
-      cpu: "200m"
-      memory: "256Mi"
-```
-
-#### Network Policy
-
-```yaml
-# Add network policy to restrict traffic
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -356,15 +276,9 @@ spec:
 
 ### CloudFormation Fixes
 
-#### S3 Bucket Encryption
+#### S3 Bucket — Encryption & Public Access Block
 
 ```yaml
-# Insecure
-Resources:
-  DataBucket:
-    Type: AWS::S3::Bucket
-
-# Secure
 Resources:
   DataBucket:
     Type: AWS::S3::Bucket
@@ -387,27 +301,21 @@ Resources:
 
 **Goal**: Confirm fixes are effective.
 
-### Step 5.1: Re-scan After Changes
-
-After applying fixes:
+### Re-scan After Changes
 
 ```
 Run snyk_iac_scan with:
 - path: <same directory>
 ```
 
-### Step 5.2: Terraform Plan Scan
-
-For Terraform, scan the plan after changes:
+For Terraform, regenerate and scan the plan:
 
 ```bash
 terraform plan -out=tfplan.new
 terraform show -json tfplan.new > tfplan.new.json
-
-# Scan the new plan
 ```
 
-### Step 5.3: Report Improvements
+### Report Improvements
 
 ```
 ## Fix Verification
@@ -422,39 +330,6 @@ terraform show -json tfplan.new > tfplan.new.json
 - 1 High: Third-party module - opened issue
 - 6 Medium: Accepted risk (documented)
 ```
-
----
-
-## Common Misconfigurations by Platform
-
-### AWS (Terraform/CloudFormation)
-
-| Issue | Risk | Fix |
-|-------|------|-----|
-| S3 public access | Data leak | Block public access |
-| Unencrypted EBS | Data at rest | Enable encryption |
-| Open security groups | Network attack | Restrict CIDR |
-| Missing CloudTrail | No audit | Enable logging |
-| Excessive IAM | Privilege escalation | Least privilege |
-
-### Kubernetes
-
-| Issue | Risk | Fix |
-|-------|------|-----|
-| Running as root | Container escape | runAsNonRoot |
-| No resource limits | Denial of service | Set limits |
-| Privileged containers | Host access | Remove privileged |
-| No network policy | Lateral movement | Add network policy |
-| Secrets in env | Exposure | Use secrets mount |
-
-### Azure (ARM)
-
-| Issue | Risk | Fix |
-|-------|------|-----|
-| Storage public access | Data leak | Disable public |
-| SQL no TDE | Data at rest | Enable TDE |
-| No NSG rules | Network attack | Add NSG |
-| Missing diagnostics | No visibility | Enable logging |
 
 ---
 
@@ -492,38 +367,11 @@ For organization-specific requirements:
 
 ## Error Handling
 
-### Terraform State Issues
-
-```
-Error: Could not read Terraform state
-
-Solutions:
-1. Ensure terraform init has been run
-2. Check state backend is accessible
-3. Scan .tf files directly instead of plan
-```
-
-### Invalid HCL
-
-```
-Error: Invalid HCL syntax
-
-Solutions:
-1. Run terraform validate first
-2. Check for syntax errors
-3. Ensure all variables are defined
-```
-
-### Plan File Issues
-
-```
-Error: Could not parse plan file
-
-Solutions:
-1. Regenerate plan with terraform show -json
-2. Ensure Terraform version compatibility
-3. Check plan file is valid JSON
-```
+| Error | Solutions |
+|-------|-----------|
+| **Could not read Terraform state** | Run `terraform init`; check state backend; scan `.tf` files directly |
+| **Invalid HCL syntax** | Run `terraform validate`; check syntax; ensure all variables are defined |
+| **Could not parse plan file** | Regenerate with `terraform show -json`; check Terraform version compatibility; verify JSON validity |
 
 ---
 

@@ -96,7 +96,30 @@ class PackageSecurityDelta:
     def summary(self) -> str:
         """Human-readable summary of the change."""
         if self.is_new_package:
-            return f"NEW PACKAGE: {self.new_critical} critical, {self.new_high} high"
+            base = f"NEW PACKAGE: {self.new_critical} critical, {self.new_high} high"
+            
+            # Add info about transitive dependencies with high/critical vulns
+            transitive_vulns = [v for v in self.new_vulnerabilities if not v.is_direct]
+            if transitive_vulns:
+                # Group by package
+                by_package = {}
+                for v in transitive_vulns:
+                    if v.severity.lower() in ["critical", "high"]:
+                        pkg = v.package_name
+                        if pkg not in by_package:
+                            by_package[pkg] = {"critical": 0, "high": 0}
+                        by_package[pkg][v.severity.lower()] += 1
+                
+                if by_package:
+                    transitive_parts = []
+                    for pkg, counts in sorted(by_package.items()):
+                        if counts["critical"] > 0 or counts["high"] > 0:
+                            transitive_parts.append(f"{pkg} ({counts['critical']}C/{counts['high']}H)")
+                    
+                    if transitive_parts:
+                        base += f" (from: {', '.join(transitive_parts)})"
+            
+            return base
         
         crit_delta = self.new_critical - self.old_critical
         high_delta = self.new_high - self.old_high
@@ -248,6 +271,7 @@ def evaluate_package_change(
     Evaluate security impact of a single package version change.
     
     Compares vulnerability counts between old and new versions.
+    Includes transitive dependencies for both new and updated packages.
     
     Args:
         package_change: The package change from git diff
@@ -258,9 +282,9 @@ def evaluate_package_change(
     """
     pkg_name = package_change.name
     
-    # Get vulnerabilities for new version from current scan
-    new_vulns = current_scan.get_vulns_for_package(pkg_name)
-    new_counts = current_scan.count_severity_for_package(pkg_name)
+    # Get vulnerabilities for new version INCLUDING transitive dependencies
+    new_vulns = current_scan.get_vulns_for_package_tree(pkg_name)
+    new_counts = current_scan.count_severity_for_package_tree(pkg_name)
     
     delta = PackageSecurityDelta(
         package_name=pkg_name,

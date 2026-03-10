@@ -123,6 +123,32 @@ class ScaScanResult:
             "medium": sum(1 for v in vulns if v.severity.lower() == "medium"),
             "low": sum(1 for v in vulns if v.severity.lower() == "low"),
         }
+    
+    def get_vulns_for_package_tree(self, package_name: str) -> List[DependencyVulnerability]:
+        """
+        Get all vulnerabilities for a package and its transitive dependencies.
+        
+        Includes vulnerabilities where the package appears anywhere in the dependency path.
+        For example, if package_name is "express", this returns:
+        - Direct express vulnerabilities
+        - Vulnerabilities in qs (if express depends on qs)
+        - Vulnerabilities in fresh (if express depends on fresh)
+        etc.
+        """
+        return [
+            v for v in self.vulnerabilities 
+            if any(package_name in dep for dep in v.dependency_path)
+        ]
+    
+    def count_severity_for_package_tree(self, package_name: str) -> Dict[str, int]:
+        """Count vulnerabilities by severity for a package and its transitive dependencies."""
+        vulns = self.get_vulns_for_package_tree(package_name)
+        return {
+            "critical": sum(1 for v in vulns if v.severity.lower() == "critical"),
+            "high": sum(1 for v in vulns if v.severity.lower() == "high"),
+            "medium": sum(1 for v in vulns if v.severity.lower() == "medium"),
+            "low": sum(1 for v in vulns if v.severity.lower() == "low"),
+        }
 
 
 def run_snyk_cli(args: List[str], timeout: int = 300) -> tuple[int, str, str]:

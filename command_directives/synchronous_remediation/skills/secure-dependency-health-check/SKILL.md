@@ -9,12 +9,7 @@ description: |
   - User asks "is this package safe?"
   - User asks for a "secure alternative" to a package
   - User mentions "dependency health", "package chooser", or "package security"
-allowed-tools:
-  - mcp_snyk_snyk_package_health_check
-  - Read
-  - Write
-  - Bash
-  - Grep
+allowed-tools: "mcp_snyk_snyk_package_health_check Read Write Bash Grep"
 license: Apache-2.0
 compatibility: |
   Requires Snyk MCP server connection and authenticated Snyk account.
@@ -46,15 +41,7 @@ When asked to recommend a package:
 
 **Goal**: Clarify what the user needs before recommending packages.
 
-### Step 1.1: Parse User Request
-
-Extract from user input:
-- **Functionality needed**: What should the package do?
-- **Ecosystem**: Node.js, Python, Java, etc.
-- **Constraints**: Size limits, compatibility needs
-- **Current packages**: Are they replacing something?
-
-### Step 1.2: Identify Candidates
+### Step 1.1: Identify Candidates
 
 If user provided candidates:
 - Note each package name and version (if specified)
@@ -72,18 +59,18 @@ If user needs suggestions:
 
 ### Step 2.1: Run Package Health Check for Each Candidate
 
-For each candidate package, run `snyk_package_health_check` with the package name, version, and ecosystem (`npm`, `pypi`, `maven`, `nuget`, or `golang`). The tool returns a comprehensive assessment including:
-- **`overall_rating`**: "Healthy" or "Review recommended"
-- **`security`**: vulnerability counts by severity (critical/high/medium/low), whether direct vulnerabilities exist, and a security rating
-- **`maintenance`**: lifecycle status, latest release date, whether the package is archived or forked, and a maintenance rating ("Healthy", "Sustainable", or "Inactive")
+For each candidate package, run `snyk_package_health_check` with the package name, version, and ecosystem (`npm`, `pypi`, `maven`, `nuget`, or `golang`). Key fields returned:
+- **`overall_rating`**: "Healthy" or "Review recommended" — use as the primary evaluation metric
+- **`security`**: vulnerability counts by severity (critical/high/medium/low) and a security rating
+- **`maintenance`**: lifecycle status, latest release date, `is_archived` flag, and a maintenance rating ("Healthy", "Sustainable", or "Inactive")
 - **`popularity`**: download counts, dependent packages/repos, and a popularity rating
-- **`community`**: stargazers count, presence of README/contributing/code of conduct/funding files, and a community rating ("Active" or "Sustainable")
+- **`community`**: stargazers count, community file presence, and a rating ("Active" or "Sustainable")
 - **`latest_version`**: the most recent published version
 - **`recommendation`**: a human-readable summary of the overall assessment
 
 ### Step 2.2: Review Tool Results
 
-Use the `overall_rating` returned by `snyk_package_health_check` as the primary evaluation metric. Surface the following from the tool response for comparison:
+Surface the following from the tool response for comparison:
 - Overall rating ("Healthy" vs "Review recommended")
 - Security rating and vulnerability breakdown by severity
 - Maintenance rating and lifecycle status (check `is_archived`, `latest_release_published_at`)
@@ -165,14 +152,7 @@ Recommend running `snyk_sca_scan` after installation to verify the full dependen
 
 ### Step 4.2: Monitoring Recommendation
 
-```
-## Ongoing Security
-
-1. **Lock file**: Ensure package-lock.json / yarn.lock is committed
-2. **Monitoring**: Consider `snyk monitor` for continuous tracking
-3. **Updates**: Check for security updates monthly
-4. **Alerts**: Set up vulnerability notifications
-```
+Advise committing lock files, enabling vulnerability notifications, and checking for security updates regularly.
 
 ---
 

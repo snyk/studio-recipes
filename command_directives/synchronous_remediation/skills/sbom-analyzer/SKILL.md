@@ -8,12 +8,7 @@ description: |
   - User needs to validate a supplier's SBOM
   - User wants to check SBOM for vulnerabilities
   - User asks about CycloneDX or SPDX formats
-allowed-tools:
-  - mcp_snyk_snyk_sbom_scan
-  - Read
-  - Write
-  - Bash
-  - Grep
+allowed-tools: "mcp_snyk_snyk_sbom_scan Read Write Bash Grep"
 license: Apache-2.0
 compatibility: |
   Requires Snyk MCP server connection and authenticated Snyk account.
@@ -37,7 +32,7 @@ Analyze Software Bill of Materials to identify vulnerabilities in declared compo
 ```
 1. Receive or locate SBOM file (CycloneDX or SPDX)
 2. Validate SBOM format and completeness
-3. Run snyk_sbom_scan for vulnerability analysis
+3. Run mcp_snyk_snyk_sbom_scan for vulnerability analysis
 4. Generate risk report with prioritized findings
 5. Provide remediation guidance
 ```
@@ -51,7 +46,7 @@ Analyze Software Bill of Materials to identify vulnerabilities in declared compo
 | **CycloneDX** | 1.4, 1.5, 1.6 | `.json` |
 | **SPDX** | 2.3 | `.json` |
 
-**Note**: `snyk_sbom_scan` requires Package URLs (purls) in the SBOM for component identification.
+**Note**: `mcp_snyk_snyk_sbom_scan` requires Package URLs (purls) in the SBOM for component identification.
 
 ---
 
@@ -93,11 +88,11 @@ Check for required elements:
 | Licenses | `licenses` | `licenseConcluded` | Recommended |
 | Checksums | `hashes` | `checksums` | Recommended |
 
-**\*** PackageURLs are required for Snyk to identify vulnerabilities.
+**\*** Package URLs are required for Snyk to identify vulnerabilities.
 
 ### Step 1.3: Report Validation Issues
 
-If SBOM is incomplete:
+If SBOM is incomplete, produce a report in this format:
 
 ```
 ## SBOM Validation Results
@@ -127,30 +122,27 @@ If SBOM is incomplete:
 
 ### Step 2.1: Run SBOM Scan
 
-```
-Run snyk_sbom_scan with:
-- file: <path to SBOM file>
-- severity_threshold: "medium" (or as configured)
-```
-
-### Step 2.2: Advanced Options
-
-For organization-specific scans:
+Call the tool directly:
 
 ```
-Run snyk_sbom_scan with:
-- file: <path to SBOM file>
-- org: <organization ID for policies>
-- severity_threshold: "high"
+mcp_snyk_snyk_sbom_scan(file="path/to/sbom.json", severity_threshold="medium")
+```
+
+### Step 2.2: Organization-Scoped Scan
+
+To apply org-specific policies:
+
+```
+mcp_snyk_snyk_sbom_scan(file="path/to/sbom.json", org="<org-id>", severity_threshold="high")
 ```
 
 ---
 
 ## Phase 3: Risk Analysis
 
-**Goal**: Generate comprehensive risk report.
+**Goal**: Generate a comprehensive risk report from scan results.
 
-### Step 3.1: Vulnerability Summary
+Produce a single consolidated report covering summary, critical findings, and an overall risk score:
 
 ```
 ## SBOM Security Analysis
@@ -165,60 +157,33 @@ Run snyk_sbom_scan with:
 | Total Vulnerabilities | 47 |
 
 ### Severity Breakdown
-| Severity | Count | Percentage |
-|----------|-------|------------|
-| Critical | 3 | 6% |
-| High | 12 | 26% |
-| Medium | 18 | 38% |
-| Low | 14 | 30% |
-```
+| Severity | Count |
+|----------|-------|
+| Critical | 3 |
+| High | 12 |
+| Medium | 18 |
+| Low | 14 |
 
-### Step 3.2: Critical Findings
-
-```
 ### Critical Vulnerabilities
-
-| Component | Version | Vulnerability | CVSS | Exploited |
-|-----------|---------|---------------|------|-----------|
+| Component | Version | CVE | CVSS | Exploited |
+|-----------|---------|-----|------|-----------|
 | log4j-core | 2.14.1 | CVE-2021-44228 | 10.0 | Yes |
 | spring-core | 5.3.17 | CVE-2022-22965 | 9.8 | Yes |
 | jackson-databind | 2.9.10 | CVE-2020-36518 | 9.8 | No |
 
-### Immediate Actions Required
-1. **log4j-core**: Upgrade to 2.17.1+ or remove
-2. **spring-core**: Upgrade to 5.3.18+ or 6.0.0+
-3. **jackson-databind**: Upgrade to 2.13.0+
-```
-
-### Step 3.3: Risk Scoring
-
-Calculate overall risk score:
-
-```
-## Risk Assessment
-
 ### Risk Score: 78/100 (High Risk)
-
-**Calculation**:
-- Critical vulns: 3 × 25 = 75 points deducted
-- High vulns: 12 × 5 = 60 points deducted  
-- (Capped at 100)
-
-### Risk Factors
 - ⚠️ 2 vulnerabilities with known exploits
 - ⚠️ 3 critical severity issues
-- ⚠️ Components from untrusted sources: 0
-- ✓ All components have valid purls: No (15 missing)
+- ✓ Components from untrusted sources: 0
 
-### Recommendation
-**Do not integrate** this software until critical vulnerabilities are addressed.
+**Recommendation**: Do not integrate this software until critical vulnerabilities are addressed.
 ```
 
 ---
 
 ## Phase 4: Remediation Guidance
 
-**Goal**: Provide actionable remediation steps.
+**Goal**: Provide actionable upgrade recommendations and vendor communication.
 
 ### Step 4.1: Upgrade Recommendations
 
@@ -226,46 +191,43 @@ Calculate overall risk score:
 ## Recommended Actions
 
 ### Priority 1: Critical (Must Fix)
-
 | Component | Current | Fixed Version | Notes |
 |-----------|---------|---------------|-------|
-| log4j-core | 2.14.1 | 2.17.1+ | Log4Shell - critical |
+| log4j-core | 2.14.1 | 2.17.1+ | Log4Shell |
 | spring-core | 5.3.17 | 5.3.18+ | Spring4Shell |
 
 ### Priority 2: High (Should Fix)
-
 | Component | Current | Fixed Version | Notes |
 |-----------|---------|---------------|-------|
 | lodash | 4.17.15 | 4.17.21 | Prototype pollution |
 | axios | 0.21.1 | 1.6.0+ | SSRF vulnerability |
 
 ### Priority 3: Medium (Plan to Fix)
-
 | Component | Current | Fixed Version | Notes |
 |-----------|---------|---------------|-------|
 | minimist | 1.2.5 | 1.2.8+ | Prototype pollution |
 ```
 
-### Step 4.2: Vendor Communication Template
+### Step 4.2: Vendor Communication
+
+Draft a message to the vendor using this template (populate with actual findings):
 
 ```
-## Communication Template for Vendor
-
 Subject: Security Vulnerabilities in Software SBOM
 
 Dear [Vendor],
 
-During our security review of [Product Name], we identified the following 
+During our security review of [Product Name], we identified the following
 vulnerabilities in the provided SBOM:
 
 **Critical Issues (Require Immediate Action)**:
-1. log4j-core 2.14.1 - CVE-2021-44228 (Log4Shell)
-2. spring-core 5.3.17 - CVE-2022-22965 (Spring4Shell)
+1. [Component] [Version] - [CVE] ([Name])
+2. [Component] [Version] - [CVE] ([Name])
 
 **Request**:
-1. Please provide updated software with patched versions
-2. Please provide updated SBOM reflecting the changes
-3. Expected timeline for remediation
+1. Provide updated software with patched versions
+2. Provide updated SBOM reflecting the changes
+3. Confirm expected remediation timeline
 
 We require resolution of critical issues before proceeding with integration.
 
@@ -275,90 +237,23 @@ Regards,
 
 ---
 
-## Use Cases
-
-### Use Case 1: Vendor SBOM Validation
-
-```
-User: Analyze this SBOM from our vendor
-
-Process:
-1. Validate SBOM format and completeness
-2. Scan for vulnerabilities
-3. Generate risk report
-4. Prepare vendor communication if issues found
-```
-
-### Use Case 2: Compliance Check
-
-```
-User: We need to verify SBOM compliance for audit
-
-Process:
-1. Check SBOM completeness (all required fields)
-2. Verify license information is present
-3. Scan for known vulnerabilities
-4. Generate compliance report
-```
-
-### Use Case 3: Software Supply Chain Assessment
-
-```
-User: Assess the risk of integrating this third-party software
-
-Process:
-1. Analyze SBOM for vulnerability exposure
-2. Check for end-of-life components
-3. Evaluate license compatibility
-4. Calculate overall risk score
-5. Provide go/no-go recommendation
-```
-
----
-
 ## SBOM Generation (Internal Projects)
 
-If you need to generate an SBOM for your own project:
-
-### Using Snyk CLI
+To generate an SBOM for your own project using the Snyk CLI, then scan it:
 
 ```bash
 # Generate CycloneDX SBOM
 snyk sbom --format=cyclonedx1.5+json > sbom.json
 
-# Generate SPDX SBOM  
+# Generate SPDX SBOM
 snyk sbom --format=spdx2.3+json > sbom.json
 ```
 
-### Then Scan the Generated SBOM
+Then scan the generated SBOM:
 
 ```
-Run snyk_sbom_scan with:
-- file: sbom.json
+mcp_snyk_snyk_sbom_scan(file="sbom.json")
 ```
-
----
-
-## Compliance Standards
-
-### SBOM Requirements by Standard
-
-| Standard | SBOM Required | Format | Depth |
-|----------|---------------|--------|-------|
-| **EO 14028** | Yes | Any | All components |
-| **NTIA Minimum** | Yes | Any | Direct + transitive |
-| **CRA (EU)** | Yes | Preferred CycloneDX | All components |
-| **NIST SP 800-218** | Recommended | Any | Direct |
-
-### Minimum Elements (NTIA)
-
-- Supplier name
-- Component name
-- Version
-- Unique identifier (purl)
-- Dependency relationship
-- Author of SBOM data
-- Timestamp
 
 ---
 
@@ -401,28 +296,10 @@ Convert SBOM to supported version if possible.
 
 ---
 
-## Best Practices
-
-### For Receiving SBOMs
-
-1. **Require purls**: Without package URLs, vulnerabilities can't be identified
-2. **Validate on receipt**: Check completeness before storing
-3. **Regular updates**: Request updated SBOMs with each release
-4. **Track history**: Maintain SBOM history for audit
-
-### For Generating SBOMs
-
-1. **Include all dependencies**: Direct and transitive
-2. **Add metadata**: Licenses, checksums, suppliers
-3. **Update regularly**: Generate with each build
-4. **Sign SBOMs**: Use digital signatures for integrity
-
----
-
 ## Constraints
 
 1. **Requires purls**: Components without package URLs cannot be scanned
 2. **JSON only**: XML format not currently supported
-3. **Version limits**: Only specific CycloneDX/SPDX versions
+3. **Version limits**: Only specific CycloneDX/SPDX versions supported
 4. **Network required**: Vulnerability database lookup needs connectivity
-5. **Point-in-time**: SBOM reflects a specific version - rescan on updates
+5. **Point-in-time**: SBOM reflects a specific version — rescan on updates

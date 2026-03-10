@@ -47,6 +47,40 @@ LOG_DIR = os.environ.get("SNYK_HOOK_LOG_DIR", "/tmp")
 
 
 # =============================================================================
+# PATH VALIDATION
+# =============================================================================
+
+def safe_open_within_base(file_path: Path, base_dir: Path, mode: str = 'r'):
+    """
+    Safely open a file after validating it's within the base directory.
+    
+    Prevents path traversal attacks by ensuring the resolved path
+    stays within the allowed base directory.
+    
+    Args:
+        file_path: The path to the file to open
+        base_dir: The base directory that file_path must be within
+        mode: File open mode (default: 'r')
+        
+    Returns:
+        File handle
+        
+    Raises:
+        ValueError: If path would escape the base directory
+    """
+    resolved_path = file_path.resolve()
+    resolved_base = base_dir.resolve()
+    
+    try:
+        resolved_path.relative_to(resolved_base)
+    except ValueError:
+        raise ValueError(f"Path traversal detected: {file_path} resolves outside of {resolved_base}")
+    
+    # Path is validated via relative_to() check above - safe to open
+    return open(resolved_path, mode)  # noqa: SIM115
+
+
+# =============================================================================
 # LOGGING
 # =============================================================================
 
@@ -257,33 +291,86 @@ def scan_sca(workspace: str) -> Dict[str, Any]:
         log(f"SCA scan failed: {result.error_message}")
         return {"status": "error", "error": result.error_message}
     
-    # Group vulnerabilities by package
+    # Group vulnerabilities by TOP-LEVEL package (first in dependency path)
+    # This captures the full dependency tree for each top-level package
     packages: Dict[str, Dict[str, Any]] = {}
     
+    # First, initialize entries for all top-level packages from package.json
+    # This ensures we cache even packages with 0 vulnerabilities
+    try:
+        workspace_path = Path(workspace).resolve()
+        pkg_json_path = workspace_path / "package.json"
+        
+        if pkg_json_path.exists():
+            with safe_open_within_base(pkg_json_path, workspace_path) as f:
+                pkg_json = json.load(f)
+                deps = pkg_json.get("dependencies", {})
+                
+                # Get actual installed versions from node_modules
+                for pkg_name in deps:
+                    try:
+                        # Validate package name doesn't contain path traversal
+                        if ".." in pkg_name or pkg_name.startswith("/"):
+                            log(f"Skipping suspicious package name: {pkg_name}")
+                            continue
+                        
+                        pkg_path = workspace_path / "node_modules" / pkg_name / "package.json"
+                        
+                        if pkg_path.exists():
+                            with safe_open_within_base(pkg_path, workspace_path) as pf:
+                                pkg_info = json.load(pf)
+                                version = pkg_info.get("version")
+                                if version:
+                                    key = f"{pkg_name}@{version}"
+                                    packages[key] = {
+                                        "package": pkg_name,
+                                        "version": version,
+                                        "vulnerabilities": [],
+                                        "severity_counts": {"critical": 0, "high": 0, "medium": 0, "low": 0}
+                                    }
+                    except ValueError as e:
+                        log(f"Path validation error for {pkg_name}: {e}")
+                    except Exception:
+                        pass
+    except ValueError as e:
+        log(f"Path validation error: {e}")
+    except Exception:
+        pass
+    
+    # Now add vulnerabilities to the appropriate packages
     for v in result.vulnerabilities:
-        pkg = v.package_name
-        version = v.installed_version
-        
-        key = f"{pkg}@{version}"
-        if key not in packages:
-            packages[key] = {
-                "package": pkg,
-                "version": version,
-                "vulnerabilities": [],
-                "severity_counts": {"critical": 0, "high": 0, "medium": 0, "low": 0}
-            }
-        
-        packages[key]["vulnerabilities"].append({
-            "id": v.id,
-            "title": v.title,
-            "severity": v.severity,
-            "fixed_version": v.fixed_version,
-            "cve": v.cve
-        })
-        
-        sev = v.severity.lower()
-        if sev in packages[key]["severity_counts"]:
-            packages[key]["severity_counts"][sev] += 1
+        # Find the top-level package from dependency path
+        if len(v.dependency_path) >= 2:
+            top_level = v.dependency_path[1]  # e.g., 'express@4.14.1'
+            
+            if '@' in top_level:
+                parts = top_level.rsplit('@', 1)
+                if len(parts) == 2:
+                    pkg, version = parts
+                    key = f"{pkg}@{version}"
+                    
+                    if key not in packages:
+                        packages[key] = {
+                            "package": pkg,
+                            "version": version,
+                            "vulnerabilities": [],
+                            "severity_counts": {"critical": 0, "high": 0, "medium": 0, "low": 0}
+                        }
+                    
+                    packages[key]["vulnerabilities"].append({
+                        "id": v.id,
+                        "title": v.title,
+                        "severity": v.severity,
+                        "fixed_version": v.fixed_version,
+                        "cve": v.cve,
+                        "package_name": v.package_name,
+                        "installed_version": v.installed_version,
+                        "dependency_path": v.dependency_path
+                    })
+                    
+                    sev = v.severity.lower()
+                    if sev in packages[key]["severity_counts"]:
+                        packages[key]["severity_counts"][sev] += 1
     
     # Cache each package
     total_vulns = 0
@@ -365,4 +452,3 @@ if __name__ == "__main__":
         import traceback
         log(traceback.format_exc())
         sys.exit(1)
-

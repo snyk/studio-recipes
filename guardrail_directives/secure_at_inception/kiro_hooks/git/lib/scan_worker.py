@@ -77,7 +77,6 @@ def safe_open_within_base(file_path: Path, base_dir: Path, mode: str = 'r'):
         raise ValueError(f"Path traversal detected: {file_path} resolves outside of {resolved_base}")
     
     # Path is validated via relative_to() check above - safe to open
-    # deepcode ignore PT: path traversal prevented by relative_to() validation above
     return open(resolved_path, mode)  # noqa: SIM115
 
 

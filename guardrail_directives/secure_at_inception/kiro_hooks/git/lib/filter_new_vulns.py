@@ -102,12 +102,14 @@ class PackageSecurityDelta:
         high_delta = self.new_high - self.old_high
         
         parts = []
-        if crit_delta != 0:
-            sign = "+" if crit_delta > 0 else ""
-            parts.append(f"critical: {sign}{crit_delta}")
-        if high_delta != 0:
-            sign = "+" if high_delta > 0 else ""
-            parts.append(f"high: {sign}{high_delta}")
+        if crit_delta > 0:
+            parts.append(f"critical: {crit_delta} more")
+        elif crit_delta < 0:
+            parts.append(f"critical: {abs(crit_delta)} fewer")
+        if high_delta > 0:
+            parts.append(f"high: {high_delta} more")
+        elif high_delta < 0:
+            parts.append(f"high: {abs(high_delta)} fewer")
         
         if not parts:
             return "no significant change"

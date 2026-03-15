@@ -473,12 +473,31 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
                 f"{len(unevaluated_file_paths)} unevaluated file(s)"
             )
         else:
-            log_to_panel(f"[SAI] Scan failed (status: {scan_status}), falling back to MCP")
+            scan_info = get_scan_completion_info(workspace)
+            error_detail = scan_info.get("error_detail", "") if scan_info else ""
             file_list = ", ".join(Path(f).name for f in code_files)
-            fallback = (
-                "Run snyk_code_scan on the current directory to check for "
-                f"security vulnerabilities in the modified code files: {file_list}."
-            )
+
+            if scan_status == "auth_required":
+                log_to_panel(f"[SAI] Snyk CLI not authenticated: {error_detail}" if error_detail
+                             else "[SAI] Snyk CLI not authenticated")
+                fallback = (
+                    "The Snyk CLI is not authenticated. Run snyk_auth to authenticate, "
+                    "then run snyk_code_scan on the current directory to check for "
+                    f"security vulnerabilities in the modified code files: {file_list}."
+                )
+            elif scan_status == "snyk_not_found":
+                log_to_panel("[SAI] Snyk CLI not found, falling back to MCP")
+                fallback = (
+                    "Run snyk_code_scan on the current directory to check for "
+                    f"security vulnerabilities in the modified code files: {file_list}."
+                )
+            else:
+                log_to_panel(f"[SAI] Scan failed (status: {scan_status}), falling back to MCP")
+                fallback = (
+                    "Run snyk_code_scan on the current directory to check for "
+                    f"security vulnerabilities in the modified code files: {file_list}."
+                )
+
             if manifest_files:
                 manifest_list = ", ".join(Path(f).name for f in manifest_files)
                 fallback += (

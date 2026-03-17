@@ -304,7 +304,7 @@ def evaluate_package_change(
         old_scan = run_sca_scan_for_package(pkg_name, package_change.old_version.lstrip('^~'))
         
         if old_scan.success:
-            old_counts = old_scan.count_severity_for_package(pkg_name)
+            old_counts = old_scan.count_severity_for_package_tree(pkg_name)
             delta.old_critical = old_counts["critical"]
             delta.old_high = old_counts["high"]
         else:
@@ -341,7 +341,7 @@ def evaluate_sca_changes(
         
         if skip_old_version_scan:
             # Quick mode: only check if new version has critical/high
-            new_counts = sca_result.count_severity_for_package(pkg_name)
+            new_counts = sca_result.count_severity_for_package_tree(pkg_name)
             
             delta = PackageSecurityDelta(
                 package_name=pkg_name,
@@ -351,7 +351,7 @@ def evaluate_sca_changes(
                 old_high=0,
                 new_critical=new_counts["critical"],
                 new_high=new_counts["high"],
-                new_vulnerabilities=sca_result.get_vulns_for_package(pkg_name)
+                new_vulnerabilities=sca_result.get_vulns_for_package_tree(pkg_name)
             )
         else:
             # Full mode: compare with old version

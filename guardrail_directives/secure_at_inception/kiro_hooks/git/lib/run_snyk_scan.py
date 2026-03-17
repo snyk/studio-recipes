@@ -110,20 +110,6 @@ class ScaScanResult:
     def high_count(self) -> int:
         return sum(1 for v in self.vulnerabilities if v.severity.lower() == "high")
     
-    def get_vulns_for_package(self, package_name: str) -> List[DependencyVulnerability]:
-        """Get all vulnerabilities affecting a specific package."""
-        return [v for v in self.vulnerabilities if v.package_name == package_name]
-    
-    def count_severity_for_package(self, package_name: str) -> Dict[str, int]:
-        """Count vulnerabilities by severity for a specific package."""
-        vulns = self.get_vulns_for_package(package_name)
-        return {
-            "critical": sum(1 for v in vulns if v.severity.lower() == "critical"),
-            "high": sum(1 for v in vulns if v.severity.lower() == "high"),
-            "medium": sum(1 for v in vulns if v.severity.lower() == "medium"),
-            "low": sum(1 for v in vulns if v.severity.lower() == "low"),
-        }
-    
     def get_vulns_for_package_tree(self, package_name: str) -> List[DependencyVulnerability]:
         """
         Get all vulnerabilities for a package and its transitive dependencies.

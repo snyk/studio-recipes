@@ -123,7 +123,7 @@ class ScaScanResult:
         """
         return [
             v for v in self.vulnerabilities 
-            if any(package_name in dep for dep in v.dependency_path)
+            if any(package_name == dep.split('@')[0] for dep in v.dependency_path)
         ]
     
     def count_severity_for_package_tree(self, package_name: str) -> Dict[str, int]:

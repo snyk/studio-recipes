@@ -2,17 +2,13 @@
 name: drift-detector
 description: |
   Detect infrastructure drift between Terraform state and actual cloud resources. Identifies
-  unmanaged resources, manual changes, and configuration drift. Use this skill when:
+  unmanaged resources, manual changes, and configuration drift. Use when:
   - User asks to check for infrastructure drift
   - User wants to find unmanaged cloud resources
   - User mentions "drift detection" or "Terraform drift"
   - User asks to compare cloud state to IaC
   - User wants to audit infrastructure changes
-allowed-tools:
-  - Bash
-  - Read
-  - Write
-  - Grep
+allowed-tools: "Bash Read Write Grep"
 license: Apache-2.0
 compatibility: |
   Requires Snyk CLI installed and authenticated. Uses `snyk iac describe` CLI command
@@ -35,12 +31,12 @@ Detect, track, and resolve infrastructure drift between Terraform state and actu
 
 ## Quick Start
 
-```
-1. Configure cloud provider credentials
-2. Run drift detection against Terraform state
-3. Analyze unmanaged and changed resources
-4. Generate remediation plan
-5. Update Terraform or remove drift
+```bash
+# Basic drift scan against a local Terraform state file
+snyk iac describe --from=tfstate://terraform.tfstate
+
+# Output as JSON for further analysis
+snyk iac describe --from=tfstate://terraform.tfstate --json > drift-report.json
 ```
 
 ---
@@ -59,6 +55,8 @@ Detect, track, and resolve infrastructure drift between Terraform state and actu
 | **AWS** | AWS credentials (profile, env vars, or IAM role) |
 | **Azure** | Azure CLI login or service principal |
 | **GCP** | Application default credentials or service account |
+
+For a full list of supported resource types per provider, see `SERVICES.md`.
 
 ---
 
@@ -165,72 +163,28 @@ snyk iac describe \
 ```
 ## Infrastructure Drift Report
 
-**Scan Date**: 2024-01-15
-**Terraform State**: s3://my-bucket/prod.tfstate
-**Cloud Provider**: AWS (us-east-1)
+Scan Date: 2024-01-15
+Terraform State: s3://my-bucket/prod.tfstate
+Cloud Provider: AWS (us-east-1)
 
 ### Summary
-| Category | Count | Risk |
-|----------|-------|------|
-| Unmanaged Resources | 12 | High |
-| Changed Resources | 5 | Medium |
-| Missing Resources | 2 | Low |
-| **Total Drift** | 19 | - |
+- Unmanaged Resources: 12 (High)
+- Changed Resources:    5  (Medium)
+- Missing Resources:    2  (Low)
+- Total Drift:         19
 
 ### Unmanaged Resources (Not in Terraform)
-
-| Resource Type | Resource ID | Risk | Action |
-|---------------|-------------|------|--------|
-| aws_s3_bucket | prod-logs-manual | High | Import or delete |
-| aws_security_group | sg-temp-access | Critical | Review and remove |
-| aws_iam_user | admin-john | High | Import or remove |
-| aws_ec2_instance | i-temp-server | Medium | Import or terminate |
+- aws_s3_bucket      | prod-logs-manual   | High     | Import or delete
+- aws_security_group | sg-temp-access     | Critical | Review and remove
 
 ### Changed Resources (Modified Outside Terraform)
-
-| Resource | Terraform Value | Actual Value | Risk |
-|----------|-----------------|--------------|------|
-| aws_security_group.web | ingress: [443] | ingress: [443, 22] | High |
-| aws_s3_bucket.data | versioning: true | versioning: false | Medium |
-| aws_rds_instance.main | multi_az: true | multi_az: false | Critical |
-
-### Missing Resources (Deleted Outside Terraform)
-
-| Resource | Last State | Notes |
-|----------|------------|-------|
-| aws_lambda_function.old | v1.0.0 | May be intentional |
-| aws_sns_topic.alerts | Created 2023 | Verify if needed |
+- aws_security_group.web | ingress: [443]   → ingress: [443, 22]  | High
+- aws_rds_instance.main  | multi_az: true   → multi_az: false      | Critical
 ```
 
 ### Step 3.3: Risk Assessment
 
-```
-## Risk Assessment
-
-### Critical Issues (Immediate Action)
-
-1. **Security Group Modified**: Port 22 (SSH) opened to 0.0.0.0/0
-   - Resource: aws_security_group.web
-   - Risk: Unauthorized access
-   - Action: Revert change immediately
-
-2. **RDS Multi-AZ Disabled**: Production database no longer HA
-   - Resource: aws_rds_instance.main
-   - Risk: Single point of failure
-   - Action: Re-enable via Terraform
-
-### High Risk Issues
-
-1. **Unmanaged Admin User**: IAM user not in Terraform
-   - Resource: aws_iam_user.admin-john
-   - Risk: Uncontrolled access
-   - Action: Import to Terraform or remove
-
-2. **Unmanaged Security Group**: Temporary access group
-   - Resource: aws_security_group.temp-access
-   - Risk: Potential security hole
-   - Action: Review and remove
-```
+Prioritize **Critical** issues first (e.g. SSH opened to 0.0.0.0/0, production HA disabled), then **High** risk issues (e.g. unmanaged IAM users or security groups). Document the affected resource, the risk, and the intended remediation action for each finding.
 
 ---
 
@@ -350,79 +304,11 @@ Schedule regular drift audits:
 
 ## Common Scenarios
 
-### Scenario 1: Post-Incident Audit
+For detailed worked examples, see `EXAMPLES.md`. Brief references:
 
-```
-User: Check what changed after the security incident
-
-Process:
-1. Run drift detection with JSON output
-2. Filter for security-related resources
-3. Identify unauthorized changes
-4. Generate incident report
-5. Remediate and document
-```
-
-### Scenario 2: Pre-Deployment Check
-
-```
-User: Verify no drift before deploying changes
-
-Process:
-1. Run drift detection
-2. Fail deployment if drift exists
-3. Resolve drift first
-4. Then proceed with deployment
-```
-
-### Scenario 3: Shadow IT Discovery
-
-```
-User: Find all resources not managed by Terraform
-
-Process:
-1. Run drift detection
-2. Filter to unmanaged resources
-3. Categorize by owner/purpose
-4. Import or remove as appropriate
-```
-
----
-
-## Supported Services
-
-### AWS Services
-
-| Service | Resource Types |
-|---------|----------------|
-| EC2 | instances, security groups, EBS, AMIs |
-| S3 | buckets, policies, configurations |
-| IAM | users, roles, policies, groups |
-| RDS | instances, clusters, snapshots |
-| Lambda | functions, layers, aliases |
-| VPC | VPCs, subnets, route tables, NAT gateways |
-| EKS | clusters, node groups |
-| DynamoDB | tables, global tables |
-| CloudFront | distributions |
-| Route53 | zones, records |
-
-### Azure Services
-
-| Service | Resource Types |
-|---------|----------------|
-| Compute | VMs, scale sets, disks |
-| Storage | accounts, containers |
-| Network | VNets, NSGs, load balancers |
-| AKS | clusters, node pools |
-
-### GCP Services
-
-| Service | Resource Types |
-|---------|----------------|
-| Compute | instances, disks, images |
-| Storage | buckets, IAM |
-| GKE | clusters, node pools |
-| IAM | service accounts, policies |
+- **Post-Incident Audit**: Run drift detection with JSON output, filter for security-related resources, identify unauthorized changes, generate incident report, remediate and document.
+- **Pre-Deployment Check**: Run drift detection, fail deployment if drift exists, resolve drift first, then proceed with deployment.
+- **Shadow IT Discovery**: Run drift detection, filter to unmanaged resources, categorize by owner/purpose, import or remove as appropriate.
 
 ---
 

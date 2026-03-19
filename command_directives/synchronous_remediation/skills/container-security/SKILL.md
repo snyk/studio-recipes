@@ -2,19 +2,13 @@
 name: container-security
 description: |
   Comprehensive container image security scanning and remediation. Analyzes Docker images for 
-  OS package vulnerabilities, application dependencies, and Dockerfile best practices. Use this skill when:
+  OS package vulnerabilities, application dependencies, and Dockerfile best practices. Use when:
   - User asks to scan a Docker image or container
   - User mentions "container security" or "image vulnerabilities"
   - User wants to secure a Dockerfile
   - User asks about base image security
   - Agent is working with Docker, Kubernetes, or container deployments
-allowed-tools:
-  - mcp_snyk_snyk_container_scan
-  - Read
-  - Write
-  - Edit
-  - Bash
-  - Grep
+allowed-tools: "mcp_snyk_snyk_container_scan Read Write Edit Bash Grep"
 license: Apache-2.0
 compatibility: |
   Requires Snyk MCP server connection and authenticated Snyk account.
@@ -47,19 +41,9 @@ Guide for comprehensive container image security analysis, covering OS vulnerabi
 
 ## Phase 1: Image Identification
 
-**Goal**: Determine what container image to scan.
-
 ### Step 1.1: Parse User Input
 
-Identify the image reference:
-
-| Format | Example | Notes |
-|--------|---------|-------|
-| Local image | `myapp:latest` | Must exist in Docker daemon |
-| Registry image | `nginx:1.25` | Pulls from Docker Hub |
-| Private registry | `gcr.io/project/app:v1` | May need auth |
-| Image ID | `sha256:abc123...` | Exact image hash |
-| Archive | `./image.tar` | Saved image archive |
+Extract the image reference from the user's request (e.g., `myapp:latest`, `nginx:1.25`, `gcr.io/project/app:v1`, `sha256:abc123...`, or `./image.tar`).
 
 ### Step 1.2: Determine Scan Scope
 
@@ -72,48 +56,31 @@ Ask or infer:
 
 ## Phase 2: Execute Scan
 
-**Goal**: Run comprehensive container security scan.
-
 ### Step 2.1: Basic Scan
 
-```
-Run snyk_container_scan with:
-- image: <image name or path>
-```
+Invoke `mcp_snyk_snyk_container_scan` with:
+- `image`: the image name or path
 
 ### Step 2.2: Advanced Scan Options
 
-For more comprehensive analysis:
-
-```
-Run snyk_container_scan with:
-- image: <image name>
-- file: <path to Dockerfile>  # Better remediation advice
-- app_vulns: true             # Scan app dependencies
-- severity_threshold: "high"   # Filter results
-```
+For more comprehensive analysis, invoke `mcp_snyk_snyk_container_scan` with:
+- `image`: the image name
+- `file`: path to Dockerfile (enables better remediation advice)
+- `app_vulns`: `true` (scan app dependencies)
+- `severity_threshold`: `"high"` (filter to high/critical only)
 
 ### Step 2.3: Base Image Analysis
 
-To understand inherited vs. added vulnerabilities:
+To isolate inherited vs. added vulnerabilities:
 
-```
-Run snyk_container_scan with:
-- image: <image name>
-- exclude_base_image_vulns: true  # See only what you added
-```
-
-Then run again without the flag to see full picture.
+1. Invoke `mcp_snyk_snyk_container_scan` with `image` and `exclude_base_image_vulns: true` — shows only vulnerabilities your layers added.
+2. Invoke again without that flag — shows the full picture including base OS.
 
 ---
 
 ## Phase 3: Analyze Results
 
-**Goal**: Understand and categorize vulnerabilities.
-
 ### Step 3.1: Categorize Findings
-
-Container scan results include multiple vulnerability sources:
 
 | Source | Description | Your Control |
 |--------|-------------|--------------|
@@ -149,27 +116,15 @@ Container scan results include multiple vulnerability sources:
 
 ### Step 3.3: Identify Fix Strategies
 
-For each vulnerability category:
+**OS Packages**: Update package in Dockerfile, upgrade base image, or use distroless/minimal base.
 
-**OS Packages**:
-- Update package in Dockerfile
-- Upgrade base image
-- Use distroless/minimal base
+**App Dependencies**: Update in source manifest and rebuild image with updated dependencies.
 
-**App Dependencies**:
-- Update in source manifest
-- Rebuild image with updated dependencies
-
-**No Fix Available**:
-- Document accepted risk
-- Consider alternative package
-- Wait for upstream fix
+**No Fix Available**: Document accepted risk, consider alternative package, or wait for upstream fix.
 
 ---
 
 ## Phase 4: Remediation Guidance
-
-**Goal**: Provide actionable fixes.
 
 ### Step 4.1: Base Image Upgrades
 
@@ -214,17 +169,9 @@ For individual package vulnerabilities:
 # Add before your application layer
 RUN apk update && apk upgrade openssl
 ```
-
-### Alternative (Alpine)
-```dockerfile
-# Update all packages
-RUN apk update && apk upgrade --no-cache
-```
 ```
 
 ### Step 4.3: Application Dependency Fixes
-
-For vulnerabilities in app dependencies:
 
 ```
 ## Application Dependency Fix
@@ -234,73 +181,43 @@ For vulnerabilities in app dependencies:
 **Fix Version**: 4.17.21
 
 ### Steps
-1. Update package.json:
-   "lodash": "^4.17.21"
-
-2. Rebuild image:
-   docker build -t myapp:fixed .
-
-3. Verify fix:
-   snyk container test myapp:fixed
+1. Update package.json: "lodash": "^4.17.21"
+2. Rebuild image: docker build -t myapp:fixed .
+3. Verify fix: snyk container test myapp:fixed
 ```
 
 ### Step 4.4: Dockerfile Best Practices
 
-Recommend improvements:
+Key improvements to recommend:
 
-```
-## Dockerfile Security Improvements
-
-### 1. Use Specific Base Image Tags
 ```dockerfile
-# Bad - unpredictable
-FROM node:latest
-
-# Good - specific version
+# 1. Pin specific tags (not latest)
 FROM node:20.10.0-alpine3.19
-```
 
-### 2. Run as Non-Root
-```dockerfile
-# Add before CMD
+# 2. Run as non-root
 RUN addgroup -g 1001 appgroup && \
     adduser -u 1001 -G appgroup -D appuser
 USER appuser
-```
 
-### 3. Use Multi-Stage Builds
-```dockerfile
-# Build stage
+# 3. Multi-stage builds (smaller image, fewer vulns)
 FROM node:20 AS builder
 WORKDIR /app
 COPY . .
 RUN npm ci && npm run build
 
-# Production stage - smaller, fewer vulns
 FROM node:20-alpine
 COPY --from=builder /app/dist /app
 CMD ["node", "/app/index.js"]
-```
 
-### 4. Minimize Installed Packages
-```dockerfile
-# Bad
-RUN apt-get install -y curl wget vim nano
-
-# Good - only what's needed
+# 4. Minimize packages
 RUN apt-get install -y --no-install-recommends curl
-```
 ```
 
 ---
 
 ## Phase 5: Verification
 
-**Goal**: Confirm fixes were effective.
-
 ### Step 5.1: Rebuild Image
-
-After making Dockerfile changes:
 
 ```bash
 # Rebuild with no cache to ensure fresh packages
@@ -309,11 +226,9 @@ docker build --no-cache -t myapp:fixed .
 
 ### Step 5.2: Re-scan
 
-```
-Run snyk_container_scan with:
-- image: myapp:fixed
-- file: ./Dockerfile
-```
+Invoke `mcp_snyk_snyk_container_scan` with:
+- `image`: `myapp:fixed`
+- `file`: `./Dockerfile`
 
 ### Step 5.3: Compare Results
 
@@ -334,30 +249,46 @@ Run snyk_container_scan with:
 
 ---
 
-## Base Image Recommendations
+## End-to-End Example
 
-### By Language/Runtime
+**User**: "Scan my app:latest image and help me fix it."
 
-| Runtime | Recommended Base | Notes |
-|---------|------------------|-------|
-| Node.js | `node:20-alpine` | Smallest, but missing some libs |
-| Node.js | `node:20-slim` | Debian-based, more compatible |
-| Python | `python:3.12-slim` | Good balance |
-| Python | `python:3.12-alpine` | Smallest |
-| Java | `eclipse-temurin:21-jre-alpine` | JRE only |
-| Go | `gcr.io/distroless/static` | No shell, minimal attack surface |
-| .NET | `mcr.microsoft.com/dotnet/aspnet:8.0-alpine` | Runtime only |
+**Step 1** — Run the scan:
 
-### Distroless Options
+```
+mcp_snyk_snyk_container_scan(image="app:latest", app_vulns=true)
+```
 
-For maximum security:
+**Step 2** — Tool returns (example output):
+```json
+{
+  "summary": "Found 18 vulnerabilities (2 Critical, 6 High, 10 Medium)",
+  "baseImage": "node:16-alpine",
+  "vulnerabilities": [
+    { "severity": "critical", "pkgName": "openssl", "version": "3.0.8",
+      "fixedIn": "3.0.12", "id": "CVE-2024-0001" },
+    { "severity": "high", "pkgName": "lodash", "version": "4.17.15",
+      "fixedIn": "4.17.21", "id": "CVE-2021-23337" }
+  ]
+}
+```
 
-| Base | Use Case | Pros | Cons |
-|------|----------|------|------|
-| `gcr.io/distroless/static` | Go, Rust (static) | No OS, tiny | No shell, no debugging |
-| `gcr.io/distroless/base` | Most languages | Minimal OS | Limited packages |
-| `gcr.io/distroless/java` | Java apps | JRE only | No shell |
-| `gcr.io/distroless/nodejs` | Node.js | Node only | No npm |
+**Step 3** — Deliver structured response:
+```
+## Scan Results: app:latest
+Base image: node:16-alpine | 2 Critical · 6 High · 10 Medium
+
+### Immediate Actions
+1. Upgrade base image → node:20-alpine (eliminates ~14 vulns)
+2. Pin openssl ≥ 3.0.12 in Dockerfile (CVE-2024-0001, Critical)
+3. Update lodash to ^4.17.21 in package.json (CVE-2021-23337, High)
+
+### Dockerfile patch
+FROM node:20-alpine        # was node:16-alpine
+RUN apk add --no-cache openssl>=3.0.12
+```
+
+**Step 4** — After applying fixes, rebuild and re-scan to confirm resolution.
 
 ---
 
@@ -366,10 +297,7 @@ For maximum security:
 ### Scenario 1: "Scan my Docker image"
 
 ```
-User: Scan my app:latest image
-
-Process:
-1. Run snyk_container_scan with image: "app:latest"
+1. Invoke snyk_container_scan(image="app:latest")
 2. Summarize findings by category
 3. Recommend highest-priority fixes
 4. Provide Dockerfile changes
@@ -378,12 +306,9 @@ Process:
 ### Scenario 2: "Secure my Dockerfile"
 
 ```
-User: Help me secure this Dockerfile
-
-Process:
 1. Review Dockerfile for best practices
 2. Build image if not already built
-3. Scan resulting image
+3. Invoke snyk_container_scan(image=..., file="./Dockerfile")
 4. Combine scan results with Dockerfile review
 5. Provide unified remediation
 ```
@@ -391,9 +316,6 @@ Process:
 ### Scenario 3: "Find a more secure base image"
 
 ```
-User: My base image has too many vulnerabilities
-
-Process:
 1. Identify current base image and vulnerabilities
 2. Scan alternative base images
 3. Compare vulnerability counts
@@ -402,40 +324,29 @@ Process:
 
 ---
 
+## Base Image Quick Reference
+
+| Runtime | Recommended Base | Notes |
+|---------|------------------|-------|
+| Node.js | `node:20-alpine` | Smallest, may lack some libs |
+| Node.js | `node:20-slim` | Debian-based, more compatible |
+| Python | `python:3.12-slim` | Good balance |
+| Python | `python:3.12-alpine` | Smallest |
+| Java | `eclipse-temurin:21-jre-alpine` | JRE only |
+| Go | `gcr.io/distroless/static` | No shell, minimal attack surface |
+| .NET | `mcr.microsoft.com/dotnet/aspnet:8.0-alpine` | Runtime only |
+
+**Distroless options** (`gcr.io/distroless/`): `static` (Go/Rust), `base` (most languages), `java`, `nodejs` — all offer minimal attack surface with no shell.
+
+---
+
 ## Error Handling
 
-### Image Not Found
-
-```
-Error: Image not found locally
-
-Solutions:
-1. Pull from registry: docker pull <image>
-2. Check image name spelling
-3. Verify image exists in registry
-```
-
-### Registry Authentication
-
-```
-Error: Authentication required
-
-Solutions:
-1. Log in to registry: docker login <registry>
-2. Check credentials are valid
-3. Verify access permissions
-```
-
-### Scan Timeout
-
-```
-Error: Scan timed out
-
-Solutions:
-1. Image may be very large - retry
-2. Pull image locally first, then scan
-3. Scan archive instead of registry
-```
+| Error | Solutions |
+|-------|-----------|
+| Image not found locally | `docker pull <image>` · check name spelling · verify registry access |
+| Registry authentication required | `docker login <registry>` · verify credentials and permissions |
+| Scan timed out | Retry · pull image locally first · scan a `.tar` archive instead |
 
 ---
 

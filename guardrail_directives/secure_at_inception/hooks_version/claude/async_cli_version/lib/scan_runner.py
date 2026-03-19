@@ -13,9 +13,11 @@ The Stop hook calls wait_for_scan() which polls for the completion marker,
 then reads results (including parsed vulnerabilities) from scan.done.
 """
 
+import glob
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -153,6 +155,68 @@ def parse_sarif_results(json_output: str) -> List[Dict[str, Any]]:
 
 
 # =============================================================================
+# PATH RESOLUTION
+# =============================================================================
+
+def _augment_path_for_snyk(env: Dict[str, str]) -> None:
+    """Ensure the snyk binary is discoverable on PATH.
+
+    IDE-spawned subprocesses often lack shell profile additions (nvm, volta).
+    Probes common install locations and appends the matching bin directory.
+    """
+    if shutil.which("snyk", path=env.get("PATH", "")):
+        return
+
+    candidates: List[str] = []
+
+    nvm_dir = env.get("NVM_DIR", os.path.expanduser("~/.nvm"))
+    nvm_node_bins = sorted(
+        glob.glob(os.path.join(nvm_dir, "versions", "node", "*", "bin")),
+        reverse=True,
+    )
+    candidates.extend(nvm_node_bins)
+
+    volta_bin = os.path.expanduser("~/.volta/bin")
+    candidates.append(volta_bin)
+
+    candidates.extend(["/usr/local/bin", "/opt/homebrew/bin"])
+
+    for bin_dir in candidates:
+        if os.path.isfile(os.path.join(bin_dir, "snyk")):
+            env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            return
+
+
+# =============================================================================
+# AUTH TOKEN RESOLUTION
+# =============================================================================
+
+def _ensure_snyk_token(env: Dict[str, str]) -> None:
+    """Inject SNYK_TOKEN into env from the Snyk CLI config file if available.
+
+    Covers legacy API-key auth (``api`` field) so the worker subprocess
+    doesn't depend on the snyk binary to resolve the token.  OAuth tokens
+    (``INTERNAL_OAUTH_TOKEN_STORAGE``) are read natively by the CLI from
+    the config file and don't need to be passed via env.
+    """
+    if env.get("SNYK_TOKEN"):
+        return
+
+    config_dir = os.environ.get(
+        "XDG_CONFIG_HOME", os.path.expanduser("~/.config")
+    )
+    config_path = os.path.join(config_dir, "configstore", "snyk.json")
+    try:
+        with open(config_path, "r") as f:
+            config = json.load(f)
+        api_key = config.get("api")
+        if api_key and isinstance(api_key, str):
+            env["SNYK_TOKEN"] = api_key
+    except (json.JSONDecodeError, IOError, FileNotFoundError):
+        pass
+
+
+# =============================================================================
 # BACKGROUND SCAN LAUNCHER
 # =============================================================================
 
@@ -170,6 +234,8 @@ def launch_background_scan(workspace: str) -> bool:
 
     worker_script = str(Path(__file__).parent.resolve() / "scan_worker.py")
     env = os.environ.copy()
+    _augment_path_for_snyk(env)
+    _ensure_snyk_token(env)
     env["SAI_WORKSPACE"] = workspace
     env["SAI_CACHE_DIR"] = get_cache_dir(workspace)
     env["SAI_LIB_DIR"] = str(Path(__file__).parent.resolve())

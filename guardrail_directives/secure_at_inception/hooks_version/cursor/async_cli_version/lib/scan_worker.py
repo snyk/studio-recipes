@@ -4,7 +4,7 @@ Scan Worker
 ===========
 
 Background subprocess that runs a Snyk CLI scan and writes results
-directly to the scan.done completion marker.
+directly to the {type}.done completion marker.
 
 Launched by scan_runner.launch_background_scan() as a detached process.
 Configuration is passed via environment variables.
@@ -13,6 +13,7 @@ Environment variables (set by scan_runner):
 - SAI_WORKSPACE: Path to the workspace being scanned
 - SAI_CACHE_DIR: Path to the cache directory
 - SAI_LIB_DIR: Path to the lib directory (for imports)
+- SAI_SCAN_TYPE: "code" (default) or "sca"
 """
 
 import json
@@ -26,6 +27,7 @@ from pathlib import Path
 WORKSPACE = ""
 CACHE_DIR = ""
 LIB_DIR = str(Path(__file__).parent.resolve())
+SCAN_TYPE = "code"
 PID_FILE = ""
 DONE_FILE = ""
 LOG_FILE = ""
@@ -36,7 +38,7 @@ def log(msg):
         return
     try:
         with open(LOG_FILE, "a") as f:
-            f.write(f"[{datetime.now().isoformat()}] {msg}\n")
+            f.write(f"[{datetime.now().isoformat()}] [{SCAN_TYPE}] {msg}\n")
     except Exception:
         pass
 
@@ -67,7 +69,7 @@ def finish(status, started_at=None, vulnerabilities=None, error_detail=None):
 
 
 def main():
-    global WORKSPACE, CACHE_DIR, LIB_DIR, PID_FILE, DONE_FILE, LOG_FILE
+    global WORKSPACE, CACHE_DIR, LIB_DIR, SCAN_TYPE, PID_FILE, DONE_FILE, LOG_FILE
 
     try:
         WORKSPACE = os.environ["SAI_WORKSPACE"]
@@ -77,16 +79,17 @@ def main():
         sys.exit(1)
 
     LIB_DIR = os.environ.get("SAI_LIB_DIR", str(Path(__file__).parent.resolve()))
+    SCAN_TYPE = os.environ.get("SAI_SCAN_TYPE", "code")
 
-    PID_FILE = os.path.join(CACHE_DIR, "scan.pid")
-    DONE_FILE = os.path.join(CACHE_DIR, "scan.done")
-    LOG_FILE = os.path.join(CACHE_DIR, "scan.log")
+    PID_FILE = os.path.join(CACHE_DIR, f"{SCAN_TYPE}.pid")
+    DONE_FILE = os.path.join(CACHE_DIR, f"{SCAN_TYPE}.done")
+    LOG_FILE = os.path.join(CACHE_DIR, f"{SCAN_TYPE}.log")
 
     sys.path.insert(0, LIB_DIR)
-    from scan_runner import parse_sarif_results
+    from scan_runner import parse_sarif_results, parse_sca_results
 
     started_at = datetime.now().isoformat()
-    log("Scan worker started")
+    log(f"Scan worker started (type={SCAN_TYPE})")
 
     if os.path.exists(DONE_FILE):
         os.remove(DONE_FILE)
@@ -122,9 +125,14 @@ def main():
         finish("snyk_not_found", started_at=started_at)
         return
 
+    if SCAN_TYPE == "sca":
+        cmd = [snyk_bin, "test", ".", "--json"]
+    else:
+        cmd = [snyk_bin, "code", "test", ".", "--json"]
+
     try:
         result = subprocess.run(
-            [snyk_bin, "code", "test", ".", "--json"],
+            cmd,
             capture_output=True,
             text=True,
             timeout=300,
@@ -154,9 +162,12 @@ def main():
         finish("error", started_at=started_at, error_detail=stderr[:500])
         return
 
-    vulnerabilities = parse_sarif_results(stdout)
-    log(f"Found {len(vulnerabilities)} vulnerabilities")
+    if SCAN_TYPE == "sca":
+        vulnerabilities = parse_sca_results(stdout)
+    else:
+        vulnerabilities = parse_sarif_results(stdout)
 
+    log(f"Found {len(vulnerabilities)} vulnerabilities")
     finish("success", started_at=started_at, vulnerabilities=vulnerabilities)
 
 

@@ -46,6 +46,7 @@ from scan_runner import (
     ensure_cache_dirs,
     clear_scan_state,
     get_scan_completion_info,
+    SCA_WAIT_TIMEOUT,
 )
 
 
@@ -264,6 +265,186 @@ def _evaluate_files(
     return per_file
 
 
+# =============================================================================
+# MANIFEST CHANGE DETECTION (identifies which packages changed)
+# =============================================================================
+
+def _reconstruct_pre_edit(file_content: str, edits: List[Dict[str, str]]) -> str:
+    """Reconstruct file content before edits by reversing new_string -> old_string."""
+    content = file_content
+    for edit in reversed(edits):
+        old_str = edit.get("old_string", "")
+        new_str = edit.get("new_string", "")
+        if new_str and new_str in content:
+            content = content.replace(new_str, old_str, 1)
+    return content
+
+
+def _diff_package_json(
+    before: str, after: str
+) -> Dict[str, Dict[str, Optional[str]]]:
+    changes: Dict[str, Dict[str, Optional[str]]] = {}
+    try:
+        before_data = json.loads(before) if before.strip() else {}
+        after_data = json.loads(after) if after.strip() else {}
+    except json.JSONDecodeError:
+        return changes
+
+    dep_keys = [
+        "dependencies", "devDependencies",
+        "peerDependencies", "optionalDependencies",
+    ]
+    before_deps: Dict[str, str] = {}
+    after_deps: Dict[str, str] = {}
+    for key in dep_keys:
+        before_deps.update(before_data.get(key, {}))
+        after_deps.update(after_data.get(key, {}))
+
+    for pkg in set(before_deps) | set(after_deps):
+        old_ver = before_deps.get(pkg)
+        new_ver = after_deps.get(pkg)
+        if old_ver != new_ver:
+            changes[pkg] = {"old": old_ver, "new": new_ver}
+
+    return changes
+
+
+def _parse_requirements_txt(content: str) -> Dict[str, Optional[str]]:
+    deps: Dict[str, Optional[str]] = {}
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or line.startswith('-'):
+            continue
+        for op in ['===', '~=', '==', '!=', '>=', '<=', '>', '<']:
+            if op in line:
+                pkg, ver = line.split(op, 1)
+                pkg = pkg.strip().split('[')[0]
+                deps[pkg.lower()] = f"{op}{ver.strip().split(';')[0].strip()}"
+                break
+        else:
+            pkg = line.split(';')[0].split('[')[0].strip()
+            if pkg:
+                deps[pkg.lower()] = None
+    return deps
+
+
+def _diff_requirements_txt(
+    before: str, after: str
+) -> Dict[str, Dict[str, Optional[str]]]:
+    before_deps = _parse_requirements_txt(before)
+    after_deps = _parse_requirements_txt(after)
+    changes: Dict[str, Dict[str, Optional[str]]] = {}
+    for pkg in set(before_deps) | set(after_deps):
+        old_ver = before_deps.get(pkg)
+        new_ver = after_deps.get(pkg)
+        if old_ver != new_ver:
+            changes[pkg] = {"old": old_ver, "new": new_ver}
+    return changes
+
+
+def extract_package_changes(
+    file_path: str, file_content: str, edits: List[Dict[str, str]]
+) -> Dict[str, Dict[str, Optional[str]]]:
+    """Extract changed packages from manifest edits.
+    Returns {package_name: {"old": version_or_None, "new": version_or_None}}.
+    Returns empty dict for lockfiles or unparseable formats.
+
+    Supported manifests: package.json, requirements.txt, pyproject.toml.
+    Lockfiles (package-lock.json, yarn.lock, etc.) return empty — the
+    corresponding manifest change will capture the intent.
+    """
+    name = Path(file_path).name
+
+    pre_content = _reconstruct_pre_edit(file_content, edits)
+
+    if name == "package.json":
+        return _diff_package_json(pre_content, file_content)
+    if name == "requirements.txt":
+        return _diff_requirements_txt(pre_content, file_content)
+    # TODO: add parsers for pyproject.toml, go.mod, Gemfile, etc.
+
+    return {}
+
+
+def _collect_all_changed_packages(
+    manifest_files: Dict[str, Dict[str, Any]]
+) -> Dict[str, Dict[str, Optional[str]]]:
+    """Aggregate changed packages across all tracked manifest files."""
+    all_pkgs: Dict[str, Dict[str, Optional[str]]] = {}
+    for mf_info in manifest_files.values():
+        for pkg, versions in mf_info.get("changed_packages", {}).items():
+            all_pkgs[pkg] = versions
+    return all_pkgs
+
+
+# =============================================================================
+# SCA VULNERABILITY FILTERING (changed-packages-only + worse-vulns logic)
+# =============================================================================
+
+SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+
+
+def _filter_sca_to_changed_packages(
+    sca_vulns: List[Dict[str, Any]],
+    changed_packages: Dict[str, Dict[str, Optional[str]]],
+) -> List[Dict[str, Any]]:
+    """Keep only SCA vulns whose packageName matches a changed package."""
+    pkg_names_lower = {p.lower() for p in changed_packages}
+    return [
+        v for v in sca_vulns
+        if v.get("packageName", "").lower() in pkg_names_lower
+    ]
+
+
+def _evaluate_worse_vulns(
+    filtered_vulns: List[Dict[str, Any]],
+    changed_packages: Dict[str, Dict[str, Optional[str]]],
+) -> List[Dict[str, Any]]:
+    """Decide which SCA vulns to flag based on the type of package change.
+
+    - Removed package (new is None): skip — removal is safe.
+    - Newly added or version-changed package: flag all vulns found on it,
+      because the background scan only sees the *current* state. The
+      followup message includes old/new versions so the agent can run
+      snyk_sca_scan for a full before-vs-after comparison.
+    """
+    flagged: List[Dict[str, Any]] = []
+    pkg_lookup = {p.lower(): v for p, v in changed_packages.items()}
+
+    for vuln in filtered_vulns:
+        pkg = vuln.get("packageName", "").lower()
+        change_info = pkg_lookup.get(pkg)
+        if not change_info:
+            continue
+
+        old_ver = change_info.get("old")
+        new_ver = change_info.get("new")
+
+        if new_ver is None:
+            continue
+
+        flagged.append(vuln)
+
+    return flagged
+
+
+def _format_sca_vuln_table(vulns: List[Dict[str, Any]]) -> str:
+    if not vulns:
+        return ""
+    lines = [
+        "| # | Severity | ID | Title | Package | Version | Upgradable | CVE |",
+        "|---|----------|----|-------|---------|---------|------------|-----|",
+    ]
+    for i, v in enumerate(vulns, 1):
+        lines.append(
+            f"| {i} | {v.get('severity', '?')} | {v.get('id', '?')} "
+            f"| {v.get('title', '?')} | {v.get('packageName', '?')} "
+            f"| {v.get('version', '?')} | {'Yes' if v.get('isUpgradable') else 'No'} "
+            f"| {v.get('cve', '-') or '-'} |"
+        )
+    return "\n".join(lines)
+
+
 def _format_vuln_table(vulns: List[Dict[str, Any]]) -> str:
     if not vulns:
         return ""
@@ -305,7 +486,7 @@ def read_state(workspace: str) -> Dict[str, Any]:
                 return json.load(f)
     except (json.JSONDecodeError, IOError):
         pass
-    return {"code_files": {}, "manifest_files": [], "stop_cycles": 0, "last_update": None}
+    return {"code_files": {}, "manifest_files": {}, "stop_cycles": 0, "last_update": None}
 
 
 def write_state(workspace: str, state: Dict[str, Any]) -> None:
@@ -446,18 +627,38 @@ def handle_after_file_edit(data: Dict[str, Any], workspace: str) -> None:
                 output_response({"followup_message": reason})
                 return
 
-        if launch_background_scan(workspace):
-            log_to_panel("[SAI] Background scan launched")
+        if launch_background_scan(workspace, "code"):
+            log_to_panel("[SAI] Background code scan launched")
 
     elif is_manifest_file(file_path):
+        try:
+            file_content = Path(file_path).read_text(encoding="utf-8", errors="replace")
+        except (IOError, OSError):
+            file_content = ""
+
+        pkg_changes = extract_package_changes(file_path, file_content, edits)
+
         with _state_lock(workspace):
             state = read_state(workspace)
-            manifests = state.get("manifest_files", [])
-            if file_path not in manifests:
-                manifests.append(file_path)
+            manifests = state.get("manifest_files", {})
+            existing_changes = manifests.get(file_path, {}).get("changed_packages", {})
+            for pkg, versions in pkg_changes.items():
+                if pkg in existing_changes:
+                    existing_changes[pkg]["new"] = versions["new"]
+                else:
+                    existing_changes[pkg] = versions
+            manifests[file_path] = {"changed_packages": existing_changes}
             state["manifest_files"] = manifests
             write_state(workspace, state)
-        log_to_panel(f"[SAI] Manifest tracked: {Path(file_path).name}")
+
+        if pkg_changes:
+            pkg_list = ", ".join(pkg_changes.keys())
+            log_to_panel(f"[SAI] Manifest tracked: {Path(file_path).name} (changed: {pkg_list})")
+        else:
+            log_to_panel(f"[SAI] Manifest tracked: {Path(file_path).name}")
+
+        if launch_background_scan(workspace, "sca"):
+            log_to_panel("[SAI] Background SCA scan launched")
 
     else:
         debug_log(f"File not scannable, ignoring: {file_path}")
@@ -488,35 +689,35 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
         write_state(workspace, state)
 
     code_files = state.get("code_files", {})
-    manifest_files = state.get("manifest_files", [])
+    manifest_files = state.get("manifest_files", {})
 
     new_vulns: List[Dict[str, Any]] = []
     clean_file_paths: List[str] = []
     dirty_file_paths: List[str] = []
     unevaluated_file_paths: List[str] = []
 
-    # --- Wait for scan and evaluate results ---
+    # --- Wait for code scan and evaluate results ---
     if code_files:
-        scan_status = wait_for_scan(workspace, log_fn=log_to_panel)
+        scan_status = wait_for_scan(workspace, "code", log_fn=log_to_panel)
         scan_succeeded = (scan_status == "success")
         scan_info = None
 
         # Stale detection: re-scan if edits happened after scan started
         if scan_succeeded:
-            scan_info = get_scan_completion_info(workspace)
+            scan_info = get_scan_completion_info(workspace, "code")
             last_edit_ts = state.get("last_edit_ts", "")
             started_at = (scan_info.get("started_at") or scan_info.get("completed_at", "")) if scan_info else ""
 
             if last_edit_ts and started_at and last_edit_ts > started_at:
                 log_to_panel("[SAI] Edits after scan started, re-scanning...")
-                clear_scan_state(workspace)
-                launch_background_scan(workspace)
-                scan_status = wait_for_scan(workspace, log_fn=log_to_panel)
+                clear_scan_state(workspace, "code")
+                launch_background_scan(workspace, "code")
+                scan_status = wait_for_scan(workspace, "code", log_fn=log_to_panel)
                 scan_succeeded = (scan_status == "success")
                 scan_info = None
 
         if scan_succeeded:
-            scan_info = scan_info or get_scan_completion_info(workspace)
+            scan_info = scan_info or get_scan_completion_info(workspace, "code")
             all_vulns = scan_info.get("vulnerabilities", []) if scan_info else []
 
             results_by_file: Dict[str, List[Dict[str, Any]]] = {}
@@ -551,8 +752,9 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
                 f"{len(unevaluated_file_paths)} unevaluated file(s)"
             )
         else:
-            scan_info = get_scan_completion_info(workspace)
+            scan_info = get_scan_completion_info(workspace, "code")
             error_detail = scan_info.get("error_detail", "") if scan_info else ""
+            log_to_panel(f"[SAI] Code scan failed (status: {scan_status}), falling back to MCP")
             file_list = ", ".join(Path(f).name for f in code_files)
 
             if scan_status == "auth_required":
@@ -578,16 +780,65 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
 
             if manifest_files:
                 manifest_list = ", ".join(Path(f).name for f in manifest_files)
-                manifest_paths = ", ".join(str(f) for f in manifest_files)
-                fallback += (
-                    f" Also run snyk_sca_scan targeting only the changed manifest(s): "
-                    f"{manifest_paths}. "
-                    f"Only fix vulnerabilities introduced by your changes to "
-                    f"{manifest_list} -- do NOT fix pre-existing dependency issues."
-                )
+                all_changed_pkgs = _collect_all_changed_packages(manifest_files)
+                if all_changed_pkgs:
+                    pkg_names = ", ".join(all_changed_pkgs.keys())
+                    fallback += (
+                        f" Also run snyk_sca_scan on the current directory and evaluate "
+                        f"ONLY the changed packages ({pkg_names}) in: {manifest_list}. "
+                        f"Only flag issues if the new version has equal or higher severity "
+                        f"vulnerabilities than the previous version."
+                    )
+                else:
+                    fallback += (
+                        f" Also run snyk_sca_scan on the current directory to check "
+                        f"for vulnerable dependencies. Modified manifest files: {manifest_list}."
+                    )
             clear_state(workspace)
             output_response({"followup_message": fallback})
             return
+
+    # --- Wait for SCA scan and evaluate results ---
+    sca_vulns: List[Dict[str, Any]] = []
+    sca_evaluated = False
+    sca_fallback_needed = False
+
+    if manifest_files:
+        all_changed_pkgs = _collect_all_changed_packages(manifest_files)
+
+        if all_changed_pkgs:
+            sca_status = wait_for_scan(
+                workspace, "sca", timeout=SCA_WAIT_TIMEOUT, log_fn=log_to_panel
+            )
+            sca_succeeded = (sca_status == "success")
+
+            if sca_succeeded:
+                sca_info = get_scan_completion_info(workspace, "sca")
+                all_sca_vulns = sca_info.get("vulnerabilities", []) if sca_info else []
+
+                filtered = _filter_sca_to_changed_packages(all_sca_vulns, all_changed_pkgs)
+                sca_vulns = _evaluate_worse_vulns(filtered, all_changed_pkgs)
+                sca_evaluated = True
+
+                severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+                sca_vulns.sort(key=lambda v: (
+                    severity_order.get(v.get("severity", "low"), 4),
+                    v.get("packageName", ""),
+                ))
+
+                log_to_panel(
+                    f"[SAI] SCA: {len(all_sca_vulns)} total vuln(s), "
+                    f"{len(filtered)} in changed packages, "
+                    f"{len(sca_vulns)} flagged after worse-vulns filter"
+                )
+            else:
+                log_to_panel(
+                    f"[SAI] SCA scan not ready (status: {sca_status}), "
+                    f"falling back to MCP for dependency evaluation"
+                )
+                sca_fallback_needed = True
+        else:
+            sca_fallback_needed = True
 
     # --- Update state: remove clean files, keep dirty and unevaluated ---
     with _state_lock(workspace):
@@ -597,14 +848,17 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
             code.pop(fp, None)
         state["code_files"] = code
         if manifest_files:
-            state["manifest_files"] = []
+            state["manifest_files"] = {}
         write_state(workspace, state)
 
     if not dirty_file_paths and not unevaluated_file_paths:
-        clear_scan_state(workspace)
+        clear_scan_state(workspace, "code")
+    if manifest_files and not sca_fallback_needed:
+        clear_scan_state(workspace, "sca")
 
     # --- Decision ---
-    if not new_vulns and not manifest_files:
+    has_issues = bool(new_vulns) or bool(sca_vulns) or sca_fallback_needed
+    if not has_issues:
         if unevaluated_file_paths:
             log_to_panel("=" * 70)
             log_to_panel("[Secure at Inception] Some files not yet evaluated. "
@@ -627,20 +881,49 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
         message_parts.append("")
         message_parts.append(_format_vuln_table(new_vulns))
 
-    if manifest_files:
+    if sca_vulns:
         message_parts.append("")
-        message_parts.append("## Manifest Files Changed (SCA scan needed)")
+        message_parts.append("## SCA Vulnerabilities in Changed Packages")
         message_parts.append("")
-        for mf in manifest_files:
-            message_parts.append(f"- {mf}")
-        message_parts.append("")
-        message_parts.append(
-            "Run snyk_sca_scan targeting only the changed manifest file(s) listed above. "
-            "Only fix vulnerabilities introduced by your changes to these manifests -- "
-            "do NOT fix pre-existing dependency issues."
-        )
+        message_parts.append(_format_sca_vuln_table(sca_vulns))
 
-    if not new_vulns and manifest_files:
+    if sca_fallback_needed and manifest_files:
+        message_parts.append("")
+        all_changed_pkgs = _collect_all_changed_packages(manifest_files)
+        if all_changed_pkgs:
+            message_parts.append("## Dependency Changes (SCA scan incomplete -- evaluate via MCP)")
+            message_parts.append("")
+            for mf, mf_info in manifest_files.items():
+                pkg_changes = mf_info.get("changed_packages", {})
+                if pkg_changes:
+                    message_parts.append(f"### {Path(mf).name}")
+                    message_parts.append("| Package | Old Version | New Version |")
+                    message_parts.append("|---------|-------------|-------------|")
+                    for pkg, versions in pkg_changes.items():
+                        old = versions.get("old") or "(added)"
+                        new = versions.get("new") or "(removed)"
+                        message_parts.append(f"| {pkg} | {old} | {new} |")
+                    message_parts.append("")
+            message_parts.append(
+                "**Evaluation**: Run `snyk_sca_scan` and check ONLY the changed "
+                "packages listed above, not the entire manifest."
+            )
+            message_parts.append(
+                "- Version upgrade/downgrade: only flag if the new version has "
+                "EQUAL or HIGHER severity vulns than the old version (worse = block)"
+            )
+            message_parts.append(
+                "- Newly added package: flag any vulnerabilities found"
+            )
+            message_parts.append(
+                "- Removed package: no action needed (removing a vulnerable dep is safe)"
+            )
+        else:
+            message_parts.append("## Manifest Files Changed (SCA scan needed)")
+            for mf in manifest_files:
+                message_parts.append(f"- {Path(mf).name}")
+
+    if not new_vulns and not sca_vulns and (sca_fallback_needed and manifest_files):
         message_parts.insert(0, "/snyk-batch-fix")
 
     followup_message = "\n".join(message_parts)
@@ -653,14 +936,21 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
         for v in new_vulns:
             log_to_panel(f"    - {v['severity'].upper()}: {v['title']} "
                          f"at {v['file_path']}:{v['start_line']}")
+    if sca_vulns:
+        log_to_panel(f"  SCA vulnerabilities: {len(sca_vulns)}")
+        for v in sca_vulns:
+            log_to_panel(f"    - {v['severity'].upper()}: {v['title']} "
+                         f"in {v['packageName']}@{v.get('version', '?')}")
+    if sca_fallback_needed:
+        log_to_panel("  SCA: falling back to MCP evaluation")
     if dirty_file_paths:
         log_to_panel(f"  Files with vulns (kept in state): "
                      f"{[Path(f).name for f in dirty_file_paths]}")
     if unevaluated_file_paths:
         log_to_panel(f"  Unevaluated files (kept in state): "
                      f"{[Path(f).name for f in unevaluated_file_paths]}")
-    if manifest_files:
-        log_to_panel(f"  Manifest files changed: {len(manifest_files)}")
+    if manifest_files and not sca_vulns and not sca_fallback_needed:
+        log_to_panel("  SCA: changed packages clean")
     log_to_panel("=" * 70)
 
     output_response({"followup_message": followup_message})

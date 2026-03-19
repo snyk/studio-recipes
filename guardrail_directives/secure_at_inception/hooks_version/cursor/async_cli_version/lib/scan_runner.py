@@ -4,13 +4,20 @@ Scan Runner Module
 ==================
 
 Manages background Snyk CLI scans: launching the scan_worker.py subprocess,
-polling for completion, SARIF result parsing, and reading results.
+polling for completion, SARIF/SCA result parsing, and reading results.
+
+Supports two scan types:
+- "code": Snyk Code SAST scan (snyk code test)
+- "sca":  Snyk SCA dependency scan (snyk test)
+
+Each scan type has independent state files ({type}.pid, {type}.done, {type}.log)
+so code and SCA scans can run concurrently without interfering.
 
 The afterFileEdit hook calls launch_background_scan() to start a scan.
-Throttling is natural: is_scan_running() prevents duplicate launches.
+Throttling is natural: is_scan_running() prevents duplicate launches per type.
 
 The Stop hook calls wait_for_scan() which polls for the completion marker,
-then reads results (including parsed vulnerabilities) from scan.done.
+then reads results (including parsed vulnerabilities) from {type}.done.
 """
 
 import glob
@@ -25,12 +32,14 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+SCAN_TYPES = ("code", "sca")
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 
-SCAN_WAIT_TIMEOUT = 90
+SCAN_WAIT_TIMEOUT = 30
+SCA_WAIT_TIMEOUT = 30
 POLL_INTERVAL_INITIAL = 1.0
 POLL_INTERVAL_MAX = 3.0
 PID_STALENESS_TIMEOUT = 600
@@ -55,23 +64,23 @@ def ensure_cache_dirs(workspace: str) -> str:
 # SCAN STATE MANAGEMENT
 # =============================================================================
 
-def get_scan_pid_file(workspace: str) -> str:
-    return os.path.join(get_cache_dir(workspace), "scan.pid")
+def get_scan_pid_file(workspace: str, scan_type: str = "code") -> str:
+    return os.path.join(get_cache_dir(workspace), f"{scan_type}.pid")
 
 
-def get_scan_done_file(workspace: str) -> str:
-    return os.path.join(get_cache_dir(workspace), "scan.done")
+def get_scan_done_file(workspace: str, scan_type: str = "code") -> str:
+    return os.path.join(get_cache_dir(workspace), f"{scan_type}.done")
 
 
-def is_scan_running(workspace: str) -> bool:
-    pid_file = get_scan_pid_file(workspace)
+def is_scan_running(workspace: str, scan_type: str = "code") -> bool:
+    pid_file = get_scan_pid_file(workspace, scan_type)
     if not os.path.exists(pid_file):
         return False
 
     try:
         age = time.time() - os.path.getmtime(pid_file)
         if age > PID_STALENESS_TIMEOUT:
-            _cleanup_pid_file(workspace)
+            _cleanup_pid_file(workspace, scan_type)
             return False
     except OSError:
         pass
@@ -82,16 +91,16 @@ def is_scan_running(workspace: str) -> bool:
         os.kill(pid, 0)
         return True
     except (ValueError, ProcessLookupError, OSError):
-        _cleanup_pid_file(workspace)
+        _cleanup_pid_file(workspace, scan_type)
         return False
 
 
-def is_scan_complete(workspace: str) -> bool:
-    return os.path.exists(get_scan_done_file(workspace))
+def is_scan_complete(workspace: str, scan_type: str = "code") -> bool:
+    return os.path.exists(get_scan_done_file(workspace, scan_type))
 
 
-def _cleanup_pid_file(workspace: str) -> None:
-    pid_file = get_scan_pid_file(workspace)
+def _cleanup_pid_file(workspace: str, scan_type: str = "code") -> None:
+    pid_file = get_scan_pid_file(workspace, scan_type)
     if os.path.exists(pid_file):
         try:
             os.remove(pid_file)
@@ -100,7 +109,7 @@ def _cleanup_pid_file(workspace: str) -> None:
 
 
 # =============================================================================
-# SARIF PARSING
+# SARIF PARSING (Snyk Code)
 # =============================================================================
 
 def parse_sarif_results(json_output: str) -> List[Dict[str, Any]]:
@@ -217,18 +226,64 @@ def _ensure_snyk_token(env: Dict[str, str]) -> None:
 
 
 # =============================================================================
+# SCA PARSING (snyk test --json)
+# =============================================================================
+
+def parse_sca_results(json_output: str) -> List[Dict[str, Any]]:
+    """Parse Snyk SCA JSON output into a list of per-package vulnerability dicts."""
+    vulnerabilities: List[Dict[str, Any]] = []
+
+    try:
+        data = json.loads(json_output)
+    except json.JSONDecodeError:
+        return vulnerabilities
+
+    if isinstance(data, list):
+        results_list = data
+    else:
+        results_list = [data]
+
+    for result_block in results_list:
+        for vuln in result_block.get("vulnerabilities", []):
+            sev = vuln.get("severity", "medium")
+            pkg_name = vuln.get("packageName", vuln.get("name", "unknown"))
+            dep_from = vuln.get("from", [])
+            dep_path = " > ".join(dep_from) if dep_from else pkg_name
+
+            identifiers = vuln.get("identifiers", {})
+            cve_list = identifiers.get("CVE", [])
+            cwe_list = identifiers.get("CWE", [])
+
+            vulnerabilities.append({
+                "id": vuln.get("id", "unknown"),
+                "title": vuln.get("title", "unknown"),
+                "severity": sev,
+                "packageName": pkg_name,
+                "version": vuln.get("version", "unknown"),
+                "from": dep_path,
+                "fixedIn": vuln.get("fixedIn", []),
+                "cve": cve_list[0] if cve_list else None,
+                "cwe": cwe_list[0] if cwe_list else None,
+                "isUpgradable": vuln.get("isUpgradable", False),
+                "isPatchable": vuln.get("isPatchable", False),
+            })
+
+    return vulnerabilities
+
+
+# =============================================================================
 # BACKGROUND SCAN LAUNCHER
 # =============================================================================
 
-def launch_background_scan(workspace: str) -> bool:
-    """Launch a background Snyk code scan as a detached subprocess.
+def launch_background_scan(workspace: str, scan_type: str = "code") -> bool:
+    """Launch a background Snyk scan as a detached subprocess.
     PID file is written by the launcher to close the race window."""
     ensure_cache_dirs(workspace)
 
-    if is_scan_running(workspace):
+    if is_scan_running(workspace, scan_type):
         return False
 
-    done_file = get_scan_done_file(workspace)
+    done_file = get_scan_done_file(workspace, scan_type)
     if os.path.exists(done_file):
         os.remove(done_file)
 
@@ -239,6 +294,7 @@ def launch_background_scan(workspace: str) -> bool:
     env["SAI_WORKSPACE"] = workspace
     env["SAI_CACHE_DIR"] = get_cache_dir(workspace)
     env["SAI_LIB_DIR"] = str(Path(__file__).parent.resolve())
+    env["SAI_SCAN_TYPE"] = scan_type
 
     try:
         proc = subprocess.Popen(
@@ -249,7 +305,7 @@ def launch_background_scan(workspace: str) -> bool:
             cwd=workspace,
             env=env,
         )
-        pid_file = get_scan_pid_file(workspace)
+        pid_file = get_scan_pid_file(workspace, scan_type)
         with open(pid_file, "w") as f:
             f.write(str(proc.pid))
         return True
@@ -261,8 +317,8 @@ def launch_background_scan(workspace: str) -> bool:
 # SCAN COMPLETION
 # =============================================================================
 
-def _read_scan_status(workspace: str) -> Optional[str]:
-    done_file = get_scan_done_file(workspace)
+def _read_scan_status(workspace: str, scan_type: str = "code") -> Optional[str]:
+    done_file = get_scan_done_file(workspace, scan_type)
     try:
         with open(done_file, "r") as f:
             data = json.load(f)
@@ -271,9 +327,9 @@ def _read_scan_status(workspace: str) -> Optional[str]:
         return None
 
 
-def get_scan_completion_info(workspace: str) -> Optional[Dict[str, Any]]:
-    """Read the full scan.done record (status, started_at, vulnerabilities)."""
-    done_file = get_scan_done_file(workspace)
+def get_scan_completion_info(workspace: str, scan_type: str = "code") -> Optional[Dict[str, Any]]:
+    """Read the full {type}.done record (status, started_at, vulnerabilities)."""
+    done_file = get_scan_done_file(workspace, scan_type)
     try:
         with open(done_file, "r") as f:
             return json.load(f)
@@ -282,49 +338,57 @@ def get_scan_completion_info(workspace: str) -> Optional[Dict[str, Any]]:
 
 
 def wait_for_scan(
-    workspace: str, timeout: float = SCAN_WAIT_TIMEOUT, log_fn=None
+    workspace: str, scan_type: str = "code", timeout: float = None, log_fn=None
 ) -> Optional[str]:
     """Wait for a background scan to complete. Returns the status string
     or None if the wait timed out."""
+    if timeout is None:
+        timeout = SCA_WAIT_TIMEOUT if scan_type == "sca" else SCAN_WAIT_TIMEOUT
+
     if log_fn is None:
         log_fn = lambda msg: None
 
-    if is_scan_complete(workspace):
-        return _read_scan_status(workspace)
+    scan_label = "SCA" if scan_type == "sca" else "code"
 
-    if not is_scan_running(workspace) and not is_scan_complete(workspace):
-        if not launch_background_scan(workspace):
-            if is_scan_complete(workspace):
-                return _read_scan_status(workspace)
+    if is_scan_complete(workspace, scan_type):
+        return _read_scan_status(workspace, scan_type)
+
+    if not is_scan_running(workspace, scan_type) and not is_scan_complete(workspace, scan_type):
+        if not launch_background_scan(workspace, scan_type):
+            if is_scan_complete(workspace, scan_type):
+                return _read_scan_status(workspace, scan_type)
             return None
 
-    log_fn("[SAI] Waiting for security scan to complete...")
+    log_fn(f"[SAI] Waiting for {scan_label} scan to complete...")
 
     start_time = time.time()
     poll_interval = POLL_INTERVAL_INITIAL
 
     while (time.time() - start_time) < timeout:
-        if is_scan_complete(workspace):
+        if is_scan_complete(workspace, scan_type):
             elapsed = time.time() - start_time
-            log_fn(f"[SAI] Scan completed ({elapsed:.1f}s)")
-            return _read_scan_status(workspace)
+            log_fn(f"[SAI] {scan_label.capitalize()} scan completed ({elapsed:.1f}s)")
+            return _read_scan_status(workspace, scan_type)
 
-        if not is_scan_running(workspace) and not is_scan_complete(workspace):
-            log_fn("[SAI] Scan process terminated unexpectedly")
+        if not is_scan_running(workspace, scan_type) and not is_scan_complete(workspace, scan_type):
+            log_fn(f"[SAI] {scan_label.capitalize()} scan process terminated unexpectedly")
             return None
 
         time.sleep(poll_interval)
         poll_interval = min(poll_interval * 1.5, POLL_INTERVAL_MAX)
 
-    log_fn(f"[SAI] Scan timed out after {timeout:.0f}s")
+    log_fn(f"[SAI] {scan_label.capitalize()} scan timed out after {timeout:.0f}s")
     return None
 
 
-def clear_scan_state(workspace: str) -> None:
-    """Clear scan state files (PID, done marker)."""
-    for file_path in [get_scan_pid_file(workspace), get_scan_done_file(workspace)]:
-        if os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-            except OSError:
-                pass
+def clear_scan_state(workspace: str, scan_type: Optional[str] = None) -> None:
+    """Clear scan state files (PID, done marker).
+    If scan_type is None, clears all scan types."""
+    types = [scan_type] if scan_type else list(SCAN_TYPES)
+    for st in types:
+        for file_path in [get_scan_pid_file(workspace, st), get_scan_done_file(workspace, st)]:
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except OSError:
+                    pass

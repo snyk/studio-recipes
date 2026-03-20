@@ -34,13 +34,13 @@ HOOKS.JSON EXAMPLE:
   "version": 1,
   "hooks": {
     "afterFileEdit": [
-      {"command": "python3 .cursor/hooks/snyk_secure_at_inception.py"}
+      {"command": "python3 \"$HOME/.cursor/hooks/snyk_secure_at_inception.py\""}
     ],
     "beforeMCPExecution": [
-      {"command": "python3 .cursor/hooks/snyk_secure_at_inception.py"}
+      {"command": "python3 \"$HOME/.cursor/hooks/snyk_secure_at_inception.py\""}
     ],
     "stop": [
-      {"command": "python3 .cursor/hooks/snyk_secure_at_inception.py"}
+      {"command": "python3 \"$HOME/.cursor/hooks/snyk_secure_at_inception.py\""}
     ]
   }
 }

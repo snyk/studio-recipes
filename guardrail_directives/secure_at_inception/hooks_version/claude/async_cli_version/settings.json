@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/snyk_secure_at_inception.py",
+            "command": "python3 \"$HOME/.claude/hooks/snyk_secure_at_inception.py\"",
             "statusMessage": "Tracking code changes for security scan..."
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/snyk_secure_at_inception.py",
+            "command": "python3 \"$HOME/.claude/hooks/snyk_secure_at_inception.py\"",
             "statusMessage": "Evaluating security scan results..."
           }
         ]

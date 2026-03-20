@@ -30,11 +30,19 @@ These are generic examples, not rigid templates. Every team's security requireme
 - Adapt the recipes to coding assistants not yet covered
 - Combine multiple recipes into your own custom workflows
 
+## Installation options
+
+You can adopt recipes in two ways:
+
+1. **Installer (recommended for Cursor / Claude Code)** — Use the self-contained script under [`installer/`](installer/) to install hooks, commands, skills, and MCP configuration into your user-level Cursor/Claude directories. See [`installer/README.md`](installer/README.md) for how to build `dist/snyk-studio-install.sh`, profiles (`default`, `minimal`), and flags like `--dry-run` and `--uninstall`.
+
+2. **Manual / copy from repo** — Pick files under `guardrail_directives/`, `command_directives/`, `mcp/`, etc., and wire them into your assistant yourself (useful for customization or IDEs not covered by the installer).
+
 ## Prerequisites
 
 Before using any recipe, you'll need:
 
-1. **Snyk MCP Server** -- [Set up the Snyk MCP server](https://docs.snyk.io/integrations/snyk-studio-agentic-integrations/getting-started-with-snyk-studio) in your coding assistant
+1. **Snyk MCP Server** -- [Set up the Snyk MCP server](https://docs.snyk.io/integrations/snyk-studio-agentic-integrations/getting-started-with-snyk-studio) in your coding assistant (the installer can merge a default `mcp/.mcp.json` into `~/.mcp.json` for supported setups)
 2. **Snyk Authentication** -- Run `snyk auth` or set the `SNYK_TOKEN` environment variable
 
 ## Need Help?

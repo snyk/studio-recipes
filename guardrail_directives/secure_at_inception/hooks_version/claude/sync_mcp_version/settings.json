@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$HOME\"/.claude/hooks/snyk_sai_scan.sh"
+            "command": "\"$HOME/.claude/hooks/snyk_sai_scan.sh\""
           }
         ]
       }

@@ -1,0 +1,135 @@
+{
+  "version": "1.0.0",
+  "description": "Snyk Studio Recipes - Default Distribution",
+  "prerequisites": {
+    "python": "3.8",
+    "snyk_cli": true,
+    "snyk_auth": true
+  },
+  "recipes": {
+    "sai-hooks-async": {
+      "type": "hooks",
+      "description": "Secure At Inception hooks (async CLI version)",
+      "enabled": true,
+      "sources": {
+        "cursor": {
+          "files": [
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/cursor/async_cli_version/snyk_secure_at_inception.py", "dest": ".cursor/hooks/snyk_secure_at_inception.py" },
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/cursor/async_cli_version/lib/scan_runner.py", "dest": ".cursor/hooks/lib/scan_runner.py" },
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/cursor/async_cli_version/lib/scan_worker.py", "dest": ".cursor/hooks/lib/scan_worker.py" }
+          ],
+          "config_merge": {
+            "target": ".cursor/hooks.json",
+            "source": "guardrail_directives/secure_at_inception/hooks_version/cursor/async_cli_version/hooks.json",
+            "strategy": "merge_cursor_hooks"
+          }
+        },
+        "claude": {
+          "files": [
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/claude/async_cli_version/snyk_secure_at_inception.py", "dest": ".claude/hooks/snyk_secure_at_inception.py" },
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/claude/async_cli_version/lib/scan_runner.py", "dest": ".claude/hooks/lib/scan_runner.py" },
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/claude/async_cli_version/lib/scan_worker.py", "dest": ".claude/hooks/lib/scan_worker.py" }
+          ],
+          "config_merge": {
+            "target": ".claude/settings.json",
+            "source": "guardrail_directives/secure_at_inception/hooks_version/claude/async_cli_version/settings.json",
+            "strategy": "merge_claude_settings"
+          }
+        }
+      }
+    },
+    "snyk-fix-command": {
+      "type": "command",
+      "description": "/snyk-fix slash command (all-in-one remediation)",
+      "enabled": true,
+      "sources": {
+        "cursor": {
+          "files": [
+            { "src": "command_directives/synchronous_remediation/command/single_all_in_one_command/snyk-fix.md", "dest": ".cursor/commands/snyk-fix.md" }
+          ]
+        },
+        "claude": {
+          "files": [
+            { "src": "command_directives/synchronous_remediation/command/single_all_in_one_command/snyk-fix.md", "dest": ".claude/commands/snyk-fix.md" }
+          ]
+        }
+      }
+    },
+    "snyk-batch-fix-command": {
+      "type": "command",
+      "description": "/snyk-batch-fix slash command (batch remediation)",
+      "enabled": true,
+      "sources": {
+        "cursor": {
+          "files": [
+            { "src": "command_directives/synchronous_remediation/command/snyk-batch-fix.md", "dest": ".cursor/commands/snyk-batch-fix.md" }
+          ]
+        },
+        "claude": {
+          "files": [
+            { "src": "command_directives/synchronous_remediation/command/snyk-batch-fix.md", "dest": ".claude/commands/snyk-batch-fix.md" }
+          ]
+        }
+      }
+    },
+    "mcp-config": {
+      "type": "mcp",
+      "description": "Snyk MCP server configuration",
+      "enabled": true,
+      "sources": {
+        "cursor": {
+          "config_merge": {
+            "target": ".mcp.json",
+            "source": "mcp/.mcp.json",
+            "strategy": "merge_mcp_servers"
+          }
+        },
+        "claude": {
+          "config_merge": {
+            "target": ".mcp.json",
+            "source": "mcp/.mcp.json",
+            "strategy": "merge_mcp_servers"
+          }
+        }
+      }
+    },
+    "secure-dependency-health-check-skill": {
+      "type": "skill",
+      "description": "Secure dependency health check skill",
+      "enabled": true,
+      "sources": {
+        "cursor": {
+          "files": [
+            { "src": "command_directives/synchronous_remediation/skills/secure-dependency-health-check/SKILL.md", "dest": ".cursor/skills/snyk/secure-dependency-health-check/SKILL.md" },
+            { "src": "command_directives/synchronous_remediation/skills/secure-dependency-health-check/references/package-evaluation-criteria.md", "dest": ".cursor/skills/snyk/secure-dependency-health-check/references/package-evaluation-criteria.md" }
+          ]
+        },
+        "claude": {
+          "files": [
+            { "src": "command_directives/synchronous_remediation/skills/secure-dependency-health-check/SKILL.md", "dest": ".claude/commands/secure-dependency-health-check.md" }
+          ],
+          "transforms": [
+            { "type": "skill_to_command", "src": "command_directives/synchronous_remediation/skills/secure-dependency-health-check/SKILL.md", "dest": ".claude/commands/secure-dependency-health-check.md" }
+          ]
+        }
+      }
+    }
+  },
+  "profiles": {
+    "default": {
+      "recipes": [
+        "sai-hooks-async",
+        "snyk-fix-command",
+        "snyk-batch-fix-command",
+        "secure-dependency-health-check-skill",
+        "mcp-config"
+      ]
+    },
+    "minimal": {
+      "recipes": [
+        "sai-hooks-async",
+        "mcp-config"
+      ]
+    }
+  }
+}

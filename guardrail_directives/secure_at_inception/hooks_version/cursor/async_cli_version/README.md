@@ -39,12 +39,12 @@ chmod +x .cursor/hooks/snyk_secure_at_inception.py
   "hooks": {
     "afterFileEdit": [
       {
-        "command": "python3 .cursor/hooks/snyk_secure_at_inception.py"
+        "command": "python3 \"$HOME/.cursor/hooks/snyk_secure_at_inception.py\""
       }
     ],
     "stop": [
       {
-        "command": "python3 .cursor/hooks/snyk_secure_at_inception.py"
+        "command": "python3 \"$HOME/.cursor/hooks/snyk_secure_at_inception.py\""
       }
     ]
   }

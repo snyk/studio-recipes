@@ -44,7 +44,6 @@ venv/
 .venv/
 
 # Build outputs
-dist/
 build/
 out/
 *.egg-info/

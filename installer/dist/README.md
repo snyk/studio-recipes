@@ -47,9 +47,21 @@ Installs into paths under `$HOME` (for example `~/.cursor/`, `~/.claude/`, `~/.m
 | `--ade <cursor\|claude>` | Install only for that ADE (otherwise auto-detect or prompt) |
 | `--dry-run` | Show what would happen without writing files |
 | `--uninstall` | Remove Snyk recipe artifacts installed by this installer |
+| `--verify` | Verify the install: files on disk and merged JSON match the manifest (read-only) |
 | `--list` | List recipes and profiles bundled in the script |
 | `-y`, `--yes` | Skip confirmation prompts (e.g. when Snyk CLI is missing) |
 | `-h`, `--help` | Show built-in help |
+
+### Verification
+
+After a normal install (not `--dry-run`), the script **runs these checks automatically** at the end. If something fails, you see a warning; use **`--verify`** anytime to print the same checks in full.
+
+**`./snyk-studio-install.sh --verify`** walks the recipes for your current **profile** and **ADE** (respects `--profile` and `--ade` if you pass them) and:
+
+- Confirms each **file** from the manifest exists under your home directory.
+- Confirms **merged configs** still contain the expected Snyk content: Cursor `hooks.json`, Claude `settings.json` hook entries, and `~/.mcp.json` server entries, as defined in the bundled manifest.
+
+This does not launch the IDE or run `snyk` scans—it only validates paths and JSON. Exit code **1** means a mismatch or missing piece; run the installer again to fix.
 
 ### Profiles (typical bundle)
 
@@ -72,6 +84,10 @@ Installs into paths under `$HOME` (for example `~/.cursor/`, `~/.claude/`, `~/.m
 
 # Remove what this installer added
 ./snyk-studio-install.sh --uninstall -y
+
+# Re-check install without changing anything (same profile/ADE as you use for install)
+./snyk-studio-install.sh --verify
+./snyk-studio-install.sh --ade cursor --profile default --verify
 ```
 
 After install, open your IDE and confirm recipes are active. Run `snyk auth` if the installer warned about authentication.

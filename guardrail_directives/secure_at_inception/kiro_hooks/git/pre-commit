@@ -417,18 +417,19 @@ def get_sca_with_cache(
             print_cache_status(True, f"{pkg_name}@{version}")
             
             # Convert cached vulns back to DependencyVulnerability objects
+            # The cache now includes the full dependency tree
             for v in cached.vulnerabilities:
                 all_vulns.append(DependencyVulnerability(
                     id=v.get("id", "unknown"),
                     title=v.get("title", "Unknown"),
                     severity=v.get("severity", "medium"),
-                    package_name=pkg_name,
-                    installed_version=version,
+                    package_name=v.get("package_name", pkg_name),
+                    installed_version=v.get("installed_version", version),
                     fixed_version=v.get("fixed_version"),
                     cve=v.get("cve"),
                     cvss_score=None,
-                    is_direct=True,
-                    dependency_path=[]
+                    is_direct=v.get("package_name") == pkg_name,
+                    dependency_path=v.get("dependency_path", [])
                 ))
         else:
             cache_misses += 1
@@ -448,23 +449,49 @@ def get_sca_with_cache(
                 if v.id not in cached_ids:
                     all_vulns.append(v)
             
-            # Cache results per package
-            packages_cached: Dict[str, List[Dict]] = {}
-            for v in fresh_result.vulnerabilities:
-                key = f"{v.package_name}@{v.installed_version}"
-                if key not in packages_cached:
-                    packages_cached[key] = []
-                packages_cached[key].append({
-                    "id": v.id,
-                    "title": v.title,
-                    "severity": v.severity,
-                    "fixed_version": v.fixed_version,
-                    "cve": v.cve
-                })
+            # Cache results per TOP-LEVEL package with their full dependency trees
+            # Group vulnerabilities by the first package in the dependency path (the top-level package)
+            packages_cached: Dict[str, Dict] = {}
             
-            for key, vulns in packages_cached.items():
-                pkg, ver = key.rsplit("@", 1)
-                cache.set_sca_result(pkg, ver, vulns)
+            for v in fresh_result.vulnerabilities:
+                # Find the top-level package (first package after project name in dependency path)
+                if len(v.dependency_path) >= 2:
+                    # dependency_path looks like: ['snyk-test-repo@1.0.0', 'express@4.14.1', ...]
+                    top_level = v.dependency_path[1]  # e.g., 'express@4.14.1'
+                    
+                    # Extract package name and version
+                    if '@' in top_level:
+                        parts = top_level.rsplit('@', 1)
+                        if len(parts) == 2:
+                            top_pkg_name, top_pkg_version = parts
+                            key = f"{top_pkg_name}@{top_pkg_version}"
+                            
+                            if key not in packages_cached:
+                                packages_cached[key] = {
+                                    "package": top_pkg_name,
+                                    "version": top_pkg_version,
+                                    "vulnerabilities": []
+                                }
+                            
+                            packages_cached[key]["vulnerabilities"].append({
+                                "id": v.id,
+                                "title": v.title,
+                                "severity": v.severity,
+                                "fixed_version": v.fixed_version,
+                                "cve": v.cve,
+                                "package_name": v.package_name,
+                                "installed_version": v.installed_version,
+                                "dependency_path": v.dependency_path
+                            })
+            
+            # Cache each top-level package with its full tree
+            if DEBUG:
+                print(f"Caching {len(packages_cached)} top-level packages")
+                for key in packages_cached:
+                    print(f"  {key}: {len(packages_cached[key]['vulnerabilities'])} vulnerabilities")
+            
+            for key, data in packages_cached.items():
+                cache.set_sca_result(data["package"], data["version"], data["vulnerabilities"])
         else:
             print_warning(f"SCA scan failed: {fresh_result.error_message}")
     

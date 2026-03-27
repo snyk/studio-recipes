@@ -1,6 +1,6 @@
 # Snyk Studio Recipes — `snyk-studio-install.sh`
 
-Single-file installer for Snyk Studio recipes. It unpacks an embedded payload and installs into your **home directory** so **Cursor** and/or **Claude Code** can use the bundled hooks, slash commands, skills, and MCP configuration.
+Single-file installer for Snyk Studio recipes. It unpacks an embedded payload and installs into your **home directory** so **Cursor**, **Claude Code**, and/or **GitHub Copilot** can use the bundled hooks, slash commands or prompts, skills, and MCP configuration.
 
 No separate download is required beyond this script.
 
@@ -31,14 +31,14 @@ Pick one:
 ./snyk-studio-install.sh [options]
 ```
 
-Installs into paths under `$HOME` (for example `~/.cursor/` and `~/.claude/`). The installer can **auto-detect** Cursor / Claude Code, or you can target one environment with `--ade`.
+Installs into paths under `$HOME` (for example `~/.cursor/`, `~/.claude/`, and `~/.copilot/`). The installer can **auto-detect** Cursor, Claude Code, and GitHub Copilot, or you can target one environment with `--ade`.
 
 ### Options
 
 | Option | Description |
 |--------|-------------|
 | `--profile <name>` | Installation profile: `default` or `minimal` |
-| `--ade <cursor\|claude>` | Install only for that ADE (otherwise auto-detect or prompt) |
+| `--ade <cursor\|claude\|copilot>` | Install only for that ADE (otherwise auto-detect or prompt) |
 | `--dry-run` | Show what would happen without writing files |
 | `--uninstall` | Remove Snyk recipe artifacts installed by this installer |
 | `--verify` | Verify the install: files on disk and merged JSON match the manifest (read-only) |
@@ -53,7 +53,7 @@ After a normal install (not `--dry-run`), the script **runs these checks automat
 **`./snyk-studio-install.sh --verify`** walks the recipes for your current **profile** and **ADE** (respects `--profile` and `--ade` if you pass them) and:
 
 - Confirms each **file** from the manifest exists under your home directory.
-- Confirms **merged configs** still contain the expected Snyk content: Cursor `hooks.json`, Claude `settings.json` hook entries, and MCP server entries in `~/.cursor/.mcp.json` and `~/.claude/.mcp.json`, as defined in the bundled manifest.
+- Confirms **merged configs** still contain the expected Snyk content: Cursor `hooks.json`, Claude `settings.json` hook entries, Copilot `~/.copilot/hooks/hooks.json`, and MCP server entries in `~/.cursor/.mcp.json`, `~/.claude/.mcp.json`, and `~/.copilot/mcp-config.json`, as defined in the bundled manifest.
 
 This does not launch the IDE or run `snyk` scans—it only validates paths and JSON. Exit code **1** means a mismatch or missing piece; run the installer again to fix.
 
@@ -61,7 +61,7 @@ This does not launch the IDE or run `snyk` scans—it only validates paths and J
 
 | Profile | Contents (high level) |
 |---------|-------------------------|
-| **default** | Secure-at-inception hooks, `/snyk-fix` and `/snyk-batch-fix` commands, secure dependency health skill, MCP config |
+| **default** | Secure-at-inception hooks, `/snyk-fix` and `/snyk-batch-fix` (Copilot: prompt-file equivalents), secure dependency health skill, MCP config |
 | **minimal** | Hooks and MCP only |
 
 ### Examples
@@ -73,6 +73,9 @@ This does not launch the IDE or run `snyk` scans—it only validates paths and J
 # Only Cursor, minimal profile
 ./snyk-studio-install.sh --ade cursor --profile minimal -y
 
+# Only GitHub Copilot
+./snyk-studio-install.sh --ade copilot -y
+
 # Preview changes
 ./snyk-studio-install.sh --dry-run
 
@@ -82,6 +85,7 @@ This does not launch the IDE or run `snyk` scans—it only validates paths and J
 # Re-check install without changing anything (same profile/ADE as you use for install)
 ./snyk-studio-install.sh --verify
 ./snyk-studio-install.sh --ade cursor --profile default --verify
+./snyk-studio-install.sh --ade copilot --verify
 ```
 
 After install, open your IDE and confirm recipes are active. Run `snyk auth` if the installer warned about authentication.

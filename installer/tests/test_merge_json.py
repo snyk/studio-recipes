@@ -12,12 +12,15 @@ from merge_json import (
     _write_json,
     main,
     merge_claude_settings,
+    merge_copilot_mcp,
     merge_cursor_hooks,
     merge_mcp_servers,
     unmerge_claude_settings,
+    unmerge_copilot_mcp,
     unmerge_cursor_hooks,
     unmerge_mcp_servers,
     verify_claude_settings,
+    verify_copilot_mcp,
     verify_cursor_hooks,
     verify_mcp_servers,
 )
@@ -849,4 +852,55 @@ class TestVerifyMcpServers:
         target = str(tmp_path / "nope.json")
         with pytest.raises(SystemExit) as exc_info:
             verify_mcp_servers(target, snyk_mcp_source)
+        assert exc_info.value.code == 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# merge_copilot_mcp — transforms cursor/claude `mcpServers` into copilot `servers`
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestMergeCopilotMcp:
+    def test_reads_mcpservers_writes_servers_with_type_stdio(
+        self, tmp_path, snyk_mcp_source
+    ):
+        target = str(tmp_path / "mcp-config.json")
+        merge_copilot_mcp(target, snyk_mcp_source)
+        result = read_json(target)
+        assert "mcpServers" not in result
+        assert result["servers"]["Snyk"]["type"] == "stdio"
+        assert result["servers"]["Snyk"]["command"] == "npx"
+
+    def test_preserves_non_snyk_servers(self, write_json, snyk_mcp_source):
+        target = write_json("mcp-config.json", {
+            "servers": {"Other": {"type": "stdio", "command": "other"}},
+        })
+        merge_copilot_mcp(target, snyk_mcp_source)
+        result = read_json(target)
+        assert "Snyk" in result["servers"]
+        assert result["servers"]["Other"] == {"type": "stdio", "command": "other"}
+
+    def test_unmerge_removes_only_snyk(self, write_json, snyk_mcp_source):
+        target = write_json("mcp-config.json", {})
+        merge_copilot_mcp(target, snyk_mcp_source)
+        # Add an unrelated server, then unmerge
+        with open(target) as f:
+            data = json.load(f)
+        data["servers"]["Other"] = {"type": "stdio", "command": "other"}
+        with open(target, "w") as f:
+            json.dump(data, f)
+        unmerge_copilot_mcp(target, snyk_mcp_source)
+        result = read_json(target)
+        assert "Snyk" not in result["servers"]
+        assert "Other" in result["servers"]
+
+    def test_verify_passes_after_merge(self, tmp_path, snyk_mcp_source):
+        target = str(tmp_path / "mcp-config.json")
+        merge_copilot_mcp(target, snyk_mcp_source)
+        verify_copilot_mcp(target, snyk_mcp_source)
+
+    def test_verify_fails_when_missing(self, write_json, snyk_mcp_source):
+        target = write_json("mcp-config.json", {"servers": {}})
+        with pytest.raises(SystemExit) as exc_info:
+            verify_copilot_mcp(target, snyk_mcp_source)
         assert exc_info.value.code == 1

@@ -167,6 +167,10 @@ class TestParseArgs:
         assert args.list_mode is True
         assert args.yes is True
 
+    def test_ade_copilot(self):
+        args = installer.parse_args(["--ade", "copilot"])
+        assert args.ade == "copilot"
+
     def test_invalid_ade_rejected(self):
         with pytest.raises(SystemExit):
             installer.parse_args(["--ade", "vscode"])
@@ -300,6 +304,18 @@ class TestDetectAdes:
         monkeypatch.setattr("shutil.which", lambda cmd: "/usr/bin/claude" if cmd == "claude" else None)
         result = installer.detect_ades()
         assert "claude" in result
+
+    def test_detects_copilot_from_directory(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        (tmp_path / ".copilot").mkdir()
+        result = installer.detect_ades()
+        assert "copilot" in result
+
+    def test_detects_copilot_from_cli(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr("shutil.which", lambda cmd: "/usr/bin/copilot" if cmd == "copilot" else None)
+        result = installer.detect_ades()
+        assert "copilot" in result
 
 
 # ===========================================================================

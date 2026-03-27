@@ -35,12 +35,24 @@
             "source": "guardrail_directives/secure_at_inception/hooks_version/claude/async_cli_version/settings.json",
             "strategy": "merge_claude_settings"
           }
+        },
+        "copilot": {
+          "files": [
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/copilot/async_cli_version/snyk_secure_at_inception.py", "dest": ".copilot/hooks/snyk_secure_at_inception.py" },
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/copilot/async_cli_version/lib/scan_runner.py", "dest": ".copilot/hooks/lib/scan_runner.py" },
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/copilot/async_cli_version/lib/scan_worker.py", "dest": ".copilot/hooks/lib/scan_worker.py" }
+          ],
+          "config_merge": {
+            "target": ".copilot/hooks/hooks.json",
+            "source": "guardrail_directives/secure_at_inception/hooks_version/copilot/async_cli_version/hooks.json",
+            "strategy": "merge_copilot_hooks"
+          }
         }
       }
     },
     "snyk-fix-command": {
       "type": "command",
-      "description": "/snyk-fix slash command (all-in-one remediation)",
+      "description": "/snyk-fix prompt file (all-in-one remediation)",
       "enabled": true,
       "sources": {
         "cursor": {
@@ -52,12 +64,17 @@
           "files": [
             { "src": "command_directives/synchronous_remediation/command/single_all_in_one_command/snyk-fix.md", "dest": ".claude/commands/snyk-fix.md" }
           ]
+        },
+        "copilot": {
+          "files": [
+            { "src": "command_directives/synchronous_remediation/command/single_all_in_one_command/snyk-fix.md", "dest": ".copilot/prompts/snyk-fix.prompt.md" }
+          ]
         }
       }
     },
     "snyk-batch-fix-command": {
       "type": "command",
-      "description": "/snyk-batch-fix slash command (batch remediation)",
+      "description": "/snyk-batch-fix prompt file (batch remediation)",
       "enabled": true,
       "sources": {
         "cursor": {
@@ -68,6 +85,11 @@
         "claude": {
           "files": [
             { "src": "command_directives/synchronous_remediation/command/snyk-batch-fix.md", "dest": ".claude/commands/snyk-batch-fix.md" }
+          ]
+        },
+        "copilot": {
+          "files": [
+            { "src": "command_directives/synchronous_remediation/command/snyk-batch-fix.md", "dest": ".copilot/prompts/snyk-batch-fix.prompt.md" }
           ]
         }
       }
@@ -90,6 +112,13 @@
             "source": "mcp/.mcp.json",
             "strategy": "merge_mcp_servers"
           }
+        },
+        "copilot": {
+          "config_merge": {
+            "target": ".copilot/mcp-config.json",
+            "source": "mcp/.mcp.json",
+            "strategy": "merge_copilot_mcp"
+          }
         }
       }
     },
@@ -110,6 +139,12 @@
           ],
           "transforms": [
             { "type": "skill_to_command", "src": "command_directives/synchronous_remediation/skills/secure-dependency-health-check/SKILL.md", "dest": ".claude/commands/secure-dependency-health-check.md" }
+          ]
+        },
+        "copilot": {
+          "files": [
+            { "src": "command_directives/synchronous_remediation/skills/secure-dependency-health-check/SKILL.md", "dest": ".copilot/skills/secure-dependency-health-check/SKILL.md" },
+            { "src": "command_directives/synchronous_remediation/skills/secure-dependency-health-check/references/package-evaluation-criteria.md", "dest": ".copilot/skills/secure-dependency-health-check/references/package-evaluation-criteria.md" }
           ]
         }
       }

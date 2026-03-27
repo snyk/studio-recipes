@@ -5,14 +5,14 @@ Snyk Studio Recipes Installer
 
 Cross-platform installer for Snyk security recipes.
 Installs skills, hooks, rules, commands, and MCP configs
-into Cursor and/or Claude Code global directories.
+into Cursor, Claude Code, and/or GitHub Copilot global directories.
 
 Usage:
     python snyk-studio-installer.py [options]
 
 Options:
-    --profile <name>      Installation profile (default, minimal)
-    --ade <cursor|claude>  Target specific ADE (auto-detect if omitted)
+    --profile <name>              Installation profile (default, minimal)
+    --ade <cursor|claude|copilot> Target specific ADE (auto-detect if omitted)
     --dry-run             Show what would be installed without making changes
     --uninstall           Remove Snyk recipes from detected ADEs
     --verify              Verify installed files and merged configs match manifest
@@ -95,7 +95,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--profile", default="default",
                         help="Installation profile (default: 'default')")
-    parser.add_argument("--ade", choices=["cursor", "claude"], default=None,
+    parser.add_argument("--ade", choices=["cursor", "claude", "copilot"], default=None,
                         help="Target specific ADE (auto-detect if omitted)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be installed without making changes")
@@ -391,7 +391,7 @@ def check_prerequisites(auto_yes: bool) -> None:
 # ADE DETECTION
 # =============================================================================
 
-ADE_HOMES = {"cursor": ".cursor", "claude": ".claude"}
+ADE_HOMES = {"cursor": ".cursor", "claude": ".claude", "copilot": ".copilot"}
 
 
 def get_ade_home(ade: str) -> Path:
@@ -437,6 +437,11 @@ def detect_ades() -> List[str]:
     elif shutil.which("claude"):
         detected.append("claude")
 
+    if (home / ".copilot").is_dir():
+        detected.append("copilot")
+    elif shutil.which("copilot"):
+        detected.append("copilot")
+
     return detected
 
 
@@ -456,10 +461,16 @@ def get_target_ades(
     print("  Which ADE(s) would you like to install for?")
     print("  1) Cursor")
     print("  2) Claude Code")
-    print("  3) Both")
+    print("  3) GitHub Copilot")
+    print("  4) All")
     print()
-    reply = input("  Choose (1/2/3): ").strip()
-    choices = {"1": ["cursor"], "2": ["claude"], "3": ["cursor", "claude"]}
+    reply = input("  Choose (1/2/3/4): ").strip()
+    choices = {
+        "1": ["cursor"],
+        "2": ["claude"],
+        "3": ["copilot"],
+        "4": ["cursor", "claude", "copilot"],
+    }
     if reply in choices:
         return choices[reply]
     print(C.red("Invalid choice"))
@@ -470,7 +481,7 @@ def get_target_ades(
 # PLATFORM-AWARE HOOK COMMAND REWRITING
 # =============================================================================
 
-_WIN32_REWRITE_STRATEGIES: frozenset[str] = frozenset({"cursor_hooks", "claude_settings"})
+_WIN32_REWRITE_STRATEGIES: frozenset[str] = frozenset({"cursor_hooks", "claude_settings", "copilot_hooks"})
 
 
 @contextlib.contextmanager

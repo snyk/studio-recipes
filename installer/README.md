@@ -52,9 +52,28 @@ chmod +x dist/snyk-studio-install.sh
 | `--ade <cursor\|claude>` | Install only for one ADE (otherwise auto-detect / prompt) |
 | `--dry-run` | Show actions without writing files |
 | `--uninstall` | Remove installed Snyk recipe artifacts from detected ADEs |
+| `--verify` | Check that installed files and merged configs match the manifest (read-only) |
 | `--list` | List recipes and profiles from the embedded manifest |
 | `-y`, `--yes` | Skip confirmation prompts |
 | `-h`, `--help` | Help |
+
+### Verification
+
+After a successful install **without** `--dry-run`, the script runs the same checks as `--verify` automatically. If any check fails, the summary shows a warning and suggests re-running with `--verify` for full output.
+
+**`--verify`** (standalone) re-checks the current **profile** and **ADE** selection (same flags as install):
+
+- **Files**: Each path from the manifest exists under `$HOME` (commands, hook scripts, skills, etc.).
+- **Merged JSON**: For recipes that use `config_merge`, the live files (`~/.cursor/hooks.json`, Claude `settings.json`, `~/.mcp.json`) still contain the Snyk entries expected from the embedded manifest (hook commands per event, MCP server names, and for Claude, matcher groups).
+
+It does not start your IDE or run Snyk scans—only filesystem and JSON structure checks. Exit code **1** if something is missing or drifted; re-run the installer to repair.
+
+```bash
+./dist/snyk-studio-install.sh --verify
+./dist/snyk-studio-install.sh --ade cursor --profile default --verify
+```
+
+Implementation: `lib/merge_json.py` (`verify_cursor_hooks`, `verify_claude_settings`, `verify_mcp_servers`).
 
 ### Profiles (current manifest)
 

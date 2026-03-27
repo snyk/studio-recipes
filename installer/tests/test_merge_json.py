@@ -17,6 +17,9 @@ from merge_json import (
     unmerge_claude_settings,
     unmerge_cursor_hooks,
     unmerge_mcp_servers,
+    verify_claude_settings,
+    verify_cursor_hooks,
+    verify_mcp_servers,
 )
 
 from helpers import read_json
@@ -694,4 +697,144 @@ class TestMain:
         )
         with pytest.raises(SystemExit) as exc_info:
             main()
+        assert exc_info.value.code == 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# verify_claude_settings
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestVerifyClaudeSettings:
+    def test_passes_when_hooks_present(self, write_json, snyk_claude_source):
+        """Verify succeeds when all expected hooks are in target."""
+        target = write_json("target.json", {"model": "opus[1m]"})
+        merge_claude_settings(target, snyk_claude_source)
+        # Should not raise SystemExit
+        verify_claude_settings(target, snyk_claude_source)
+
+    def test_fails_when_hooks_missing(self, write_json, snyk_claude_source):
+        """Verify fails when target has no hooks at all."""
+        target = write_json("target.json", {"model": "opus[1m]"})
+        with pytest.raises(SystemExit) as exc_info:
+            verify_claude_settings(target, snyk_claude_source)
+        assert exc_info.value.code == 1
+
+    def test_fails_when_event_missing(self, write_json, snyk_claude_source):
+        """Verify fails when target has PostToolUse but not Stop."""
+        target = write_json(
+            "target.json",
+            {
+                "hooks": {
+                    "PostToolUse": [
+                        {
+                            "matcher": "Edit|Write",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": 'python3 "$HOME/.claude/hooks/snyk_secure_at_inception.py"',
+                                }
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            verify_claude_settings(target, snyk_claude_source)
+        assert exc_info.value.code == 1
+
+    def test_fails_when_command_missing(self, write_json, snyk_claude_source):
+        """Verify fails when matcher group exists but command is different."""
+        target = write_json(
+            "target.json",
+            {
+                "hooks": {
+                    "PostToolUse": [
+                        {
+                            "matcher": "Edit|Write",
+                            "hooks": [
+                                {"type": "command", "command": "prettier --write"}
+                            ],
+                        }
+                    ],
+                    "Stop": [
+                        {
+                            "hooks": [
+                                {"type": "command", "command": "echo done"}
+                            ]
+                        }
+                    ],
+                }
+            },
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            verify_claude_settings(target, snyk_claude_source)
+        assert exc_info.value.code == 1
+
+    def test_passes_with_extra_hooks(self, write_json, snyk_claude_source):
+        """Verify passes when target has expected hooks plus extras."""
+        target = write_json("target.json", {"model": "opus[1m]"})
+        merge_claude_settings(target, snyk_claude_source)
+        # Add extra hooks
+        data = read_json(target)
+        data["hooks"]["PostToolUse"][0]["hooks"].append(
+            {"type": "command", "command": "prettier --write"}
+        )
+        _write_json(target, data)
+        verify_claude_settings(target, snyk_claude_source)
+
+    def test_fails_on_missing_file(self, tmp_path, snyk_claude_source):
+        """Verify fails when target file doesn't exist."""
+        target = str(tmp_path / "nope.json")
+        with pytest.raises(SystemExit) as exc_info:
+            verify_claude_settings(target, snyk_claude_source)
+        assert exc_info.value.code == 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# verify_cursor_hooks
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestVerifyCursorHooks:
+    def test_passes_when_hooks_present(self, write_json, snyk_cursor_source):
+        target = write_json("target.json", {})
+        merge_cursor_hooks(target, snyk_cursor_source)
+        verify_cursor_hooks(target, snyk_cursor_source)
+
+    def test_fails_when_hooks_missing(self, write_json, snyk_cursor_source):
+        target = write_json("target.json", {"version": 1, "hooks": {}})
+        with pytest.raises(SystemExit) as exc_info:
+            verify_cursor_hooks(target, snyk_cursor_source)
+        assert exc_info.value.code == 1
+
+    def test_fails_on_missing_file(self, tmp_path, snyk_cursor_source):
+        target = str(tmp_path / "nope.json")
+        with pytest.raises(SystemExit) as exc_info:
+            verify_cursor_hooks(target, snyk_cursor_source)
+        assert exc_info.value.code == 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# verify_mcp_servers
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestVerifyMcpServers:
+    def test_passes_when_servers_present(self, write_json, snyk_mcp_source):
+        target = write_json("target.json", {})
+        merge_mcp_servers(target, snyk_mcp_source)
+        verify_mcp_servers(target, snyk_mcp_source)
+
+    def test_fails_when_servers_missing(self, write_json, snyk_mcp_source):
+        target = write_json("target.json", {"mcpServers": {}})
+        with pytest.raises(SystemExit) as exc_info:
+            verify_mcp_servers(target, snyk_mcp_source)
+        assert exc_info.value.code == 1
+
+    def test_fails_on_missing_file(self, tmp_path, snyk_mcp_source):
+        target = str(tmp_path / "nope.json")
+        with pytest.raises(SystemExit) as exc_info:
+            verify_mcp_servers(target, snyk_mcp_source)
         assert exc_info.value.code == 1

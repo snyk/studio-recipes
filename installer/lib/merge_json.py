@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""JSON config merging for Snyk Studio Recipes installer.
+"""JSON config merging and verification for Snyk Studio Recipes installer.
 
-Supports three merge strategies:
+Merge strategies (create .bak backup, write pretty-printed JSON, idempotent):
   - merge_cursor_hooks:    ~/.cursor/hooks.json
   - merge_claude_settings: ~/.claude/settings.json
   - merge_mcp_servers:     ~/.mcp.json or ~/.cursor/.mcp.json
 
-All merges:
-  - Create .bak backup before modifying
-  - Write pretty-printed JSON
-  - Are idempotent (safe to run multiple times)
+Unmerge strategies (remove Snyk entries, idempotent):
+  - unmerge_cursor_hooks, unmerge_claude_settings, unmerge_mcp_servers
+
+Verify strategies (read-only, exit 1 if entries missing):
+  - verify_cursor_hooks, verify_claude_settings, verify_mcp_servers
 """
 
 import json
@@ -258,6 +259,108 @@ def unmerge_mcp_servers(target_path, source_path):
     _write_json(target_path, target)
 
 
+def verify_cursor_hooks(target_path, source_path):
+    """Verify that all Snyk hooks from source exist in Cursor's hooks.json.
+
+    Prints missing entries to stderr. Exits with code 1 if anything is missing.
+    Read-only — does not modify any files.
+    """
+    target = _load_json(target_path)
+    source = _load_json(source_path)
+
+    missing = []
+    source_hooks = source.get("hooks", {})
+    target_hooks = target.get("hooks", {})
+
+    for event, entries in source_hooks.items():
+        if event not in target_hooks:
+            missing.append(f"  event '{event}' not found in {target_path}")
+            continue
+
+        existing_commands = {
+            e.get("command") for e in target_hooks[event] if "command" in e
+        }
+        for entry in entries:
+            cmd = entry.get("command", "")
+            if cmd and cmd not in existing_commands:
+                missing.append(f"  hook command missing from '{event}': {cmd}")
+
+    if missing:
+        for m in missing:
+            print(m, file=sys.stderr)
+        sys.exit(1)
+
+
+def verify_claude_settings(target_path, source_path):
+    """Verify that all Snyk hooks from source exist in Claude settings.json.
+
+    For each hook event + matcher group in source, checks the matching group
+    exists in target and contains the expected hook commands.
+    Prints missing entries to stderr. Exits with code 1 if anything is missing.
+    Read-only — does not modify any files.
+    """
+    target = _load_json(target_path)
+    source = _load_json(source_path)
+
+    missing = []
+    source_hooks = source.get("hooks", {})
+    target_hooks = target.get("hooks", {})
+
+    for event, src_groups in source_hooks.items():
+        if event not in target_hooks:
+            missing.append(f"  event '{event}' not found in {target_path}")
+            continue
+
+        for src_group in src_groups:
+            src_matcher = src_group.get("matcher")
+            # Find matching group in target
+            tgt_group = None
+            for g in target_hooks[event]:
+                if g.get("matcher") == src_matcher:
+                    tgt_group = g
+                    break
+
+            if tgt_group is None:
+                matcher_label = f"matcher='{src_matcher}'" if src_matcher else "no matcher"
+                missing.append(f"  group ({matcher_label}) missing from '{event}'")
+                continue
+
+            existing_commands = {
+                h.get("command") for h in tgt_group.get("hooks", []) if "command" in h
+            }
+            for hook in src_group.get("hooks", []):
+                cmd = hook.get("command", "")
+                if cmd and cmd not in existing_commands:
+                    missing.append(f"  hook command missing from '{event}': {cmd}")
+
+    if missing:
+        for m in missing:
+            print(m, file=sys.stderr)
+        sys.exit(1)
+
+
+def verify_mcp_servers(target_path, source_path):
+    """Verify that all Snyk MCP servers from source exist in target.
+
+    Read-only — does not modify any files.
+    """
+    target = _load_json(target_path)
+    source = _load_json(source_path)
+
+    missing = []
+    source_servers = source.get("mcpServers", {})
+    target_servers = target.get("mcpServers", {})
+
+    for name in source_servers:
+        if name not in target_servers:
+            missing.append(f"  MCP server '{name}' missing from {target_path}")
+
+    if missing:
+        for m in missing:
+            print(m, file=sys.stderr)
+        sys.exit(1)
+
+
 STRATEGIES = {
     "merge_cursor_hooks": merge_cursor_hooks,
     "merge_claude_settings": merge_claude_settings,
@@ -265,6 +368,9 @@ STRATEGIES = {
     "unmerge_cursor_hooks": unmerge_cursor_hooks,
     "unmerge_claude_settings": unmerge_claude_settings,
     "unmerge_mcp_servers": unmerge_mcp_servers,
+    "verify_cursor_hooks": verify_cursor_hooks,
+    "verify_claude_settings": verify_claude_settings,
+    "verify_mcp_servers": verify_mcp_servers,
 }
 
 

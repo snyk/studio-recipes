@@ -15,6 +15,7 @@
 #   --ade <cursor|claude>  Target specific ADE (auto-detect if omitted)
 #   --dry-run             Show what would be installed without making changes
 #   --uninstall           Remove Snyk recipes from detected ADEs
+#   --verify              Verify installed files and merged configs match manifest
 #   --list                List available recipes and profiles
 #   -y, --yes             Skip confirmation prompts
 #   -h, --help            Show this help message
@@ -36,6 +37,7 @@ PROFILE="default"
 TARGET_ADE=""
 DRY_RUN=false
 UNINSTALL=false
+VERIFY_MODE=false
 LIST_MODE=false
 AUTO_YES=false
 TMPDIR_BASE=""
@@ -52,6 +54,7 @@ while [[ $# -gt 0 ]]; do
         --ade)        TARGET_ADE="$2"; shift 2 ;;
         --dry-run)    DRY_RUN=true; shift ;;
         --uninstall)  UNINSTALL=true; shift ;;
+        --verify)     VERIFY_MODE=true; shift ;;
         --list)       LIST_MODE=true; shift ;;
         -y|--yes)     AUTO_YES=true; shift ;;
         -h|--help)    usage ;;
@@ -461,6 +464,83 @@ if cm:
     fi
 }
 
+# ── Verify config ──────────────────────────────────────────────────
+verify_config() {
+    local strategy=$1
+    local target=$2
+    local source=$3
+
+    python3 "$MERGE_SCRIPT" "$strategy" "$target" "$source" 2>/dev/null
+    return $?
+}
+
+# ── Recipe verification ───────────────────────────────────────────
+verify_recipe() {
+    local recipe_id=$1
+    local ade=$2
+    local ade_home
+    ade_home=$(get_ade_home "$ade")
+    local failed=0
+
+    # Get recipe sources for this ADE
+    local recipe_json
+    recipe_json=$(python3 -c "
+import json
+m = json.load(open('$MANIFEST'))
+r = m['recipes'].get('$recipe_id', {})
+s = r.get('sources', {}).get('$ade', {})
+print(json.dumps(s))
+")
+
+    if [[ "$recipe_json" == "{}" || "$recipe_json" == "null" ]]; then
+        return 0
+    fi
+
+    echo -e "  ${BOLD}[$ade] $recipe_id${NC}"
+
+    # Check files exist
+    python3 -c "
+import json
+s = json.loads('''$recipe_json''')
+for f in s.get('files', []):
+    print(f['dest'])
+" | while IFS= read -r dest; do
+        local full_dest="$HOME/$dest"
+        if [[ -f "$full_dest" ]]; then
+            echo -e "    ${GREEN}✓${NC} $dest"
+        else
+            echo -e "    ${RED}✗ missing:${NC} $dest"
+            failed=1
+        fi
+    done
+
+    # Check config merge
+    local has_merge
+    has_merge=$(python3 -c "
+import json
+s = json.loads('''$recipe_json''')
+cm = s.get('config_merge')
+if cm:
+    print(cm['strategy'] + '|' + cm['target'] + '|' + cm['source'])
+")
+
+    if [[ -n "$has_merge" ]]; then
+        IFS='|' read -r strategy target source <<< "$has_merge"
+        local verify_strategy="verify_${strategy#merge_}"
+        local full_target="$HOME/$target"
+        local full_source="$PAYLOAD_DIR/$source"
+
+        if verify_config "$verify_strategy" "$full_target" "$full_source"; then
+            echo -e "    ${GREEN}✓${NC} hooks registered in $target"
+        else
+            echo -e "    ${RED}✗ hooks missing from $target${NC}"
+            failed=1
+        fi
+    fi
+
+    return $failed
+}
+
 # ── Unmerge config ──────────────────────────────────────────────────
 unmerge_config() {
     local strategy=$1
@@ -638,6 +718,31 @@ if [[ "$UNINSTALL" == "true" ]]; then
     exit 0
 fi
 
+# Verify mode (standalone)
+if [[ "$VERIFY_MODE" == "true" ]]; then
+    RECIPES=$(resolve_recipes)
+    if [[ -z "$RECIPES" ]]; then
+        echo -e "${YELLOW}No recipes to verify.${NC}"
+        exit 0
+    fi
+    echo -e "  ${BOLD}Verifying installation...${NC}"
+    echo ""
+    VERIFY_FAILED=0
+    for ade in $ADES; do
+        for recipe_id in $RECIPES; do
+            verify_recipe "$recipe_id" "$ade" || VERIFY_FAILED=1
+        done
+    done
+    echo ""
+    if [[ "$VERIFY_FAILED" -eq 1 ]]; then
+        echo -e "  ${RED}${BOLD}Verification failed.${NC} Re-run the installer to repair."
+        exit 1
+    else
+        echo -e "  ${GREEN}${BOLD}All checks passed.${NC}"
+        exit 0
+    fi
+fi
+
 # Resolve active recipes
 RECIPES=$(resolve_recipes)
 if [[ -z "$RECIPES" ]]; then
@@ -668,13 +773,34 @@ for ade in $ADES; do
     done
 done
 
+# ── Post-install verification ──────────────────────────────────────
+if [[ "$DRY_RUN" != "true" ]]; then
+    echo ""
+    echo -e "  ${BOLD}Verifying installation...${NC}"
+    VERIFY_FAILED=0
+    for ade in $ADES; do
+        for recipe_id in $RECIPES; do
+            verify_recipe "$recipe_id" "$ade" || VERIFY_FAILED=1
+        done
+    done
+fi
+
 # ── Summary ─────────────────────────────────────────────────────────
 echo ""
-echo -e "${GREEN}${BOLD}"
-echo "  ╔════════════════════════════════════════════════════════╗"
-echo "  ║        INSTALLATION COMPLETE                          ║"
-echo "  ╚════════════════════════════════════════════════════════╝"
-echo -e "${NC}"
+if [[ "$VERIFY_FAILED" -eq 1 ]]; then
+    echo -e "${YELLOW}${BOLD}"
+    echo "  ╔════════════════════════════════════════════════════════╗"
+    echo "  ║   INSTALLATION COMPLETE (with warnings)               ║"
+    echo "  ╚════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+    echo -e "  ${YELLOW}Some checks failed. Run with --verify to see details.${NC}"
+else
+    echo -e "${GREEN}${BOLD}"
+    echo "  ╔════════════════════════════════════════════════════════╗"
+    echo "  ║        INSTALLATION COMPLETE                          ║"
+    echo "  ╚════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+fi
 
 if [[ "$DRY_RUN" == "true" ]]; then
     echo -e "  ${YELLOW}(Dry run — no changes were made)${NC}"
@@ -688,6 +814,9 @@ echo "  Next steps:"
 echo "    1. Open your ADE and verify Snyk recipes are active"
 echo "    2. Run 'snyk auth' if not yet authenticated"
 echo "    3. Try /snyk-fix in a project with dependencies"
+echo ""
+echo "  To verify or diagnose:"
+echo "    ./snyk-studio-install.sh --verify"
 echo ""
 echo "  To uninstall:"
 echo "    ./snyk-studio-install.sh --uninstall"

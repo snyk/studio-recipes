@@ -4,13 +4,16 @@
 Merge strategies (create .bak backup, write pretty-printed JSON, idempotent):
   - merge_cursor_hooks:    ~/.cursor/hooks.json
   - merge_claude_settings: ~/.claude/settings.json
+  - merge_copilot_hooks:   ~/.copilot/hooks.json
   - merge_mcp_servers:     ~/.mcp.json or ~/.cursor/.mcp.json
 
 Unmerge strategies (remove Snyk entries, idempotent):
-  - unmerge_cursor_hooks, unmerge_claude_settings, unmerge_mcp_servers
+  - unmerge_cursor_hooks, unmerge_claude_settings, unmerge_copilot_hooks,
+    unmerge_mcp_servers
 
 Verify strategies (read-only, exit 1 if entries missing):
-  - verify_cursor_hooks, verify_claude_settings, verify_mcp_servers
+  - verify_cursor_hooks, verify_claude_settings, verify_copilot_hooks,
+    verify_mcp_servers
 """
 
 import json
@@ -134,6 +137,40 @@ def merge_claude_settings(target_path, source_path):
     _write_json(target_path, target)
 
 
+def merge_copilot_hooks(target_path, source_path):
+    """Merge Snyk hooks into Copilot's hooks.json (~/.copilot/hooks.json).
+
+    Structurally similar to Cursor but deduplicates on 'bash' field
+    instead of 'command'. For each hook event in source, append entries
+    to target array. Preserves existing non-Snyk hooks.
+    """
+    _backup(target_path)
+    target = _load_json(target_path)
+    source = _load_json(source_path)
+
+    if "version" not in target:
+        target["version"] = source.get("version", 1)
+    if "hooks" not in target:
+        target["hooks"] = {}
+
+    source_hooks = source.get("hooks", {})
+    for event, entries in source_hooks.items():
+        if event not in target["hooks"]:
+            target["hooks"][event] = []
+
+        existing_commands = {
+            e.get("bash") for e in target["hooks"][event] if "bash" in e
+        }
+
+        for entry in entries:
+            cmd = entry.get("bash", "")
+            if cmd not in existing_commands:
+                target["hooks"][event].append(entry)
+                existing_commands.add(cmd)
+
+    _write_json(target_path, target)
+
+
 def merge_mcp_servers(target_path, source_path):
     """Merge Snyk MCP server config into .mcp.json.
 
@@ -149,6 +186,26 @@ def merge_mcp_servers(target_path, source_path):
     source_servers = source.get("mcpServers", {})
     for name, config in source_servers.items():
         target["mcpServers"][name] = config
+
+    _write_json(target_path, target)
+
+
+def merge_copilot_mcp(target_path, source_path):
+    """Merge Snyk MCP server config into Copilot's mcp-config.json.
+
+    Copilot CLI uses 'servers' key (not 'mcpServers').
+    Add/update Snyk server entry. Preserve all non-Snyk servers.
+    """
+    _backup(target_path)
+    target = _load_json(target_path)
+    source = _load_json(source_path)
+
+    if "servers" not in target:
+        target["servers"] = {}
+
+    source_servers = source.get("servers", {})
+    for name, config in source_servers.items():
+        target["servers"][name] = config
 
     _write_json(target_path, target)
 
@@ -238,6 +295,39 @@ def unmerge_claude_settings(target_path, source_path):
     _write_json(target_path, target)
 
 
+def unmerge_copilot_hooks(target_path, source_path):
+    """Remove Snyk hooks from Copilot's hooks.json.
+
+    For each event in source, remove entries from target whose 'bash'
+    field matches any in source. Cleans up empty event arrays.
+    Idempotent — safe if entries already removed.
+    """
+    target = _load_json(target_path)
+    source = _load_json(source_path)
+
+    source_hooks = source.get("hooks", {})
+    if not source_hooks or "hooks" not in target:
+        return
+
+    _backup(target_path)
+
+    for event, entries in source_hooks.items():
+        if event not in target["hooks"]:
+            continue
+
+        remove_commands = {e.get("bash") for e in entries if "bash" in e}
+
+        target["hooks"][event] = [
+            e for e in target["hooks"][event]
+            if e.get("bash") not in remove_commands
+        ]
+
+        if not target["hooks"][event]:
+            del target["hooks"][event]
+
+    _write_json(target_path, target)
+
+
 def unmerge_mcp_servers(target_path, source_path):
     """Remove Snyk MCP server entries from .mcp.json.
 
@@ -255,6 +345,26 @@ def unmerge_mcp_servers(target_path, source_path):
 
     for name in source_servers:
         target["mcpServers"].pop(name, None)
+
+    _write_json(target_path, target)
+
+
+def unmerge_copilot_mcp(target_path, source_path):
+    """Remove Snyk MCP server entries from Copilot's mcp-config.json.
+
+    Uses 'servers' key (Copilot format). Idempotent.
+    """
+    target = _load_json(target_path)
+    source = _load_json(source_path)
+
+    source_servers = source.get("servers", {})
+    if not source_servers or "servers" not in target:
+        return
+
+    _backup(target_path)
+
+    for name in source_servers:
+        target["servers"].pop(name, None)
 
     _write_json(target_path, target)
 
@@ -339,6 +449,38 @@ def verify_claude_settings(target_path, source_path):
         sys.exit(1)
 
 
+def verify_copilot_hooks(target_path, source_path):
+    """Verify that all Snyk hooks from source exist in Copilot's hooks.json.
+
+    Prints missing entries to stderr. Exits with code 1 if anything is missing.
+    Read-only — does not modify any files.
+    """
+    target = _load_json(target_path)
+    source = _load_json(source_path)
+
+    missing = []
+    source_hooks = source.get("hooks", {})
+    target_hooks = target.get("hooks", {})
+
+    for event, entries in source_hooks.items():
+        if event not in target_hooks:
+            missing.append(f"  event '{event}' not found in {target_path}")
+            continue
+
+        existing_commands = {
+            e.get("bash") for e in target_hooks[event] if "bash" in e
+        }
+        for entry in entries:
+            cmd = entry.get("bash", "")
+            if cmd and cmd not in existing_commands:
+                missing.append(f"  hook command missing from '{event}': {cmd}")
+
+    if missing:
+        for m in missing:
+            print(m, file=sys.stderr)
+        sys.exit(1)
+
+
 def verify_mcp_servers(target_path, source_path):
     """Verify that all Snyk MCP servers from source exist in target.
 
@@ -361,16 +503,44 @@ def verify_mcp_servers(target_path, source_path):
         sys.exit(1)
 
 
+def verify_copilot_mcp(target_path, source_path):
+    """Verify that all Snyk MCP servers from source exist in Copilot's config.
+
+    Uses 'servers' key (Copilot format). Read-only.
+    """
+    target = _load_json(target_path)
+    source = _load_json(source_path)
+
+    missing = []
+    source_servers = source.get("servers", {})
+    target_servers = target.get("servers", {})
+
+    for name in source_servers:
+        if name not in target_servers:
+            missing.append(f"  MCP server '{name}' missing from {target_path}")
+
+    if missing:
+        for m in missing:
+            print(m, file=sys.stderr)
+        sys.exit(1)
+
+
 STRATEGIES = {
     "merge_cursor_hooks": merge_cursor_hooks,
     "merge_claude_settings": merge_claude_settings,
+    "merge_copilot_hooks": merge_copilot_hooks,
     "merge_mcp_servers": merge_mcp_servers,
+    "merge_copilot_mcp": merge_copilot_mcp,
     "unmerge_cursor_hooks": unmerge_cursor_hooks,
     "unmerge_claude_settings": unmerge_claude_settings,
+    "unmerge_copilot_hooks": unmerge_copilot_hooks,
     "unmerge_mcp_servers": unmerge_mcp_servers,
+    "unmerge_copilot_mcp": unmerge_copilot_mcp,
     "verify_cursor_hooks": verify_cursor_hooks,
     "verify_claude_settings": verify_claude_settings,
+    "verify_copilot_hooks": verify_copilot_hooks,
     "verify_mcp_servers": verify_mcp_servers,
+    "verify_copilot_mcp": verify_copilot_mcp,
 }
 
 

@@ -1,0 +1,12 @@
+{
+  "servers": {
+    "Snyk": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "snyk@latest", "mcp", "-t", "stdio"],
+      "env": {
+        "SNYK_MCP_PROFILE": "experimental"
+      }
+    }
+  }
+}

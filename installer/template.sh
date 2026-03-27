@@ -5,14 +5,14 @@
 #
 # Self-contained installer for Snyk security recipes.
 # Installs skills, hooks, rules, commands, and MCP configs
-# into Cursor and/or Claude Code global directories.
+# into Cursor, Claude Code, and/or GitHub Copilot global directories.
 #
 # Usage:
 #   ./snyk-studio-install.sh [options]
 #
 # Options:
 #   --profile <name>      Installation profile (default, minimal)
-#   --ade <cursor|claude>  Target specific ADE (auto-detect if omitted)
+#   --ade <name>          Target specific ADE: cursor, claude, copilot (auto-detect if omitted)
 #   --dry-run             Show what would be installed without making changes
 #   --uninstall           Remove Snyk recipes from detected ADEs
 #   --verify              Verify installed files and merged configs match manifest
@@ -165,6 +165,12 @@ detect_ades() {
         detected+=("claude")
     fi
 
+    # Check for GitHub Copilot (VS Code extension or CLI)
+    if [[ -d "$HOME/.copilot" ]] || command -v github-copilot-cli &>/dev/null || \
+       [[ -d "$HOME/.vscode/extensions" ]] && ls "$HOME/.vscode/extensions" 2>/dev/null | grep -qi "github.copilot"; then
+        detected+=("copilot")
+    fi
+
     echo "${detected[@]}"
 }
 
@@ -183,14 +189,16 @@ get_target_ades() {
         echo "  Which ADE(s) would you like to install for?"
         echo "  1) Cursor"
         echo "  2) Claude Code"
-        echo "  3) Both"
+        echo "  3) GitHub Copilot"
+        echo "  4) All"
         echo ""
-        read -p "  Choose (1/2/3): " -n 1 -r
+        read -p "  Choose (1/2/3/4): " -n 1 -r
         echo
         case $REPLY in
             1) echo "cursor" ;;
             2) echo "claude" ;;
-            3) echo "cursor claude" ;;
+            3) echo "copilot" ;;
+            4) echo "cursor claude copilot" ;;
             *) echo -e "${RED}Invalid choice${NC}"; exit 1 ;;
         esac
     else
@@ -266,9 +274,10 @@ for pid, pdata in manifest.get('profiles', {}).items():
 get_ade_home() {
     local ade=$1
     case $ade in
-        cursor) echo "$HOME/.cursor" ;;
-        claude) echo "$HOME/.claude" ;;
-        *)      echo "" ;;
+        cursor)  echo "$HOME/.cursor" ;;
+        claude)  echo "$HOME/.claude" ;;
+        copilot) echo "$HOME/.copilot" ;;
+        *)       echo "" ;;
     esac
 }
 

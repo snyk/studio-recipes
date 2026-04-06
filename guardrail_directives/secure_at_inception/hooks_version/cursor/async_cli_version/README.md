@@ -82,6 +82,7 @@ Changes to dependency manifests (package.json, requirements.txt, etc.) trigger a
 .cursor/hooks/
 ├── snyk_secure_at_inception.py   # Entry point, line tracking, vuln filtering
 └── lib/
+    ├── platform_utils.py         # Cross-platform abstractions (Windows/Unix)
     ├── scan_runner.py            # Scan lifecycle, SARIF parsing
     └── scan_worker.py            # Background subprocess
 ```
@@ -101,3 +102,59 @@ python3 -c "import hashlib,os,tempfile; h=hashlib.sha256(os.getcwd().encode()).h
 **Hook not firing** -- Verify `.cursor/hooks.json` has the hook config, script is executable, and hooks are enabled in Cursor.
 
 **Debug mode** -- `export CURSOR_HOOK_DEBUG=1` before starting a session.
+
+## Windows Installation / Compatibility
+
+The hook scripts use a cross-platform `lib/platform_utils.py` module that handles OS differences automatically. The Python code works on Windows without modification. However, the **hook command** in `hooks.json` and the **installation steps** need adjusting.
+
+### Installation on Windows
+
+**1. Copy files to your project:**
+
+```powershell
+mkdir -Force .cursor\hooks\lib
+copy path\to\cursor-async\snyk_secure_at_inception.py .cursor\hooks\
+copy path\to\cursor-async\lib\*.py .cursor\hooks\lib\
+```
+
+Note: `chmod +x` is not needed on Windows -- executability is determined by file extension.
+
+### Hook command in `hooks.json`
+
+The Unix hook command uses `python3` and `$HOME`, which may not work on Windows. Use one of these alternatives depending on your Python installation:
+
+**Option A -- Using `py` launcher (recommended, ships with Python for Windows):**
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "afterFileEdit": [
+      {
+        "command": "py -3 \"%USERPROFILE%\\.cursor\\hooks\\snyk_secure_at_inception.py\""
+      }
+    ],
+    "stop": [
+      {
+        "command": "py -3 \"%USERPROFILE%\\.cursor\\hooks\\snyk_secure_at_inception.py\""
+      }
+    ]
+  }
+}
+```
+
+**Option B -- Using `python` directly (if `python` points to Python 3 on your PATH):**
+
+Replace `py -3` with `python` in the commands above.
+
+
+### Snyk CLI on Windows
+
+The Snyk CLI can be installed via any of these methods:
+
+- **npm**: `npm install -g snyk` (installs as `snyk.cmd`)
+- **Scoop**: `scoop install snyk`
+- **Chocolatey**: `choco install snyk`
+- **Standalone**: Download from [snyk.io/download](https://snyk.io/download)
+
+After installing, authenticate with `snyk auth`.

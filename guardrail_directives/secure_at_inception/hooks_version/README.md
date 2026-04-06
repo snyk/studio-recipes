@@ -10,9 +10,9 @@ The hooks approach uses coding assistant lifecycle events to prompt the AI agent
 
 | Implementation | Coding Assistant | Hook Events | How It Works |
 |----------------|-----------------|-------------|--------------|
-| **[Cursor - Async CLI](./cursor/async_cli_version/)** | Cursor IDE | `afterFileEdit`, `stop` | Runs `snyk code test` in the background, filters results to agent-modified lines, blocks agent if new vulns found |
+| **[Cursor - Async CLI](./cursor/async_cli_version/)** | Cursor IDE | `sessionStart`, `afterFileEdit`, `stop` | Verifies auth/CLI on start, runs `snyk code test` in the background, filters results to agent-modified lines, blocks agent if new vulns found |
 | **[Cursor - Sync MCP](./cursor/sync_mcp_version/)** | Cursor IDE | `afterFileEdit`, `beforeMCPExecution`, `stop` | Tracks file changes, prompts agent to invoke Snyk MCP tools at session end |
-| **[Claude Code - Async CLI](./claude/async_cli_version/)** | Claude Code | `PostToolUse` (Edit\|Write), `Stop` | Runs `snyk code test` in the background, filters results to agent-modified lines, blocks Claude if new vulns found |
+| **[Claude Code - Async CLI](./claude/async_cli_version/)** | Claude Code | `SessionStart`, `PostToolUse` (Edit\|Write), `Stop` | Verifies auth/CLI on start, runs `snyk code test` in the background, filters results to agent-modified lines, blocks Claude if new vulns found |
 | **[Claude Code - Sync MCP](./claude/sync_mcp_version/)** | Claude Code | `PostToolUse` (Edit\|Write) | Injects `additionalContext` prompting Claude to run Snyk MCP tools after every code file edit |
 | **[Copilot - Async CLI](./copilot/async_cli_version/)** | GitHub Copilot | `postToolUse`, `preToolUse`, `agentStop` | Runs `snyk code test` in the background, filters results to agent-modified lines, gates git commit/push with notify-then-allow |
 

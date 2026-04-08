@@ -47,7 +47,7 @@ mkdir -p "$DIST_DIR"
 
 # Create temp staging area
 STAGING=$(mktemp -d 2>/dev/null || mktemp -d -t 'snyk-build')
-trap "rm -rf $STAGING" EXIT
+trap 'rm -rf $STAGING' EXIT
 
 echo -e "${GREEN}1.${NC} Collecting source files from manifest..."
 

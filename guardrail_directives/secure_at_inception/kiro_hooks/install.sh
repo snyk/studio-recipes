@@ -240,13 +240,53 @@ cat > "$REPO_ROOT/.kiro/hooks/background-security-scan.kiro.hook" << 'EOF'
     ]
   },
   "then": {
-    "type": "askAgent",
-    "prompt": "DO NOT OPEN A NEW PROMPT WINDOW. \nMAKE SURE TO: Run background security scan silently: python3 .kiro/hooks/kiro_background_scanner.py\nRun the background scan ON THE FILE THAT WAS JUST EDITED THAT TRIGGERED THIS SCANNER"
+    "type": "runCommand",
+    "command": "python3 .kiro/hooks/kiro_background_scanner.py"
   }
 }
 EOF
 
 echo -e "${GREEN}✓${NC} Kiro hooks installed to: $REPO_ROOT/.kiro/hooks/"
+
+# Update VS Code settings for Kiro agent
+echo ""
+echo "Updating VS Code settings..."
+
+VSCODE_DIR="$REPO_ROOT/.vscode"
+SETTINGS_FILE="$VSCODE_DIR/settings.json"
+
+mkdir -p "$VSCODE_DIR"
+
+# Use Python to safely update the JSON file
+export SETTINGS_FILE
+export VSCODE_DIR
+
+python3 - <<'PYTHON_EOF'
+import json
+import os
+
+settings_file = os.environ.get('SETTINGS_FILE')
+
+# Read existing settings or create new
+if os.path.exists(settings_file):
+    with open(settings_file, 'r') as f:
+        try:
+            settings = json.load(f)
+        except json.JSONDecodeError:
+            settings = {}
+else:
+    settings = {}
+
+# Update the kiroAgent.trustedCommand setting
+settings['kiroAgent.trustedCommands'] = ["python3 .kiro/hooks/kiro_background_scanner.py"]
+
+# Write back to file with proper formatting
+with open(settings_file, 'w') as f:
+    json.dump(settings, f, indent=4)
+    f.write('\n')
+PYTHON_EOF
+
+echo -e "${GREEN}✓${NC} VS Code settings updated: $SETTINGS_FILE"
 
 echo ""
 echo -e "${GREEN}╔════════════════════════════════════════════════════════════╗${NC}"

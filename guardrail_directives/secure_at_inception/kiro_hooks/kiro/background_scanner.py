@@ -38,7 +38,7 @@ from typing import Any, Dict, List, Optional
 DEBOUNCE_SECONDS = 2.0
 
 # State file for tracking pending scans
-STATE_DIR = os.environ.get("SNYK_HOOK_STATE_DIR", "/tmp")
+STATE_DIR = os.environ.get("SNYK_HOOK_STATE_DIR", "/tmp").replace('..','') 
 
 # Scannable file extensions
 CODE_EXTENSIONS = {
@@ -73,6 +73,48 @@ MANIFEST_FILES = {
 # UTILITIES
 # =============================================================================
 
+def safe_open_within_base(file_path: Path, base_dir: Path, mode: str = 'r'):
+    """
+    Safely open a file after validating it's within the base directory.
+    
+    Prevents path traversal attacks by ensuring the resolved path
+    stays within the allowed base directory.
+    
+    Args:
+        file_path: The path to the file to open
+        base_dir: The base directory that file_path must be within
+        mode: File open mode (default: 'r')
+        
+    Returns:
+        File handle
+        
+    Raises:
+        ValueError: If path would escape the base directory
+    """
+    # For write modes, we need to validate the parent directory exists
+    # and that the path would be within base_dir
+    resolved_base = base_dir.resolve()
+    
+    # If file doesn't exist yet (write mode), validate parent directory
+    if not file_path.exists() and 'w' in mode:
+        # Ensure parent directory exists
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        # Validate the intended path is within base_dir
+        try:
+            file_path.resolve().relative_to(resolved_base)
+        except ValueError:
+            raise ValueError(f"Path traversal detected: {file_path} resolves outside of {resolved_base}")
+    else:
+        # For existing files or read mode, resolve and validate
+        resolved_path = file_path.resolve()
+        try:
+            resolved_path.relative_to(resolved_base)
+        except ValueError:
+            raise ValueError(f"Path traversal detected: {file_path} resolves outside of {resolved_base}")
+    
+    # Path is validated - safe to open
+    return open(file_path, mode)  # noqa: SIM115
+
 def get_workspace_hash(workspace: str) -> str:
     """Generate a unique hash for the workspace."""
     import hashlib
@@ -86,10 +128,17 @@ def get_state_file(workspace: str) -> Path:
     return Path(STATE_DIR) / f"snyk-bg-scanner-{workspace_hash}.json"
 
 
-def get_debounce_file(workspace: str) -> Path:
+def open_debounce_file(workspace: str, mode:str ='r'):
     """Get path to debounce tracking file."""
     workspace_hash = get_workspace_hash(workspace)
-    return Path(STATE_DIR) / f"snyk-debounce-{workspace_hash}.json"
+    workspace_path = Path(STATE_DIR) / f"snyk-debounce-{workspace_hash}.json"
+    return safe_open_within_base(workspace_path, Path(STATE_DIR), mode)
+
+
+def get_debounce_file(workspace: str):
+    """Get path to debounce tracking file."""
+    workspace_hash = get_workspace_hash(workspace)
+    return Path(STATE_DIR)/ f"snyk-debounce-{workspace_hash}.json"
 
 
 def log_to_panel(message: str) -> None:
@@ -151,7 +200,7 @@ class DebounceTracker:
         """Read current debounce state."""
         try:
             if self.state_file.exists():
-                with open(self.state_file, 'r') as f:
+                with open_debounce_file(self.workspace) as f:
                     return json.load(f)
         except (json.JSONDecodeError, FileNotFoundError):
             pass
@@ -160,7 +209,7 @@ class DebounceTracker:
     def write_state(self, state: Dict[str, Any]) -> None:
         """Write debounce state."""
         state["last_update"] = datetime.now().isoformat()
-        with open(self.state_file, 'w') as f:
+        with open_debounce_file(self.workspace, 'w') as f:
             json.dump(state, f)
     
     def add_file(self, file_path: str) -> None:

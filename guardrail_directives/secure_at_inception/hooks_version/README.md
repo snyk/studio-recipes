@@ -14,6 +14,7 @@ The hooks approach uses coding assistant lifecycle events to prompt the AI agent
 | **[Cursor - Sync MCP](./cursor/sync_mcp_version/)** | Cursor IDE | `afterFileEdit`, `beforeMCPExecution`, `stop` | Tracks file changes, prompts agent to invoke Snyk MCP tools at session end |
 | **[Claude Code - Async CLI](./claude/async_cli_version/)** | Claude Code | `PostToolUse` (Edit\|Write), `Stop` | Runs `snyk code test` in the background, filters results to agent-modified lines, blocks Claude if new vulns found |
 | **[Claude Code - Sync MCP](./claude/sync_mcp_version/)** | Claude Code | `PostToolUse` (Edit\|Write) | Injects `additionalContext` prompting Claude to run Snyk MCP tools after every code file edit |
+| **[Copilot - Async CLI](./copilot/async_cli_version/)** | GitHub Copilot | `postToolUse`, `preToolUse`, `agentStop` | Runs `snyk code test` in the background, filters results to agent-modified lines, gates git commit/push with notify-then-allow |
 
 
 ## Coding Assistant Documentation
@@ -48,6 +49,8 @@ Consult your coding assistant's official documentation for how to implement hook
 - [Claude Code Hooks Overview](claude/) - Comparison of both Claude Code versions
 - [Claude Code Async CLI](claude/async_cli_version/) - Background CLI scanning with line-level filtering
 - [Claude Code Sync MCP](claude/sync_mcp_version/) - Post-edit context injection for MCP scans
+- [Copilot Hooks Overview](copilot/) - Copilot hook implementation
+- [Copilot Async CLI](copilot/async_cli_version/) - Background CLI scanning with git-operation gating
 - [Rule Version](../rule_version/) - Inline scanning alternative
 - [Kiro/Git Hooks](../kiro_hooks/) - Git pre-commit hook approach
 - [Secure At Inception Overview](../) - Comparison of all approaches

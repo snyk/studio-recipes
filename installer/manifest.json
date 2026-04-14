@@ -3,8 +3,7 @@
   "description": "Snyk Studio Recipes - Default Distribution",
   "prerequisites": {
     "python": "3.8",
-    "snyk_cli": true,
-    "snyk_auth": true
+    "snyk_cli": true
   },
   "recipes": {
     "sai-hooks-async": {

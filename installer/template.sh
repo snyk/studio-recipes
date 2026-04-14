@@ -130,17 +130,6 @@ check_prerequisites() {
         warnings=$((warnings + 1))
     fi
 
-    # Snyk auth
-    if command -v snyk &>/dev/null; then
-        if snyk whoami &>/dev/null 2>&1; then
-            echo -e "  ${GREEN}✓${NC} Snyk authenticated"
-        else
-            echo -e "  ${YELLOW}⚠ Snyk not authenticated${NC}"
-            echo "    Run: snyk auth"
-            warnings=$((warnings + 1))
-        fi
-    fi
-
     if [[ $warnings -gt 0 && "$AUTO_YES" != "true" ]]; then
         echo ""
         read -p "  Continue with warnings? (y/n) " -n 1 -r

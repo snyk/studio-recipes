@@ -2,19 +2,19 @@
   "hooks": {
     "post_write_code": [
       {
-        "command": "python3 .windsurf/hooks/test.py >> /tmp/windsurf-hook.log 2>&1",
+        "command": "python3 .windsurf/hooks/snyk_secure_at_inception.py >> /tmp/windsurf-hook.log 2>&1",
         "show_output": true
       }
     ],
     "pre_mcp_tool_use": [
       {
-        "command": "python3 .windsurf/hooks/test.py >> /tmp/windsurf-hook.log 2>&1",
+        "command": "python3 .windsurf/hooks/snyk_secure_at_inception.py >> /tmp/windsurf-hook.log 2>&1",
         "show_output": true
       }
     ],
     "post_mcp_tool_use": [
       {
-        "command": "python3 .windsurf/hooks/test.py >> /tmp/windsurf-hook.log 2>&1",
+        "command": "python3 .windsurf/hooks/snyk_secure_at_inception.py >> /tmp/windsurf-hook.log 2>&1",
         "show_output": true
       }
     ]

@@ -43,10 +43,6 @@ Activated when the agent needs to import a new dependency or the user asks about
 - **Node.js / npx** -- Required for the Snyk MCP server
 - **GitHub CLI (`gh`)** -- Optional, needed only for the PR creation feature in `/snyk-fix`
 
-## MCP Profile
-
-This plugin configures the Snyk MCP server with the **experimental** profile. This is required for the `snyk_package_health_check` tool used by the Secure Dependency Health Check skill. The experimental profile includes all tools from the full profile plus tools under evaluation. See [Snyk MCP profiles](https://docs.snyk.io/integrations/snyk-studio-agentic-integrations/getting-started-with-snyk-studio#configure-the-snyk-mcp-profile) for details.
-
 ## Configuration
 
 ### Environment Variables

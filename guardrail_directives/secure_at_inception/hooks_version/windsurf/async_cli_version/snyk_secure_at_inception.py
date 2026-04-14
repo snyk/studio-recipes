@@ -339,10 +339,11 @@ def has_pending_changes(state: Dict[str, Any]) -> bool:
 # HOOK HANDLERS
 # =============================================================================
 
-def handle_after_file_edit(data: Dict[str, Any], workspace: str) -> None:
+def handle_post_write_code(data: Dict[str, Any], workspace: str) -> None:
     """Track file edits and launch background scans."""
-    file_path = data.get("file_path", "")
-    edits = data.get("edits", [])
+    tool_info = data.get("tool_info", {})
+    file_path = tool_info.get("file_path", "")
+    edits = tool_info.get("edits", [])
 
     if is_code_file(file_path):
         with _state_lock(workspace):
@@ -386,7 +387,7 @@ def handle_after_file_edit(data: Dict[str, Any], workspace: str) -> None:
     output_response({"exit_code": 0})
 
 
-def handle_stop(data: Dict[str, Any], workspace: str) -> None:
+def handle_post_mcp_tool_use(data: Dict[str, Any], workspace: str) -> None:
     """Evaluate scan results and block if new vulnerabilities were introduced."""
 
     # --- Read state and check preconditions ---
@@ -591,14 +592,14 @@ def main() -> None:
         output_response({"exit_code": 1})
         sys.exit(1)
 
-    hook_event = data.get("hook_event_name", "")
+    hook_event = data.get("agent_action_name", "")
     workspace = get_workspace(data)
 
     debug_log(f"Event: {hook_event}, Workspace: {workspace}")
 
     handlers = {
-        "afterFileEdit": handle_after_file_edit,
-        "stop": handle_stop,
+        "post_write_code": handle_post_write_code,
+        "post_mcp_tool_use": handle_post_mcp_tool_use,
     }
 
     handler = handlers.get(hook_event)

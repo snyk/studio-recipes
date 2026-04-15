@@ -25,16 +25,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-try:
-    import fcntl
-    _HAS_FCNTL = True
-except ImportError:
-    _HAS_FCNTL = False
-
 SCRIPT_DIR = Path(__file__).parent.resolve()
 LIB_DIR = SCRIPT_DIR / "lib"
 sys.path.insert(0, str(LIB_DIR))
 
+from platform_utils import file_lock, normalize_path
 from scan_runner import (
     launch_background_scan,
     wait_for_scan,
@@ -183,9 +178,7 @@ def _accumulate_ranges(
 # =============================================================================
 
 def _normalize_path(path: str) -> str:
-    while path.startswith("./"):
-        path = path[2:]
-    return path.lstrip("/")
+    return normalize_path(path)
 
 
 def _paths_match(path_a: str, path_b: str) -> bool:
@@ -270,19 +263,11 @@ def _format_vuln_table(vulns: List[Dict[str, Any]]) -> str:
 @contextmanager
 def _state_lock(workspace: str):
     """Exclusive file lock for state.json read-modify-write operations.
-    Falls back to no-op on platforms without fcntl (Windows)."""
-    if not _HAS_FCNTL:
-        yield
-        return
+    Uses fcntl on Unix and msvcrt on Windows."""
     ensure_cache_dirs(workspace)
     lock_path = get_state_file_path(workspace) + ".lock"
-    fd = open(lock_path, "w")
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+    with file_lock(lock_path):
         yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        fd.close()
 
 
 def read_state(workspace: str) -> Dict[str, Any]:

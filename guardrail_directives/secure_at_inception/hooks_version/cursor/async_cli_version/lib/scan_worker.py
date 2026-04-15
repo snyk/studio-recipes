@@ -17,6 +17,7 @@ Environment variables (set by scan_runner):
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -115,9 +116,15 @@ def main():
             )
             return
 
+    snyk_bin = shutil.which("snyk")
+    if snyk_bin is None:
+        log("Snyk CLI not found on PATH")
+        finish("snyk_not_found", started_at=started_at)
+        return
+
     try:
         result = subprocess.run(
-            ["snyk", "code", "test", ".", "--json"],
+            [snyk_bin, "code", "test", ".", "--json"],
             capture_output=True,
             text=True,
             timeout=300,
@@ -129,10 +136,6 @@ def main():
     except subprocess.TimeoutExpired:
         log("Scan timed out")
         finish("timeout", started_at=started_at)
-        return
-    except FileNotFoundError:
-        log("Snyk CLI not found")
-        finish("snyk_not_found", started_at=started_at)
         return
 
     log(f"Snyk exited with code {exit_code}")

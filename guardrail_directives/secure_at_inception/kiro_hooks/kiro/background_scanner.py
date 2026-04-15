@@ -122,12 +122,6 @@ def get_workspace_hash(workspace: str) -> str:
     return hashlib.sha256(workspace.encode()).hexdigest()[:8]
 
 
-def get_state_file(workspace: str) -> Path:
-    """Get path to state file for this workspace."""
-    workspace_hash = get_workspace_hash(workspace)
-    return Path(STATE_DIR) / f"snyk-bg-scanner-{workspace_hash}.json"
-
-
 def open_debounce_file(workspace: str, mode:str ='r'):
     """Get path to debounce tracking file."""
     workspace_hash = get_workspace_hash(workspace)

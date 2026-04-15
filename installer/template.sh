@@ -18,6 +18,7 @@
 #   --verify              Verify installed files and merged configs match manifest
 #   --list                List available recipes and profiles
 #   -y, --yes             Skip confirmation prompts
+#   --disable-upgrades    Skip Snyk CLI install/upgrade checks
 #   -h, --help            Show this help message
 #
 
@@ -40,6 +41,7 @@ UNINSTALL=false
 VERIFY_MODE=false
 LIST_MODE=false
 AUTO_YES=false
+DISABLE_UPGRADES=false
 TMPDIR_BASE=""
 
 # ── Argument parsing ────────────────────────────────────────────────
@@ -57,6 +59,7 @@ while [[ $# -gt 0 ]]; do
         --verify)     VERIFY_MODE=true; shift ;;
         --list)       LIST_MODE=true; shift ;;
         -y|--yes)     AUTO_YES=true; shift ;;
+        --disable-upgrades) DISABLE_UPGRADES=true; shift ;;
         -h|--help)    usage ;;
         *)            echo -e "${RED}Unknown option: $1${NC}"; usage ;;
     esac
@@ -120,14 +123,83 @@ check_prerequisites() {
     fi
 
     # Snyk CLI
+    local has_npm=false
+    if command -v npm &>/dev/null; then
+        has_npm=true
+    fi
+
     if command -v snyk &>/dev/null; then
         local snyk_ver
         snyk_ver=$(snyk --version 2>&1 | head -1)
-        echo -e "  ${GREEN}✓${NC} Snyk CLI $snyk_ver"
+
+        # Check for newer version (graceful — skip if offline, npm unavailable, or upgrades disabled)
+        if [[ "$DISABLE_UPGRADES" == "true" ]]; then
+            echo -e "  ${GREEN}✓${NC} Snyk CLI $snyk_ver (upgrade check skipped)"
+        elif [[ "$has_npm" == "true" ]]; then
+            local latest_ver
+            latest_ver=$(npm view snyk version 2>/dev/null)
+            if [[ -n "$latest_ver" && "$snyk_ver" != "$latest_ver" ]]; then
+                echo -e "  ${YELLOW}⚠ Snyk CLI $snyk_ver installed (latest: $latest_ver)${NC}"
+                local do_upgrade="n"
+                if [[ "$AUTO_YES" == "true" ]]; then
+                    do_upgrade="y"
+                else
+                    read -p "    Upgrade to $latest_ver? (y/n) " -n 1 -r do_upgrade
+                    echo
+                fi
+                if [[ "$do_upgrade" =~ ^[Yy]$ ]]; then
+                    echo "    Installing snyk@latest..."
+                    if npm install -g snyk@latest 2>&1 | tail -1; then
+                        snyk_ver=$(snyk --version 2>&1 | head -1)
+                        echo -e "  ${GREEN}✓${NC} Snyk CLI $snyk_ver"
+                    else
+                        echo -e "  ${YELLOW}⚠ Upgrade failed, continuing with $snyk_ver${NC}"
+                        warnings=$((warnings + 1))
+                    fi
+                else
+                    echo -e "  ${GREEN}✓${NC} Snyk CLI $snyk_ver (update available: $latest_ver)"
+                fi
+            else
+                echo -e "  ${GREEN}✓${NC} Snyk CLI $snyk_ver"
+            fi
+        else
+            echo -e "  ${GREEN}✓${NC} Snyk CLI $snyk_ver"
+        fi
     else
-        echo -e "  ${YELLOW}⚠ Snyk CLI not found${NC}"
-        echo "    Install with: npm install -g snyk"
-        warnings=$((warnings + 1))
+        # Snyk CLI not found — offer to install (unless upgrades disabled)
+        if [[ "$DISABLE_UPGRADES" == "true" ]]; then
+            echo -e "  ${YELLOW}⚠ Snyk CLI not found (install/upgrade disabled)${NC}"
+            warnings=$((warnings + 1))
+        elif [[ "$has_npm" == "true" ]]; then
+            echo -e "  ${YELLOW}⚠ Snyk CLI not found${NC}"
+            local do_install="n"
+            if [[ "$AUTO_YES" == "true" ]]; then
+                do_install="y"
+            else
+                read -p "    Install Snyk CLI now via npm? (y/n) " -n 1 -r do_install
+                echo
+            fi
+            if [[ "$do_install" =~ ^[Yy]$ ]]; then
+                echo "    Installing snyk@latest..."
+                if npm install -g snyk@latest 2>&1 | tail -1; then
+                    local snyk_ver
+                    snyk_ver=$(snyk --version 2>&1 | head -1)
+                    echo -e "  ${GREEN}✓${NC} Snyk CLI $snyk_ver"
+                else
+                    echo -e "  ${RED}✗ Snyk CLI installation failed${NC}"
+                    echo "    Try manually: npm install -g snyk"
+                    warnings=$((warnings + 1))
+                fi
+            else
+                echo -e "  ${YELLOW}⚠ Snyk CLI not installed${NC}"
+                echo "    Install later with: npm install -g snyk"
+                warnings=$((warnings + 1))
+            fi
+        else
+            echo -e "  ${YELLOW}⚠ Snyk CLI not found (npm not available for auto-install)${NC}"
+            echo "    Install Node.js/npm first, then run: npm install -g snyk"
+            warnings=$((warnings + 1))
+        fi
     fi
 
     if [[ $warnings -gt 0 && "$AUTO_YES" != "true" ]]; then
@@ -801,8 +873,7 @@ echo "  ADEs configured: $ADES"
 echo ""
 echo "  Next steps:"
 echo "    1. Open your ADE and verify Snyk recipes are active"
-echo "    2. Run 'snyk auth' if not yet authenticated"
-echo "    3. Try /snyk-fix in a project with dependencies"
+echo "    2. Try /snyk-fix in a project with dependencies"
 echo ""
 echo "  To verify or diagnose:"
 echo "    ./snyk-studio-install.sh --verify"

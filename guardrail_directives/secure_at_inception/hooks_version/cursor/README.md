@@ -6,7 +6,7 @@ This directory contains two Cursor IDE hook implementations for Secure At Incept
 
 | Version | Scanning Approach | Hook Events | Dependencies |
 |---------|------------------|-------------|--------------|
-| **[Async CLI](./async_cli_version/)** | Runs `snyk code test` in the background via CLI, filters results to agent-modified lines | `afterFileEdit`, `stop` | Python 3.8+, Snyk CLI |
+| **[Async CLI](./async_cli_version/)** | Verifies auth/CLI on start, runs `snyk code test` in the background via CLI, filters results to agent-modified lines | `sessionStart`, `afterFileEdit`, `stop` | Python 3.8+, Snyk CLI |
 | **[Sync MCP](./sync_mcp_version/)** | Tracks file changes, prompts the agent to invoke Snyk MCP tools at session end | `afterFileEdit`, `beforeMCPExecution`, `stop` | Python 3.8+, Snyk MCP server |
 
 ## Choosing a Version
@@ -28,9 +28,15 @@ This directory contains two Cursor IDE hook implementations for Secure At Incept
 ### Async CLI Version
 
 ```
+Session starts
+  → sessionStart hook checks Snyk auth + CLI presence
+  → Issues found?   → send followup_message warning the agent
+  → All checks pass → launch cache-warming background scan
+
 Agent edits a file
-  → afterFileEdit tracks modified line ranges, launches background scan
-  → Agent keeps working (non-blocking)
+  → afterFileEdit tracks modified line ranges
+  → Checks for cached errors (auth/CLI) → blocks immediately if found
+  → Launches background scan (non-blocking)
 
 Agent finishes responding
   → stop hook waits for scan results

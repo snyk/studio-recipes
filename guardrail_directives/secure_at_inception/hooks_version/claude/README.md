@@ -6,7 +6,7 @@ This directory contains two Claude Code hook implementations for Secure At Incep
 
 | Version | Scanning Approach | Hook Events | Dependencies |
 |---------|------------------|-------------|--------------|
-| **[Async CLI](./async_cli_version/)** | Runs `snyk code test` in the background via CLI, filters results to agent-modified lines | `PostToolUse` (Edit\|Write), `Stop` | Python 3.8+, Snyk CLI |
+| **[Async CLI](./async_cli_version/)** | Verifies auth/CLI on start, runs `snyk code test` in the background via CLI, filters results to agent-modified lines | `SessionStart`, `PostToolUse` (Edit\|Write), `Stop` | Python 3.8+, Snyk CLI |
 | **[Sync MCP](./sync_mcp_version/)** | Injects `additionalContext` prompting Claude to invoke Snyk MCP tools after every code file edit | `PostToolUse` (Edit\|Write) | bash, jq, Snyk MCP server |
 
 ## Choosing a Version
@@ -29,9 +29,15 @@ This directory contains two Claude Code hook implementations for Secure At Incep
 ### Async CLI Version
 
 ```
+Session starts
+  → SessionStart hook checks Snyk auth + CLI presence
+  → Issues found?   → inject additionalContext warning for Claude
+  → All checks pass → launch cache-warming background scan
+
 Claude edits a file
-  → PostToolUse hook tracks modified line ranges, launches background scan
-  → Claude keeps working (non-blocking)
+  → PostToolUse hook tracks modified line ranges
+  → Checks for cached errors (auth/CLI) → blocks immediately if found
+  → Launches background scan (non-blocking)
 
 Claude finishes responding
   → Stop hook waits for scan results

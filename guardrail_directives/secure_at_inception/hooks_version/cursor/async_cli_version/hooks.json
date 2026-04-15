@@ -1,6 +1,11 @@
 {
   "version": 1,
   "hooks": {
+    "sessionStart": [
+      {
+        "command": "python3 \"$HOME/.cursor/hooks/snyk_secure_at_inception.py\""
+      }
+    ],
     "afterFileEdit": [
       {
         "command": "python3 \"$HOME/.cursor/hooks/snyk_secure_at_inception.py\""

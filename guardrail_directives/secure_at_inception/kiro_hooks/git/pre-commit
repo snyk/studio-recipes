@@ -29,7 +29,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 # Add lib directory to path
 # Resolve symlinks to get the actual script location
@@ -47,18 +47,16 @@ if not LIB_DIR.exists():
     sys.exit(1)
 
 from analyze_diff import get_staged_changes, StagedChanges
-from run_snyk_scan import (
-    run_sast_scan, run_sca_scan, 
-    SastScanResult, ScaScanResult,
-    CodeVulnerability, DependencyVulnerability
+from run_snyk_scan import SastScanResult, ScaScanResult
+from filter_new_vulns import analyze_staged_changes, FilterResult
+from cache import SnykCache, get_cache_dir
+from scanner import get_sast_with_cache, get_sca_with_cache
+from output import (
+    colored, Colors,
+    print_header, print_success, print_error, print_warning, print_info,
+    format_code_vuln_table, format_package_table,
+    generate_detailed_fix_instructions,
 )
-from filter_new_vulns import (
-    analyze_staged_changes,
-    FilterResult,
-    NewCodeVulnerability,
-    PackageSecurityDelta
-)
-from cache import SnykCache, SastCacheEntry, ScaCacheEntry, get_cache_dir
 
 
 # =============================================================================
@@ -73,403 +71,6 @@ QUICK_MODE = os.environ.get("SNYK_HOOK_QUICK", "0") == "1"
 
 # Disable cache (force fresh scans)
 NO_CACHE = os.environ.get("SNYK_HOOK_NO_CACHE", "0") == "1"
-
-# Colors for terminal output
-class Colors:
-    RED = "\033[91m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    BLUE = "\033[94m"
-    MAGENTA = "\033[95m"
-    CYAN = "\033[96m"
-    WHITE = "\033[97m"
-    BOLD = "\033[1m"
-    RESET = "\033[0m"
-
-def colored(text: str, color: str) -> str:
-    """Apply color to text if terminal supports it."""
-    if sys.stdout.isatty():
-        return f"{color}{text}{Colors.RESET}"
-    return text
-
-
-# =============================================================================
-# OUTPUT FORMATTING
-# =============================================================================
-
-def print_header(text: str) -> None:
-    """Print a section header."""
-    print(colored(f"\n{'='*60}", Colors.CYAN))
-    print(colored(f"  {text}", Colors.BOLD))
-    print(colored(f"{'='*60}", Colors.CYAN))
-
-
-def print_success(text: str) -> None:
-    """Print success message."""
-    print(colored(f"✓ {text}", Colors.GREEN))
-
-
-def print_error(text: str) -> None:
-    """Print error message."""
-    print(colored(f"✗ {text}", Colors.RED))
-
-
-def print_warning(text: str) -> None:
-    """Print warning message."""
-    print(colored(f"⚠ {text}", Colors.YELLOW))
-
-
-def print_info(text: str) -> None:
-    """Print info message."""
-    print(colored(f"ℹ {text}", Colors.BLUE))
-
-
-def print_cache_status(hit: bool, target: str) -> None:
-    """Print cache hit/miss status."""
-    if hit:
-        print(colored(f"  ✓ {target}", Colors.GREEN) + colored(" (cached)", Colors.WHITE))
-    else:
-        print(colored(f"  ○ {target}", Colors.YELLOW) + colored(" (scanning...)", Colors.WHITE))
-
-
-def format_code_vuln_table(vulns: List[NewCodeVulnerability]) -> str:
-    """Format code vulnerabilities as a table."""
-    lines = []
-    lines.append("┌─────────────┬────────────────────────────────┬──────────────────────┐")
-    lines.append("│ Severity    │ Vulnerability                  │ Location             │")
-    lines.append("├─────────────┼────────────────────────────────┼──────────────────────┤")
-    
-    for v in vulns:
-        sev = v.vulnerability.severity.upper().ljust(11)
-        title = v.vulnerability.title[:30].ljust(30)
-        loc = f"{Path(v.vulnerability.file_path).name}:{v.vulnerability.start_line}"[:20].ljust(20)
-        
-        # Color severity
-        if v.vulnerability.severity.lower() == "critical":
-            sev = colored(sev, Colors.RED + Colors.BOLD)
-        elif v.vulnerability.severity.lower() == "high":
-            sev = colored(sev, Colors.RED)
-        elif v.vulnerability.severity.lower() == "medium":
-            sev = colored(sev, Colors.YELLOW)
-        else:
-            sev = colored(sev, Colors.WHITE)
-        
-        lines.append(f"│ {sev} │ {title} │ {loc} │")
-    
-    lines.append("└─────────────┴────────────────────────────────┴──────────────────────┘")
-    return "\n".join(lines)
-
-
-def format_package_table(deltas: List[PackageSecurityDelta]) -> str:
-    """Format package security deltas as a table."""
-    lines = []
-    lines.append("┌────────────────────┬──────────────────────┬─────────────────────────┐")
-    lines.append("│ Package            │ Version Change       │ Security Impact         │")
-    lines.append("├────────────────────┼──────────────────────┼─────────────────────────┤")
-    
-    for d in deltas:
-        pkg = d.package_name[:18].ljust(18)
-        
-        if d.is_new_package:
-            ver = f"NEW → {d.new_version}"[:20].ljust(20)
-        else:
-            ver = f"{d.old_version} → {d.new_version}"[:20].ljust(20)
-        
-        impact = d.summary[:23].ljust(23)
-        
-        # Color based on regression status
-        if d.is_regression:
-            impact = colored(impact, Colors.RED)
-        else:
-            impact = colored(impact, Colors.GREEN)
-        
-        lines.append(f"│ {pkg} │ {ver} │ {impact} │")
-    
-    lines.append("└────────────────────┴──────────────────────┴─────────────────────────┘")
-    return "\n".join(lines)
-
-
-def generate_fix_command(result: FilterResult) -> str:
-    """
-    Generate the /snyk-fix-batch command with vulnerability IDs.
-    
-    This is the command users can copy/paste into their LLM to fix the issues.
-    """
-    vuln_ids = []
-    
-    # Add code vulnerability IDs
-    for v in result.new_code_vulns:
-        vuln_id = v.vulnerability.id
-        file_hint = Path(v.vulnerability.file_path).name
-        line = v.vulnerability.start_line
-        vuln_ids.append(f"{vuln_id}@{file_hint}:{line}")
-    
-    # Add package names with regression issues
-    for d in result.package_regressions:
-        # For packages, reference by package name
-        vuln_ids.append(f"sca:{d.package_name}")
-    
-    if not vuln_ids:
-        return ""
-    
-    # Format as a single command
-    ids_str = ", ".join(vuln_ids)
-    return f"/snyk-fix-batch {ids_str}"
-
-
-def generate_detailed_fix_instructions(result: FilterResult) -> str:
-    """Generate detailed instructions for fixing the issues."""
-    lines = []
-    
-    lines.append(colored("\n╔══════════════════════════════════════════════════════════════╗", Colors.MAGENTA))
-    lines.append(colored("║           HOW TO FIX THESE ISSUES                            ║", Colors.MAGENTA))
-    lines.append(colored("╚══════════════════════════════════════════════════════════════╝", Colors.MAGENTA))
-    
-    lines.append("")
-    lines.append(colored("Copy and paste this command into your AI assistant:", Colors.BOLD))
-    lines.append("")
-    
-    # Generate the command
-    fix_cmd = generate_fix_command(result)
-    lines.append(colored("┌────────────────────────────────────────────────────────────────┐", Colors.CYAN))
-    lines.append(colored(f"│  {fix_cmd.ljust(62)} │", Colors.CYAN + Colors.BOLD))
-    lines.append(colored("└────────────────────────────────────────────────────────────────┘", Colors.CYAN))
-    
-    lines.append("")
-    lines.append("Or fix individually:")
-    
-    if result.new_code_vulns:
-        lines.append("")
-        lines.append(colored("  Code vulnerabilities:", Colors.YELLOW))
-        for v in result.new_code_vulns:
-            file_path = v.vulnerability.file_path
-            line = v.vulnerability.start_line
-            vuln_id = v.vulnerability.id
-            lines.append(f"    /snyk-fix code {vuln_id} {file_path}:{line}")
-    
-    if result.package_regressions:
-        lines.append("")
-        lines.append(colored("  Dependency vulnerabilities:", Colors.YELLOW))
-        for d in result.package_regressions:
-            lines.append(f"    /snyk-fix sca {d.package_name}")
-    
-    lines.append("")
-    lines.append(colored("After fixing, stage your changes and commit again.", Colors.WHITE))
-    lines.append(colored("To bypass this check: git commit --no-verify", Colors.WHITE))
-    
-    return "\n".join(lines)
-
-
-# =============================================================================
-# CACHE-AWARE SCANNING
-# =============================================================================
-
-def get_sast_with_cache(
-    staged: StagedChanges,
-    cache: SnykCache
-) -> Tuple[SastScanResult, int, int]:
-    """
-    Get SAST results using cache where available.
-    
-    Returns:
-        Tuple of (SastScanResult, cache_hits, cache_misses)
-    """
-    all_vulns: List[CodeVulnerability] = []
-    cache_hits = 0
-    cache_misses = 0
-    uncached_files: List[str] = []
-    
-    print_info("Checking SAST cache...")
-    
-    for file_path in staged.changed_code_files:
-        # DEBUG: Log cache lookup details
-        file_hash = cache.compute_file_hash(file_path)
-        if DEBUG:
-            print(f"  DEBUG: Looking up cache for {file_path}, hash={file_hash}")
-        cached = cache.get_sast_result(file_path)
-        if DEBUG:
-            print(f"  DEBUG: Cache result: {cached is not None}, NO_CACHE={NO_CACHE}")
-        
-        if cached and not NO_CACHE:
-            cache_hits += 1
-            print_cache_status(True, Path(file_path).name)
-            
-            # Convert cached vulns back to CodeVulnerability objects
-            for v in cached.vulnerabilities:
-                all_vulns.append(CodeVulnerability(
-                    id=v.get("id", "unknown"),
-                    title=v.get("title", "Unknown"),
-                    severity=v.get("severity", "medium"),
-                    cwe=v.get("cwe"),
-                    file_path=file_path,
-                    start_line=v.get("start_line", 0),
-                    end_line=v.get("end_line", 0),
-                    message=v.get("message", "")
-                ))
-        else:
-            cache_misses += 1
-            uncached_files.append(file_path)
-            print_cache_status(False, Path(file_path).name)
-    
-    # Run fresh scans for uncached files
-    if uncached_files:
-        print_info(f"Running SAST scan on {len(uncached_files)} uncached file(s)...")
-        
-        # Run scan on entire project (Snyk Code works better this way)
-        fresh_result = run_sast_scan(".")
-        
-        if fresh_result.success:
-            # Filter to only uncached files and add to results
-            for v in fresh_result.vulnerabilities:
-                # Check if this vuln is in an uncached file
-                for uncached in uncached_files:
-                    if (v.file_path == uncached or 
-                        v.file_path.endswith(uncached) or 
-                        uncached.endswith(v.file_path) or
-                        Path(v.file_path).name == Path(uncached).name):
-                        all_vulns.append(v)
-                        break
-            
-            # Cache the results for these files
-            for file_path in uncached_files:
-                file_vulns = [
-                    {
-                        "id": v.id,
-                        "title": v.title,
-                        "severity": v.severity,
-                        "cwe": v.cwe,
-                        "start_line": v.start_line,
-                        "end_line": v.end_line,
-                        "message": v.message
-                    }
-                    for v in fresh_result.vulnerabilities
-                    if (v.file_path == file_path or 
-                        v.file_path.endswith(file_path) or
-                        file_path.endswith(v.file_path) or
-                        Path(v.file_path).name == Path(file_path).name)
-                ]
-                cache.set_sast_result(file_path, file_vulns)
-        else:
-            print_warning(f"SAST scan failed: {fresh_result.error_message}")
-    
-    return SastScanResult(success=True, vulnerabilities=all_vulns), cache_hits, cache_misses
-
-
-def resolve_installed_version(package_name: str, semver_range: str) -> str:
-    """
-    Resolve the actual installed version from package-lock.json.
-    Falls back to the semver range if resolution fails.
-    """
-    import json
-    
-    try:
-        # Try to read package-lock.json
-        lock_file = Path("package-lock.json")
-        if not lock_file.exists():
-            return semver_range.lstrip('^~>=<')
-        
-        with open(lock_file, 'r') as f:
-            lock_data = json.load(f)
-        
-        # Check in packages (lockfileVersion 2+)
-        if "packages" in lock_data:
-            pkg_key = f"node_modules/{package_name}"
-            if pkg_key in lock_data["packages"]:
-                return lock_data["packages"][pkg_key].get("version", semver_range.lstrip('^~>=<'))
-        
-        # Check in dependencies (lockfileVersion 1)
-        if "dependencies" in lock_data and package_name in lock_data["dependencies"]:
-            return lock_data["dependencies"][package_name].get("version", semver_range.lstrip('^~>=<'))
-        
-    except Exception:
-        pass  # Fall back to semver range
-    
-    return semver_range.lstrip('^~>=<')
-
-
-def get_sca_with_cache(
-    staged: StagedChanges,
-    cache: SnykCache
-) -> Tuple[ScaScanResult, int, int]:
-    """
-    Get SCA results using cache where available.
-    
-    Returns:
-        Tuple of (ScaScanResult, cache_hits, cache_misses)
-    """
-    all_vulns: List[DependencyVulnerability] = []
-    cache_hits = 0
-    cache_misses = 0
-    need_fresh_scan = False
-    
-    print_info("Checking SCA cache...")
-    
-    for pkg_name, pkg_change in staged.packages.items():
-        if pkg_change.new_version is None:
-            continue  # Skip removed packages
-        
-        # Resolve actual installed version from package-lock.json
-        version = resolve_installed_version(pkg_name, pkg_change.new_version)
-        cached = cache.get_sca_result(pkg_name, version)
-        
-        if cached and not NO_CACHE:
-            cache_hits += 1
-            print_cache_status(True, f"{pkg_name}@{version}")
-            
-            # Convert cached vulns back to DependencyVulnerability objects
-            for v in cached.vulnerabilities:
-                all_vulns.append(DependencyVulnerability(
-                    id=v.get("id", "unknown"),
-                    title=v.get("title", "Unknown"),
-                    severity=v.get("severity", "medium"),
-                    package_name=pkg_name,
-                    installed_version=version,
-                    fixed_version=v.get("fixed_version"),
-                    cve=v.get("cve"),
-                    cvss_score=None,
-                    is_direct=True,
-                    dependency_path=[]
-                ))
-        else:
-            cache_misses += 1
-            need_fresh_scan = True
-            print_cache_status(False, f"{pkg_name}@{version}")
-    
-    # Run fresh scan if any packages are uncached
-    if need_fresh_scan:
-        print_info("Running SCA scan on dependencies...")
-        fresh_result = run_sca_scan(".")
-        
-        if fresh_result.success:
-            # Add fresh results (avoiding duplicates from cache)
-            cached_ids = {v.id for v in all_vulns}
-            
-            for v in fresh_result.vulnerabilities:
-                if v.id not in cached_ids:
-                    all_vulns.append(v)
-            
-            # Cache results per package
-            packages_cached: Dict[str, List[Dict]] = {}
-            for v in fresh_result.vulnerabilities:
-                key = f"{v.package_name}@{v.installed_version}"
-                if key not in packages_cached:
-                    packages_cached[key] = []
-                packages_cached[key].append({
-                    "id": v.id,
-                    "title": v.title,
-                    "severity": v.severity,
-                    "fixed_version": v.fixed_version,
-                    "cve": v.cve
-                })
-            
-            for key, vulns in packages_cached.items():
-                pkg, ver = key.rsplit("@", 1)
-                cache.set_sca_result(pkg, ver, vulns)
-        else:
-            print_warning(f"SCA scan failed: {fresh_result.error_message}")
-    
-    return ScaScanResult(success=True, vulnerabilities=all_vulns), cache_hits, cache_misses
-
 
 # =============================================================================
 # MAIN HOOK LOGIC
@@ -517,18 +118,22 @@ def run_hook() -> int:
     total_cache_misses = 0
     
     if staged.has_code_changes:
-        sast_result, hits, misses = get_sast_with_cache(staged, cache)
+        print_info("Checking SAST cache...")
+        sast_result, hits, misses = get_sast_with_cache(staged, cache, no_cache=NO_CACHE, debug=DEBUG)
         total_cache_hits += hits
         total_cache_misses += misses
-        
+        if misses:
+            print_info(f"Running SAST scan on {misses} uncached file(s)...")
         if DEBUG and sast_result:
             print(f"  Found {len(sast_result.vulnerabilities)} total code vulnerabilities")
-    
+
     if staged.has_package_changes:
-        sca_result, hits, misses = get_sca_with_cache(staged, cache)
+        print_info("Checking SCA cache...")
+        sca_result, hits, misses = get_sca_with_cache(staged, cache, no_cache=NO_CACHE, debug=DEBUG)
         total_cache_hits += hits
         total_cache_misses += misses
-        
+        if misses:
+            print_info("Running SCA scan on dependencies...")
         if DEBUG and sca_result:
             print(f"  Found {len(sca_result.vulnerabilities)} total dependency vulnerabilities")
     

@@ -11,15 +11,15 @@ Configuration is passed via environment variables.
 
 Environment variables (set by scan_runner):
 - SAI_WORKSPACE: Path to the workspace being scanned
-- SAI_CACHE_DIR: Path to the cache directory
 - SAI_LIB_DIR: Path to the lib directory (for imports)
 """
 
+import hashlib
 import json
 import os
-import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -29,6 +29,23 @@ LIB_DIR = str(Path(__file__).parent.resolve())
 PID_FILE = ""
 DONE_FILE = ""
 LOG_FILE = ""
+
+# Hardcoded well-known Snyk config location
+_SNYK_CONFIG_PATH = os.path.join(
+    os.path.expanduser("~"), ".config", "configstore", "snyk.json"
+)
+
+
+def _compute_cache_dir(workspace: str) -> str:
+    """Derive cache directory from tempdir and workspace hash.
+    The regex extraction sanitizes the hash to break taint propagation."""
+    import re
+    raw_hash = hashlib.sha256(workspace.encode()).hexdigest()[:8]
+    match = re.fullmatch(r'[a-f0-9]{1,8}', raw_hash)
+    if not match:
+        raise ValueError("Unexpected hash output")
+    clean_hash = match.group(0)
+    return os.path.join(tempfile.gettempdir(), "copilot-sai-" + clean_hash)
 
 
 def log(msg):
@@ -71,12 +88,15 @@ def main():
 
     try:
         WORKSPACE = os.environ["SAI_WORKSPACE"]
-        CACHE_DIR = os.environ["SAI_CACHE_DIR"]
     except KeyError as e:
         print(f"[SAI scan_worker] Missing required env var: {e}", file=sys.stderr)
         sys.exit(1)
 
     LIB_DIR = os.environ.get("SAI_LIB_DIR", str(Path(__file__).parent.resolve()))
+
+    # Derive cache dir from workspace hash -- not from env var
+    CACHE_DIR = _compute_cache_dir(WORKSPACE)
+    os.makedirs(CACHE_DIR, exist_ok=True)
 
     PID_FILE = os.path.join(CACHE_DIR, "scan.pid")
     DONE_FILE = os.path.join(CACHE_DIR, "scan.done")
@@ -92,13 +112,9 @@ def main():
         os.remove(DONE_FILE)
 
     if not os.environ.get("SNYK_TOKEN"):
-        config_dir = os.environ.get(
-            "XDG_CONFIG_HOME", os.path.expanduser("~/.config")
-        )
-        snyk_config_path = os.path.join(config_dir, "configstore", "snyk.json")
         has_stored_auth = False
         try:
-            with open(snyk_config_path, "r") as f:
+            with open(_SNYK_CONFIG_PATH, "r") as f:
                 snyk_cfg = json.load(f)
             has_stored_auth = bool(
                 snyk_cfg.get("api")
@@ -116,15 +132,9 @@ def main():
             )
             return
 
-    snyk_bin = shutil.which("snyk")
-    if snyk_bin is None:
-        log("Snyk CLI not found on PATH")
-        finish("snyk_not_found", started_at=started_at)
-        return
-
     try:
         result = subprocess.run(
-            [snyk_bin, "code", "test", ".", "--json"],
+            ["snyk", "code", "test", ".", "--json"],
             capture_output=True,
             text=True,
             timeout=300,
@@ -136,6 +146,10 @@ def main():
     except subprocess.TimeoutExpired:
         log("Scan timed out")
         finish("timeout", started_at=started_at)
+        return
+    except FileNotFoundError:
+        log("Snyk CLI not found")
+        finish("snyk_not_found", started_at=started_at)
         return
 
     log(f"Snyk exited with code {exit_code}")

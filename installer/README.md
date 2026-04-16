@@ -1,6 +1,15 @@
 # Snyk Studio Recipes — Installer
 
-Self-contained shell installer that copies recipes from this repo into **your user home** so **Cursor** and/or **Claude Code** can use them globally (hooks, commands, skills, MCP merge). It is driven by [`manifest.json`](manifest.json).
+Cross-platform installer that copies recipes from this repo into **your user home** so **Cursor** and/or **Claude Code** can use them globally (hooks, commands, skills, MCP merge). It is driven by [`manifest.json`](manifest.json).
+
+Two installer variants are available:
+
+| Variant | File | Platform | Build tool |
+|---------|------|----------|------------|
+| **Shell** | `dist/snyk-studio-install.sh` | macOS / Linux | `build.sh` |
+| **Python** | `dist/snyk-studio-install.py` | macOS / Linux / Windows | `build_installer.py` |
+
+Both read the same `manifest.json` and produce identical results.
 
 ## What it installs
 
@@ -17,31 +26,46 @@ Source layout and destinations are defined per recipe in `manifest.json`.
 
 ## Prerequisites
 
-The manifest documents expectations; the bundled script checks at run time:
+The installer checks these at run time:
 
 - **Python 3.8+** (required)
-- **Snyk CLI** and **Snyk auth** (warned if missing; hooks/scans need them)
+- **Snyk CLI** (offered for install/upgrade via npm if missing or outdated; use `--disable-upgrades` to skip)
 
 ## Build the distributable
 
-From this directory:
+### Shell installer (macOS / Linux)
 
 ```bash
 cd installer
 ./build.sh
 ```
 
-This reads `manifest.json`, collects all referenced files from the **repository root**, embeds them in `template.sh`, and writes:
+This reads `manifest.json`, collects all referenced files from the **repository root**, embeds them as a base64 tarball in `template.sh`, and writes `dist/snyk-studio-install.sh`.
 
-- **`dist/snyk-studio-install.sh`** — single file you can copy or ship; it extracts its payload and runs.
+### Python installer (cross-platform)
+
+```bash
+cd installer
+python3 build_installer.py
+```
+
+This reads `manifest.json`, collects all referenced files, embeds them as a base64 zip in `snyk-studio-installer.py`, and writes `dist/snyk-studio-install.py`.
 
 Rebuild after changing `manifest.json` or any packaged sources.
 
 ## Run the installer
 
+### macOS / Linux
+
 ```bash
 chmod +x dist/snyk-studio-install.sh
 ./dist/snyk-studio-install.sh [options]
+```
+
+### Windows (or any platform with Python)
+
+```bash
+python dist/snyk-studio-install.py [options]
 ```
 
 ### Options
@@ -55,6 +79,7 @@ chmod +x dist/snyk-studio-install.sh
 | `--verify` | Check that installed files and merged configs match the manifest (read-only) |
 | `--list` | List recipes and profiles from the embedded manifest |
 | `-y`, `--yes` | Skip confirmation prompts |
+| `--disable-upgrades` | Skip Snyk CLI install/upgrade checks |
 | `-h`, `--help` | Help |
 
 ### Verification
@@ -84,22 +109,25 @@ Implementation: `lib/merge_json.py` (`verify_cursor_hooks`, `verify_claude_setti
 
 ### Develop without rebuilding
 
-For quick iteration you can run **`template.sh`** from a git checkout **only if** you manually mirror what `build.sh` does (payload + `manifest.json` beside the script). For distribution, prefer `build.sh` → `dist/snyk-studio-install.sh`.
+For quick iteration you can run **`template.sh`** (shell) or **`snyk-studio-installer.py`** (Python) from a git checkout **only if** you manually mirror what the build scripts do (payload + `manifest.json` beside the script). For distribution, prefer the build output in `dist/`.
 
 ## Repository layout (this folder)
 
 | Path | Role |
 |------|------|
 | `manifest.json` | Declares recipes, files, merges, transforms, and profiles |
-| `template.sh` | Installer source; embeds tarball after build |
+| `template.sh` | Shell installer source; embeds tarball after build |
 | `build.sh` | Produces `dist/snyk-studio-install.sh` |
+| `snyk-studio-installer.py` | Python installer source; embeds zip after build |
+| `build_installer.py` | Produces `dist/snyk-studio-install.py` |
 | `lib/merge_json.py` | JSON merge strategies (hooks, MCP, Claude settings) |
 | `lib/transform.py` | e.g. skill → command, `.mdc` → `.md` |
-| `dist/` | Generated `snyk-studio-install.sh` (after build) — not hand-edited |
+| `dist/` | Generated installers (after build) — not hand-edited |
+| `tests/` | pytest test suite |
 
 ## Customization
 
 - Edit **`manifest.json`** to add/remove recipes, change profiles, or point at different sources.
-- Re-run **`./build.sh`** to refresh `dist/snyk-studio-install.sh`.
+- Re-run **`./build.sh`** and/or **`python3 build_installer.py`** to refresh the distributable(s).
 
-For behavior details (merge strategies, uninstall paths, ADE detection), see comments in `template.sh`.
+For behavior details (merge strategies, uninstall paths, ADE detection), see comments in `template.sh` and `snyk-studio-installer.py`.

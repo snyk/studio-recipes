@@ -2,9 +2,7 @@
   "version": "1.0.0",
   "description": "Snyk Studio Recipes - Default Distribution",
   "prerequisites": {
-    "python": "3.8",
-    "snyk_cli": true,
-    "snyk_auth": true
+    "python": "3.8"
   },
   "recipes": {
     "sai-hooks-async": {
@@ -15,6 +13,7 @@
         "cursor": {
           "files": [
             { "src": "guardrail_directives/secure_at_inception/hooks_version/cursor/async_cli_version/snyk_secure_at_inception.py", "dest": ".cursor/hooks/snyk_secure_at_inception.py" },
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/cursor/async_cli_version/lib/platform_utils.py", "dest": ".cursor/hooks/lib/platform_utils.py" },
             { "src": "guardrail_directives/secure_at_inception/hooks_version/cursor/async_cli_version/lib/scan_runner.py", "dest": ".cursor/hooks/lib/scan_runner.py" },
             { "src": "guardrail_directives/secure_at_inception/hooks_version/cursor/async_cli_version/lib/scan_worker.py", "dest": ".cursor/hooks/lib/scan_worker.py" }
           ],
@@ -27,6 +26,7 @@
         "claude": {
           "files": [
             { "src": "guardrail_directives/secure_at_inception/hooks_version/claude/async_cli_version/snyk_secure_at_inception.py", "dest": ".claude/hooks/snyk_secure_at_inception.py" },
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/claude/async_cli_version/lib/platform_utils.py", "dest": ".claude/hooks/lib/platform_utils.py" },
             { "src": "guardrail_directives/secure_at_inception/hooks_version/claude/async_cli_version/lib/scan_runner.py", "dest": ".claude/hooks/lib/scan_runner.py" },
             { "src": "guardrail_directives/secure_at_inception/hooks_version/claude/async_cli_version/lib/scan_worker.py", "dest": ".claude/hooks/lib/scan_worker.py" }
           ],

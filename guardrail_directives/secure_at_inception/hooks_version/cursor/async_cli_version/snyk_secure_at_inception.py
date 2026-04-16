@@ -8,13 +8,19 @@ line ranges, and blocks the agent from stopping if new vulnerabilities were
 introduced in agent-modified code.
 
 WORKFLOW:
-  1. afterFileEdit -> track modified line ranges, launch background scan
-  2. stop -> wait for scan, filter results to modified lines, block if new vulns
+  1. sessionStart -> verify auth + CLI, launch cache-warming scan
+  2. afterFileEdit -> track modified line ranges, launch background scan
+  3. stop -> wait for scan, filter results to modified lines, block if new vulns
 
 INSTALLATION:
   1. Copy this script and lib/ to .cursor/hooks/
   2. chmod +x snyk_secure_at_inception.py
   3. Configure hooks.json (see hooks.json in this directory)
+
+PREREQUISITES:
+  - Python 3.8+
+  - Snyk CLI (npm install -g snyk)
+  - Snyk authentication (snyk auth)
 """
 
 import sys
@@ -25,19 +31,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-try:
-    import fcntl
-    _HAS_FCNTL = True
-except ImportError:
-    _HAS_FCNTL = False
-
 SCRIPT_DIR = Path(__file__).parent.resolve()
 LIB_DIR = SCRIPT_DIR / "lib"
 sys.path.insert(0, str(LIB_DIR))
 
+from platform_utils import file_lock, normalize_path
 from scan_runner import (
+    check_snyk_auth,
+    check_snyk_cli,
     launch_background_scan,
     wait_for_scan,
+    write_early_status,
     get_cache_dir,
     ensure_cache_dirs,
     clear_scan_state,
@@ -196,9 +200,7 @@ def _accumulate_ranges(
 # =============================================================================
 
 def _normalize_path(path: str) -> str:
-    while path.startswith("./"):
-        path = path[2:]
-    return path.lstrip("/")
+    return normalize_path(path)
 
 
 def _paths_match(path_a: str, path_b: str) -> bool:
@@ -288,19 +290,11 @@ def _format_vuln_table(vulns: List[Dict[str, Any]]) -> str:
 @contextmanager
 def _state_lock(workspace: str):
     """Exclusive file lock for state.json read-modify-write operations.
-    Falls back to no-op on platforms without fcntl (Windows)."""
-    if not _HAS_FCNTL:
-        yield
-        return
+    Uses fcntl on Unix and msvcrt on Windows."""
     ensure_cache_dirs(workspace)
     lock_path = get_state_file_path(workspace) + ".lock"
-    fd = open(lock_path, "w")
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+    with file_lock(lock_path):
         yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        fd.close()
 
 
 def read_state(workspace: str) -> Dict[str, Any]:
@@ -340,6 +334,64 @@ def has_pending_changes(state: Dict[str, Any]) -> bool:
 # HOOK HANDLERS
 # =============================================================================
 
+def handle_session_start(data: Dict[str, Any], workspace: str) -> None:
+    """Verify prerequisites and launch a cache-warming scan at session start.
+
+    Checks Snyk auth and CLI presence. If either is missing, reports via
+    followup_message so the agent can inform the user. If all checks pass,
+    launches a background scan to warm Snyk's internal analysis cache.
+    """
+    issues: List[str] = []
+
+    # 1. Check Snyk auth
+    if check_snyk_auth() is None:
+        issues.append("auth")
+        log_to_panel("[SAI] Snyk CLI not authenticated")
+
+    # 2. Check Snyk CLI presence
+    if check_snyk_cli() is None:
+        issues.append("cli")
+        log_to_panel("[SAI] Snyk CLI not found on PATH")
+
+    # 3. Report issues via followup_message and write early status
+    if issues:
+        message_parts: List[str] = []
+        if "cli" in issues:
+            message_parts.append(
+                "Snyk CLI is not installed or not on PATH. Security scanning "
+                "requires the Snyk CLI. Install it with `npm install -g snyk` "
+                "and authenticate with `snyk auth`."
+            )
+            write_early_status(
+                workspace, "snyk_not_found",
+                "Snyk CLI not found on PATH.",
+            )
+        elif "auth" in issues:
+            message_parts.append(
+                "Snyk CLI is not authenticated. Security scanning is unavailable "
+                "until you run `snyk auth` in a terminal to authenticate."
+            )
+            write_early_status(
+                workspace, "auth_required",
+                "Snyk CLI is not authenticated. Run snyk auth.",
+            )
+
+        output_response({"followup_message": " ".join(message_parts)})
+        return
+
+    # 4. All checks passed -- clear stale state from prior sessions
+    log_to_panel("[SAI] Snyk authenticated, CLI found")
+    clear_state(workspace)
+
+    # 5. Launch cache-warming scan (non-blocking, dedup built-in)
+    if launch_background_scan(workspace):
+        log_to_panel("[SAI] Cache-warming scan launched")
+    else:
+        debug_log("Cache-warm scan not launched (already running or complete)")
+
+    output_response({"exit_code": 0})
+
+
 def handle_after_file_edit(data: Dict[str, Any], workspace: str) -> None:
     """Track file edits and launch background scans."""
     file_path = data.get("file_path", "")
@@ -367,6 +419,32 @@ def handle_after_file_edit(data: Dict[str, Any], workspace: str) -> None:
             range_count = len(code_files[file_path]["modified_ranges"])
 
         log_to_panel(f"[SAI] Tracked: {Path(file_path).name} ({range_count} range(s))")
+
+        # Peek at cached scan status for early error detection.
+        # If sessionStart or a prior scan_worker wrote an error status,
+        # block immediately instead of waiting for the stop hook.
+        scan_info = get_scan_completion_info(workspace)
+        if scan_info:
+            cached_status = scan_info.get("status")
+            if cached_status in ("auth_required", "snyk_not_found"):
+                log_to_panel(f"[SAI] Prerequisite issue detected: {cached_status}")
+                clear_scan_state(workspace)  # Allow recovery on next edit
+
+                if cached_status == "auth_required":
+                    reason = (
+                        "Snyk CLI is not authenticated. Security scanning cannot run. "
+                        "Please run `snyk auth` in a terminal to authenticate, "
+                        "then continue editing."
+                    )
+                else:
+                    reason = (
+                        "Snyk CLI is not installed or not on PATH. Security scanning "
+                        "cannot run. Please install the Snyk CLI with "
+                        "`npm install -g snyk` and authenticate with `snyk auth`, "
+                        "then continue editing."
+                    )
+                output_response({"followup_message": reason})
+                return
 
         if launch_background_scan(workspace):
             log_to_panel("[SAI] Background scan launched")
@@ -500,9 +578,12 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
 
             if manifest_files:
                 manifest_list = ", ".join(Path(f).name for f in manifest_files)
+                manifest_paths = ", ".join(str(f) for f in manifest_files)
                 fallback += (
-                    f" Also run snyk_sca_scan on the current directory to check "
-                    f"for vulnerable dependencies. Modified manifest files: {manifest_list}."
+                    f" Also run snyk_sca_scan targeting only the changed manifest(s): "
+                    f"{manifest_paths}. "
+                    f"Only fix vulnerabilities introduced by your changes to "
+                    f"{manifest_list} -- do NOT fix pre-existing dependency issues."
                 )
             clear_state(workspace)
             output_response({"followup_message": fallback})
@@ -549,8 +630,15 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
     if manifest_files:
         message_parts.append("")
         message_parts.append("## Manifest Files Changed (SCA scan needed)")
+        message_parts.append("")
         for mf in manifest_files:
-            message_parts.append(f"- {Path(mf).name}")
+            message_parts.append(f"- {mf}")
+        message_parts.append("")
+        message_parts.append(
+            "Run snyk_sca_scan targeting only the changed manifest file(s) listed above. "
+            "Only fix vulnerabilities introduced by your changes to these manifests -- "
+            "do NOT fix pre-existing dependency issues."
+        )
 
     if not new_vulns and manifest_files:
         message_parts.insert(0, "/snyk-batch-fix")
@@ -598,6 +686,7 @@ def main() -> None:
     debug_log(f"Event: {hook_event}, Workspace: {workspace}")
 
     handlers = {
+        "sessionStart": handle_session_start,
         "afterFileEdit": handle_after_file_edit,
         "stop": handle_stop,
     }

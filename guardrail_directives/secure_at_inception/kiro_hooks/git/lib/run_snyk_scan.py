@@ -121,9 +121,12 @@ class ScaScanResult:
         - Vulnerabilities in fresh (if express depends on fresh)
         etc.
         """
+        # Snyk resolves the dependency tree before emitting JSON and does not
+        # produce cyclic paths in the 'from' field, so iterating dependency_path
+        # without cycle detection is safe here.
         return [
-            v for v in self.vulnerabilities 
-            if any(package_name == dep.split('@')[0] for dep in v.dependency_path)
+            v for v in self.vulnerabilities
+            if any(package_name == dep.rsplit('@', 1)[0] for dep in v.dependency_path)
         ]
     
     def count_severity_for_package_tree(self, package_name: str) -> Dict[str, int]:

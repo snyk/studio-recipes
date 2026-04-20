@@ -13,7 +13,6 @@ The Stop hook calls wait_for_scan() which polls for the completion marker,
 then reads results (including parsed vulnerabilities) from scan.done.
 """
 
-import glob
 import hashlib
 import json
 import os
@@ -24,6 +23,13 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from platform_utils import (
+    get_detached_popen_kwargs,
+    get_snyk_binary_names,
+    get_snyk_search_paths,
+    is_pid_alive,
+)
 
 
 # =============================================================================
@@ -79,9 +85,11 @@ def is_scan_running(workspace: str) -> bool:
     try:
         with open(pid_file, "r") as f:
             pid = int(f.read().strip())
-        os.kill(pid, 0)
-        return True
-    except (ValueError, ProcessLookupError, OSError):
+        if is_pid_alive(pid):
+            return True
+        _cleanup_pid_file(workspace)
+        return False
+    except (ValueError, OSError):
         _cleanup_pid_file(workspace)
         return False
 
@@ -167,29 +175,100 @@ def _augment_path_for_snyk(env: Dict[str, str]) -> None:
     if shutil.which("snyk", path=env.get("PATH", "")):
         return
 
-    candidates: List[str] = []
-
-    nvm_dir = env.get("NVM_DIR", os.path.expanduser("~/.nvm"))
-    nvm_node_bins = sorted(
-        glob.glob(os.path.join(nvm_dir, "versions", "node", "*", "bin")),
-        reverse=True,
-    )
-    candidates.extend(nvm_node_bins)
-
-    volta_bin = os.path.expanduser("~/.volta/bin")
-    candidates.append(volta_bin)
-
-    candidates.extend(["/usr/local/bin", "/opt/homebrew/bin"])
+    candidates = get_snyk_search_paths(env)
+    binary_names = get_snyk_binary_names()
 
     for bin_dir in candidates:
-        if os.path.isfile(os.path.join(bin_dir, "snyk")):
-            env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
-            return
+        for name in binary_names:
+            if os.path.isfile(os.path.join(bin_dir, name)):
+                env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+                return
 
 
 # =============================================================================
 # AUTH TOKEN RESOLUTION
 # =============================================================================
+
+_SNYK_CONFIG_PATH = os.path.join(
+    os.path.expanduser("~"), ".config", "configstore", "snyk.json"
+)
+
+
+def _get_snyk_config_path() -> str:
+    """Return the path to the Snyk CLI config file.
+
+    Uses the hardcoded well-known path (~/.config/configstore/snyk.json)
+    rather than trusting XDG_CONFIG_HOME to avoid path-traversal via
+    a manipulated environment variable.
+    """
+    return _SNYK_CONFIG_PATH
+
+
+def check_snyk_auth() -> Optional[str]:
+    """Check if Snyk is authenticated and return the token if found.
+
+    Returns the API token string if authenticated, None otherwise.
+    Checks SNYK_TOKEN env var first, then the Snyk CLI config file
+    for API key or OAuth token storage.
+    """
+    token = os.environ.get("SNYK_TOKEN")
+    if token:
+        return token
+
+    try:
+        with open(_get_snyk_config_path(), "r") as f:
+            config = json.load(f)
+        api_key = config.get("api")
+        if api_key and isinstance(api_key, str):
+            return api_key
+        if config.get("INTERNAL_OAUTH_TOKEN_STORAGE"):
+            return "__oauth__"
+    except (json.JSONDecodeError, IOError, FileNotFoundError):
+        pass
+
+    return None
+
+
+def check_snyk_cli() -> Optional[str]:
+    """Check if the Snyk CLI binary is discoverable on PATH.
+
+    Probes the current PATH and common install locations (nvm, Volta,
+    Homebrew, Scoop, etc.) via platform_utils helpers.
+
+    Returns the path to the binary if found, None otherwise.
+    """
+    env = os.environ.copy()
+    _augment_path_for_snyk(env)
+
+    for name in get_snyk_binary_names():
+        found = shutil.which(name, path=env.get("PATH", ""))
+        if found:
+            return found
+    return None
+
+
+def write_early_status(workspace: str, status: str, error_detail: str = "") -> None:
+    """Write a scan.done marker without launching a scan.
+
+    Used to short-circuit when preconditions fail (e.g. auth missing,
+    CLI not found) so the Stop handler doesn't wait for a scan that
+    will never complete.
+    """
+    from datetime import datetime
+
+    ensure_cache_dirs(workspace)
+    done_file = get_scan_done_file(workspace)
+    done_data = {
+        "status": status,
+        "completed_at": datetime.now().isoformat(),
+        "started_at": datetime.now().isoformat(),
+        "vulnerabilities": [],
+    }
+    if error_detail:
+        done_data["error_detail"] = error_detail
+    with open(done_file, "w") as f:
+        json.dump(done_data, f)
+
 
 def _ensure_snyk_token(env: Dict[str, str]) -> None:
     """Inject SNYK_TOKEN into env from the Snyk CLI config file if available.
@@ -202,12 +281,8 @@ def _ensure_snyk_token(env: Dict[str, str]) -> None:
     if env.get("SNYK_TOKEN"):
         return
 
-    config_dir = os.environ.get(
-        "XDG_CONFIG_HOME", os.path.expanduser("~/.config")
-    )
-    config_path = os.path.join(config_dir, "configstore", "snyk.json")
     try:
-        with open(config_path, "r") as f:
+        with open(_get_snyk_config_path(), "r") as f:
             config = json.load(f)
         api_key = config.get("api")
         if api_key and isinstance(api_key, str):
@@ -245,9 +320,9 @@ def launch_background_scan(workspace: str) -> bool:
             [sys.executable, worker_script],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
             cwd=workspace,
             env=env,
+            **get_detached_popen_kwargs(),
         )
         pid_file = get_scan_pid_file(workspace)
         with open(pid_file, "w") as f:
@@ -322,10 +397,10 @@ def wait_for_scan(
 
 def clear_scan_state(workspace: str) -> None:
     """Clear scan state files (PID, done marker)."""
-    # for file_path in [get_scan_pid_file(workspace), get_scan_done_file(workspace)]:
-    #     if os.path.exists(file_path):
-    #         try:
-    #             os.remove(file_path)
-    #         except OSError:
-    #             pass
+    for file_path in [get_scan_pid_file(workspace), get_scan_done_file(workspace)]:
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
     return

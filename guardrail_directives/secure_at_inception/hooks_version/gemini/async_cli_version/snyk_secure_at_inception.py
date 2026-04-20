@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Claude Code Hook: Snyk Secure At Inception
+Gemini Code Hook: Snyk Secure At Inception
 ============================================
 
 Launches background Snyk CLI scans on file edit/write, tracks modified
-line ranges, and blocks Claude from stopping if new vulnerabilities were
+line ranges, and blocks Gemini from stopping if new vulnerabilities were
 introduced in agent-modified code.
 
 WORKFLOW:
-  1. PostToolUse (Edit|Write) -> track modified line ranges, launch background scan
+  1. Startup -> Runs auth check and an initial scan to warm cache
+  2. AfterTool (write_file|replace) -> Scans file code changes
   2. Stop -> wait for scan, filter results to modified lines, block if new vulns
 
 INSTALLATION:
@@ -31,6 +32,9 @@ sys.path.insert(0, str(LIB_DIR))
 
 from platform_utils import file_lock, normalize_path
 from scan_runner import (
+    write_early_status,
+    check_snyk_auth,
+    check_snyk_cli,
     launch_background_scan,
     wait_for_scan,
     get_cache_dir,
@@ -44,7 +48,7 @@ from scan_runner import (
 # CONFIGURATION
 # =============================================================================
 
-DEBUG = os.environ.get("CLAUDE_HOOK_DEBUG", "0") == "1"
+DEBUG = os.environ.get("GEMINI_HOOK_DEBUG", "0") == "1"
 
 CODE_EXTENSIONS = {
     '.js', '.jsx', '.mjs', '.cjs',
@@ -104,7 +108,7 @@ def log_to_panel(message: str) -> None:
 
 
 def output_response(response: Dict[str, Any]) -> None:
-    print(json.dumps(response))
+    print(json.dumps(response), file=sys.stdout)
 
 
 def get_state_file_path(workspace: str) -> str:
@@ -307,11 +311,78 @@ def has_pending_changes(state: Dict[str, Any]) -> bool:
 # HOOK HANDLERS
 # =============================================================================
 
+def handle_session_start(data: Dict[str, Any], workspace: str) -> None:
+    """Verify prerequisites and launch a cache-warming scan at session start.
+
+    Checks Snyk auth and CLI presence. If either is missing, reports via
+    additionalContext so Gemini can inform the user. If all checks pass,
+    launches a background scan to warm Snyk's internal analysis cache.
+    """
+    source = data.get("source", "startup")
+    issues: List[str] = []
+
+    # 1. Check Snyk auth
+    if check_snyk_auth() is None:
+        issues.append("auth")
+        log_to_panel("[SAI] Snyk CLI not authenticated")
+
+    # 2. Check Snyk CLI presence
+    if check_snyk_cli() is None:
+        issues.append("cli")
+        log_to_panel("[SAI] Snyk CLI not found on PATH")
+
+    # 3. Report issues via additionalContext and write early status
+    if issues:
+        context_parts: List[str] = []
+        user_messages: List[str] = []
+        if "cli" in issues:
+            context_parts.append(
+                "Snyk CLI is not installed or not on PATH. Security scanning "
+                "requires the Snyk CLI. Install it with `npm install -g snyk` "
+                "and authenticate with `snyk auth`."
+            )
+            user_messages.append("Snyk CLI")
+            write_early_status(
+                workspace, "snyk_not_found",
+                "Snyk CLI not found on PATH.",
+            )
+        elif "auth" in issues:
+            context_parts.append(
+                "Snyk CLI is not authenticated. If the user asks you to write "
+                "code, remind them that security scanning is unavailable until "
+                "they run `snyk auth` in a terminal to authenticate."
+            )
+            user_messages.append("Snyk auth")
+            write_early_status(
+                workspace, "auth_required",
+                "Snyk CLI is not authenticated. Run snyk auth.",
+            )
+
+        output_response({
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": " ".join(context_parts),
+            },
+        })
+        return
+
+    # 4. All checks passed -- clear stale state on fresh sessions
+    log_to_panel("[SAI] Snyk authenticated, CLI found")
+    if source in ("startup", "clear"):
+        clear_state(workspace)
+
+    # 5. Launch cache-warming scan (non-blocking, dedup built-in)
+    if launch_background_scan(workspace):
+        log_to_panel("[SAI] Cache-warming scan launched")
+    else:
+        debug_log("Cache-warm scan not launched (already running or complete)")
+
+    output_response({})
+
 def handle_after_tool(data: Dict[str, Any], workspace: str) -> None:
     """Track file edits and launch background scans."""
     tool_name = data.get("tool_name", "")
     tool_input = data.get("tool_input", {})
-    print(data)
 
     file_path = tool_input.get("file_path", "")
     if not file_path:
@@ -321,7 +392,6 @@ def handle_after_tool(data: Dict[str, Any], workspace: str) -> None:
     if is_code_file(file_path):
         with _state_lock(workspace):
             state = read_state(workspace)
-            print(state)
 
             if tool_name == "replace":
                 old_string = tool_input.get("old_string", "")
@@ -492,8 +562,10 @@ def handle_after_agent(data: Dict[str, Any], workspace: str) -> None:
                     f"Modified manifests: {manifest_list}."
                 )
             clear_state(workspace)
-            output_response({"decision": "block", "reason": fallback})
-            return
+            output_response({"decision": "block", "reason": fallback, "continue": True})
+
+            # gemini only retries with feedback prompt on exit code 2
+            sys.exit(2)
 
     # --- Update state and decide ---
     if not new_vulns and not manifest_files:
@@ -541,8 +613,10 @@ def handle_after_agent(data: Dict[str, Any], workspace: str) -> None:
     )
 
     log_to_panel(f"[SAI] Blocking: {len(new_vulns)} vuln(s) found")
-    output_response({"decision": "block", "reason": "\n".join(reason_parts)})
+    log_to_panel({"decision": "deny", "reason": "\n".join(reason_parts), "continue": True})
 
+    # gemini only retries with feedback prompt on exit code 2
+    sys.exit(2)
 
 # =============================================================================
 # MAIN ENTRY POINT
@@ -564,6 +638,7 @@ def main() -> None:
     debug_log(f"Event: {hook_event}, Workspace: {workspace}")
 
     handlers = {
+        "SessionStart": handle_session_start,
         "AfterTool": handle_after_tool,
         "AfterAgent": handle_after_agent,
     }

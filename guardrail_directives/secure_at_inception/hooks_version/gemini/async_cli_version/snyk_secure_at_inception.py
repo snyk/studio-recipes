@@ -562,7 +562,9 @@ def handle_after_agent(data: Dict[str, Any], workspace: str) -> None:
                     f"Modified manifests: {manifest_list}."
                 )
             clear_state(workspace)
-            output_response({"decision": "block", "reason": fallback, "continue": True})
+
+            # blocking response should be sent to stderr
+            log_to_panel(str({"decision": "block", "reason": fallback, "continue": True}))
 
             # gemini only retries with feedback prompt on exit code 2
             sys.exit(2)
@@ -613,7 +615,9 @@ def handle_after_agent(data: Dict[str, Any], workspace: str) -> None:
     )
 
     log_to_panel(f"[SAI] Blocking: {len(new_vulns)} vuln(s) found")
-    log_to_panel({"decision": "deny", "reason": "\n".join(reason_parts), "continue": True})
+
+    # blocking response should be sent to stderr
+    log_to_panel(str({"decision": "deny", "reason": "\n".join(reason_parts), "continue": True}))
 
     # gemini only retries with feedback prompt on exit code 2
     sys.exit(2)

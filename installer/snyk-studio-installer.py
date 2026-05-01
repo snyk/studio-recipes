@@ -22,9 +22,8 @@ Options:
 """
 
 import argparse
-import base64
+import contextlib
 import filecmp
-import io
 import json
 import os
 import re
@@ -32,12 +31,16 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import zipfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
-# Embedded payload — replaced by build_installer.py in distribution mode.
-PAYLOAD: Optional[str] = None
+# When set (by generated install.sh / install.ps1 / install.py), manifest and recipe sources
+# live under this directory (flat layout from the release zip).
+BUNDLE_ENV = "SNYK_STUDIO_BUNDLE_ROOT"
+
+GLOBAL = "global"
+WORKSPACE = "workspace"
+SNYK_MINIMUM_VERSION = "1.1302.0"
 
 
 # =============================================================================
@@ -75,6 +78,7 @@ class Color:
     def cyan(self, t: str) -> str: return self._w("0;36", t)
     def bold(self, t: str) -> str: return self._w("1", t)
     def dim(self, t: str) -> str: return self._w("2", t)
+    def underline(self, t: str) -> str: return self._w("4", t)
 
 
 C = Color()
@@ -114,34 +118,48 @@ class PayloadContext:
     """Manages the payload directory — repo checkout (dev) or extracted zip (dist)."""
 
     def __init__(self):
-        self._tmpdir: Optional[str] = None
         self.payload_dir = Path()
         self.repo_root = Path()
 
     def setup(self) -> None:
-        if PAYLOAD is not None:
-            self._tmpdir = tempfile.mkdtemp(prefix="snyk-installer-")
-            payload_dir = Path(self._tmpdir) / "payload"
-            payload_dir.mkdir()
-            data = base64.b64decode(PAYLOAD)
-            with zipfile.ZipFile(io.BytesIO(data)) as zf:
-                zf.extractall(payload_dir)
-            self.payload_dir = payload_dir
-            self.repo_root = payload_dir
-        else:
-            self.payload_dir = Path(__file__).resolve().parent
-            self.repo_root = self.payload_dir.parent
+        bundle = os.environ.get(BUNDLE_ENV, "").strip()
+        if bundle:
+            root = Path(bundle).resolve()
+            if not root.is_dir():
+                print(f"Error: {BUNDLE_ENV} is not a directory: {root}", file=sys.stderr)
+                sys.exit(1)
+            self.payload_dir = root
+            self.repo_root = root
+            return
+        self.payload_dir = Path(__file__).resolve().parent
+        self.repo_root = self.payload_dir.parent
 
     def cleanup(self) -> None:
-        if self._tmpdir and os.path.isdir(self._tmpdir):
-            shutil.rmtree(self._tmpdir, ignore_errors=True)
+        """Reserved for future temp-bundle cleanup; tests may call after setup."""
 
     @property
     def manifest_path(self) -> Path:
         return self.payload_dir / "manifest.json"
 
     def resolve_src(self, src_relative: str) -> Path:
-        return self.repo_root / src_relative
+        if not str(src_relative).strip():
+            print("Error: empty source path in manifest.", file=sys.stderr)
+            sys.exit(1)
+        rel = Path(src_relative)
+        if rel.is_absolute():
+            print(f"Error: absolute source path not allowed: {src_relative!r}", file=sys.stderr)
+            sys.exit(1)
+        root = self.repo_root.resolve()
+        candidate = (root / rel).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            print(
+                f"Error: manifest source path escapes bundle root: {src_relative!r}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        return candidate
 
 
 # =============================================================================
@@ -156,6 +174,7 @@ class Manifest:
             self.data = json.load(f)
         self.recipes: Dict[str, Any] = self.data["recipes"]
         self.profiles: Dict[str, Any] = self.data.get("profiles", {})
+        self.conflicting_resources: Dict[str, Any] = self.data.get("conflicting-resources", {})
 
     def resolve_recipes(self, profile: str) -> List[str]:
         if profile not in self.profiles:
@@ -193,6 +212,119 @@ class Manifest:
             label = "all recipes" if "*" in recipes else f"{len(recipes)} recipes"
             print(f"  * {pid:<15} {label}")
 
+    def are_rules_conflicting(self, ade: str) -> bool:
+        """Determine if there are existing rules that would conflict when adding the SAI hooks"""
+
+        rule_start_tag = "<!--# BEGIN SNYK GLOBAL RULE -->"
+        rule_end_tag = "<!--# END SNYK GLOBAL RULE -->"
+        home = Path.home()
+        rules_locations = self.conflicting_resources.get(ade, {}).get("rules", [])
+
+        for rule in rules_locations:
+            rule_location = Path(rule.get("src"))
+            rule_location = Path(home, rule_location) if rule.get(GLOBAL) else rule_location
+
+            if rule_location.exists():
+                try:
+                    # check for existence of start/end tags in the rules file
+                    content = rule_location.read_text(encoding="utf-8")
+                    if rule_start_tag in content and rule_end_tag in content:
+                        return True
+                except Exception:
+                    pass
+
+        return False
+
+    def are_skills_conflicting(self, ade: str) -> bool:
+        """Determine if there are existing skills that would conflict when adding the SAI hooks"""
+
+        home = Path.home()
+        skills_locations = self.conflicting_resources.get(ade, {}).get("skills", [])
+
+        for skill in skills_locations:
+            skill_location = Path(skill.get("src"))
+            skill_location = Path(home, skill_location) if skill.get(GLOBAL) else skill_location
+            if skill_location.exists():
+                return True
+        return False
+
+    def get_conflicting_resource_scope(self, ade: str, resource_type:str) -> List[str]:
+        """Determine if the given ADE's rule/skill exists at the global or workspace level"""
+        resource_locations = self.conflicting_resources.get(ade, {}).get(resource_type, [])
+        return list(map(lambda x: GLOBAL if x.get(GLOBAL) else WORKSPACE, resource_locations))
+
+    def are_extension_settings_conflicting(self, ade: str) -> bool:
+        """Determine if the Snyk extension setting has conflicting values that would override hooks installation"""
+
+        home = Path.home()
+        auto_configure = "snyk.securityAtInception.autoConfigureSnykMcpServer"
+        execution_frequency = "snyk.securityAtInception.executionFrequency"
+        path_prefix = ""
+        settings_paths = []
+
+        # set path prefix paths depending on OS
+        if sys.platform == "win32":
+            path_prefix = Path(os.environ.get("APPDATA", str(home / "AppData/Roaming")))
+        elif sys.platform == "darwin":
+            path_prefix = home / "Library/Application Support"
+        else:  # Linux
+            path_prefix = Path(os.environ.get("XDG_CONFIG_HOME", str(home / ".config")))
+
+        for setting in self.conflicting_resources.get(ade, {}).get("extension-settings", []):
+            setting_path = Path(setting.get("src"))
+            setting_path = Path(path_prefix, setting_path) if setting.get(GLOBAL) else setting_path
+
+            settings_paths.append(setting_path)
+
+        # Merge settings hierarchically, workspace settings will overwrite global
+        resolved_settings: Dict[str, Any] = {}
+
+        for path in settings_paths:
+            try:
+                # 1. Basic validation: must exist and be named settings.json
+                if not path.exists() or ".." in str(path):
+                    raise ValueError(f"Error parsing manifest: conflicting-resources/${ade}/extension-settings has a path with .. which is not allowed: ${path} ")
+
+                # 2. Resolve to absolute path to find the real location on disk
+                safe_path = path.resolve()
+
+                # 3. Security validation: must be a file and strictly named settings.json
+                if not safe_path.is_file() or safe_path.name != "settings.json":
+                    continue
+
+                # 4. Check that it is within home or workspace to satisfy SAST
+                safe_path_abs = os.path.abspath(safe_path)
+                allowed_bases = [os.path.abspath(home), os.path.abspath(os.getcwd())]
+
+                is_safe = False
+                for base in allowed_bases:
+                    try:
+                        if os.path.commonpath([base, safe_path_abs]) == base:
+                            is_safe = True
+                            break
+                    except (ValueError, Exception):
+                        continue
+
+                if not is_safe:
+                    continue
+
+                # 5. Open the validated absolute path
+                with open(safe_path_abs, "r", encoding="utf-8") as f:
+                    content = f.read()
+
+                content = re.sub(r"/\*.*?\*/", "", content, flags=re.DOTALL)
+                # Strip trailing commas before closing braces/brackets
+                content = re.sub(r",\s*([\]}])", r"\1", content)
+                settings_data = json.loads(content)
+
+                resolved_settings.update(settings_data)
+            except Exception:
+                continue
+
+        # Check the final resolved state
+        return (resolved_settings.get(auto_configure, False) and
+            resolved_settings.get(execution_frequency, "Manual") != "Manual")
+
 
 # =============================================================================
 # PREREQUISITES
@@ -205,11 +337,30 @@ def check_prerequisites(auto_yes: bool) -> None:
     print(f"  {C.green('OK')} Python {py_ver}")
 
     snyk_path = shutil.which("snyk")
+
+    parse_version = lambda v: tuple(map(int, v.split('.')))
+
+    minimum_snyk_version = parse_version(SNYK_MINIMUM_VERSION)
+
     if snyk_path:
         try:
             r = subprocess.run(["snyk", "--version"], capture_output=True, text=True, timeout=10)
-            ver = r.stdout.strip().splitlines()[0] if r.stdout else "unknown"
-            print(f"  {C.green('OK')} Snyk CLI {ver}")
+            ver_str = r.stdout.strip().splitlines()[0] if r.stdout else "unknown"
+
+            try:
+                # Snyk version can be "1.1302.0" or "1.1302.0 (standalone)"
+                match = re.match(r"(\d+\.\d+\.\d+)", ver_str)
+                if match:
+                    current_version = parse_version(match.group(1))
+                    if current_version < minimum_snyk_version:
+                        print(f"  {C.yellow('WARNING')} Snyk CLI {ver_str} is outdated (min: {SNYK_MINIMUM_VERSION})")
+                        warnings += 1
+                    else:
+                        print(f"  {C.green('OK')} Snyk CLI {ver_str}")
+                else:
+                    print(f"  {C.green('OK')} Snyk CLI {ver_str} (could not parse version)")
+            except Exception:
+                print(f"  {C.green('OK')} Snyk CLI {ver_str}")
         except Exception:
             print(f"  {C.green('OK')} Snyk CLI (version check failed)")
     else:
@@ -247,20 +398,39 @@ def get_ade_home(ade: str) -> Path:
     return Path.home() / ADE_HOMES[ade]
 
 
+def _cursor_app_bundle_exists() -> bool:
+    if sys.platform != "darwin":
+        return False
+    home = Path.home()
+    for path in (Path("/Applications/Cursor.app"), home / "Applications" / "Cursor.app"):
+        if path.is_dir():
+            return True
+    return False
+
+
+def _cursor_process_running() -> bool:
+    """True only if a process is named exactly Cursor (any case) — -x, not substring."""
+    try:
+        r = subprocess.run(
+            ["pgrep", "-xiq", "cursor"],
+            capture_output=True,
+            timeout=5,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 def detect_ades() -> List[str]:
     detected = []
     home = Path.home()
 
     if (home / ".cursor").is_dir():
         detected.append("cursor")
-    elif sys.platform != "win32":
-        try:
-            r = subprocess.run(["pgrep", "-qi", "cursor"],
-                               capture_output=True, timeout=5)
-            if r.returncode == 0:
-                detected.append("cursor")
-        except Exception:
-            pass
+    elif _cursor_app_bundle_exists():
+        detected.append("cursor")
+    elif sys.platform != "win32" and _cursor_process_running():
+        detected.append("cursor")
 
     if (home / ".claude").is_dir():
         detected.append("claude")
@@ -270,7 +440,10 @@ def detect_ades() -> List[str]:
     return detected
 
 
-def get_target_ades(target_ade: Optional[str], auto_yes: bool) -> List[str]:
+def get_target_ades(
+    target_ade: Optional[str],
+    auto_yes: bool,
+) -> List[str]:
     if target_ade:
         return [target_ade]
 
@@ -296,6 +469,37 @@ def get_target_ades(target_ade: Optional[str], auto_yes: bool) -> List[str]:
 # =============================================================================
 # PLATFORM-AWARE HOOK COMMAND REWRITING
 # =============================================================================
+
+_WIN32_REWRITE_STRATEGIES: frozenset[str] = frozenset({"cursor_hooks", "claude_settings"})
+
+
+@contextlib.contextmanager
+def _platform_source(strategy: str, source: Path) -> Iterator[Path]:
+    """Context manager yielding a platform-rewritten source path for Windows hook/settings strategies.
+
+    Source files use Unix commands (python3, $HOME) that silently fail on Windows; they must be
+    rewritten to (py -3, %USERPROFILE%). Without a temp file, merge_json (which only accepts paths)
+    would receive the original source and install the wrong commands on Windows.
+    delete=False is required because Windows cannot read a file that is still open.
+    """
+    should_create_temp = sys.platform == "win32" and any(s in strategy for s in _WIN32_REWRITE_STRATEGIES)
+    if not should_create_temp:
+        yield source
+        return
+    with open(source) as f:
+        data = json.load(f)
+    data = rewrite_hook_commands_for_platform(data)
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+    tmp_path = Path(tmp.name)
+    try:
+        json.dump(data, tmp, indent=2)
+        tmp.write("\n")
+        tmp.close()
+        yield tmp_path
+    finally:
+        with contextlib.suppress(OSError):
+            tmp_path.unlink()
+
 
 def rewrite_hook_commands_for_platform(data: Dict[str, Any]) -> Dict[str, Any]:
     """On Windows, rewrite python3/$HOME hook commands to py -3/%USERPROFILE%."""
@@ -356,33 +560,25 @@ def apply_transform(transform_type: str, src: Path, dest: Path,
     print(f"    {C.green('transformed:')} {dest}")
 
 
-def merge_config(strategy: str, target: Path, source: Path, dry_run: bool) -> None:
+def merge_config(strategy: str, target: Path, source: Path, payload: "PayloadContext", dry_run: bool) -> None:
     if dry_run:
         print(f"    {C.dim(f'[dry-run] merge ({strategy}): {target}')}")
         return
     target.parent.mkdir(parents=True, exist_ok=True)
-
-    # If this is a hook/settings merge on Windows, rewrite the source data first
-    if sys.platform == "win32" and strategy in ("merge_cursor_hooks", "merge_claude_settings"):
-        with open(source) as f:
-            source_data = json.load(f)
-        source_data = rewrite_hook_commands_for_platform(source_data)
-        # Write rewritten source to a temp file for merge_json
-        tmp_source = source.parent / f".{source.name}.win_rewrite"
-        with open(tmp_source, "w") as f:
-            json.dump(source_data, f, indent=2)
-            f.write("\n")
-        source = tmp_source
-
-    lib_dir = str(Path(__file__).resolve().parent / "lib")
-    if lib_dir not in sys.path:
-        sys.path.insert(0, lib_dir)
-    import merge_json
-    if strategy not in merge_json.STRATEGIES:
-        print(f"    {C.red(f'Unknown strategy: {strategy}')}")
-        return
-    merge_json.STRATEGIES[strategy](str(target), str(source))
-    print(f"    {C.green('merged:')} {target}")
+    with _platform_source(strategy, source) as resolved_path:
+        lib_dir = str(payload.payload_dir / "lib")
+        if lib_dir not in sys.path:
+            sys.path.insert(0, lib_dir)
+        import merge_json
+        if strategy not in merge_json.STRATEGIES:
+            print(f"    {C.red(f'Unknown strategy: {strategy}')}")
+            return
+        try:
+            merge_json.STRATEGIES[strategy](str(target), str(resolved_path))
+        except ValueError as e:
+            print(f"    {C.red('ERROR')} Cannot update configuration, parse error in file {target}. Please fix the error: {e}")
+            return
+        print(f"    {C.green('merged:')} {target}")
 
 
 def remove_file(path: Path, dry_run: bool) -> None:
@@ -466,7 +662,7 @@ def install_recipe(recipe_id: str, ade: str, manifest: Manifest,
     if cm:
         target = Path.home() / cm["target"]
         source = payload.resolve_src(cm["source"])
-        merge_config(cm["strategy"], target, source, dry_run)
+        merge_config(cm["strategy"], target, source, payload, dry_run)
 
     # chmod +x on Python files
     chmod_python_files(ade_home, dry_run)
@@ -504,19 +700,21 @@ def verify_recipe(recipe_id: str, ade: str, manifest: Manifest,
     if cm:
         strategy = cm["strategy"].replace("merge_", "verify_", 1)
         target = Path.home() / cm["target"]
-        source = payload.resolve_src(cm["source"])
+        with _platform_source(strategy, payload.resolve_src(cm["source"])) as resolved_path:
+            lib_dir = str(payload.payload_dir / "lib")
+            if lib_dir not in sys.path:
+                sys.path.insert(0, lib_dir)
+            import merge_json
 
-        lib_dir = str(Path(__file__).resolve().parent / "lib")
-        if lib_dir not in sys.path:
-            sys.path.insert(0, lib_dir)
-        import merge_json
-
-        try:
-            merge_json.STRATEGIES[strategy](str(target), str(source))
-            print(f"    {C.green('OK')} hooks registered in {cm['target']}")
-        except (SystemExit, KeyError):
-            print(f"    {C.red('MISSING')} hooks in {cm['target']}")
-            ok = False
+            try:
+                merge_json.STRATEGIES[strategy](str(target), str(resolved_path))
+                print(f"    {C.green('OK')} hooks registered in {cm['target']}")
+            except (SystemExit, KeyError):
+                print(f"    {C.red('MISSING')} hooks in {cm['target']}")
+                ok = False
+            except ValueError as e:
+                print(f"    {C.red('ERROR')} Cannot update configuration, parse error in file {cm['target']}. Please fix the error: {e}")
+                ok = False
 
     return ok
 
@@ -566,17 +764,17 @@ def uninstall(ades: List[str], manifest: Manifest,
             if cm:
                 strategy = cm["strategy"].replace("merge_", "unmerge_", 1)
                 target = Path.home() / cm["target"]
-                source = payload.resolve_src(cm["source"])
                 if dry_run:
                     print(f"    {C.dim(f'[dry-run] unmerge ({strategy}): {target}')}")
                 else:
-                    lib_dir = str(Path(__file__).resolve().parent / "lib")
-                    if lib_dir not in sys.path:
-                        sys.path.insert(0, lib_dir)
-                    import merge_json
-                    if strategy in merge_json.STRATEGIES:
-                        merge_json.STRATEGIES[strategy](str(target), str(source))
-                        print(f"    {C.green('unmerged:')} {target}")
+                    with _platform_source(strategy, payload.resolve_src(cm["source"])) as resolved_path:
+                        lib_dir = str(payload.payload_dir / "lib")
+                        if lib_dir not in sys.path:
+                            sys.path.insert(0, lib_dir)
+                        import merge_json
+                        if strategy in merge_json.STRATEGIES:
+                            merge_json.STRATEGIES[strategy](str(target), str(resolved_path))
+                            print(f"    {C.green('unmerged:')} {target}")
 
         print()
 
@@ -630,78 +828,109 @@ def print_summary(ades: List[str], recipes: List[str], dry_run: bool) -> None:
 def main() -> None:
     args = parse_args()
     payload = PayloadContext()
+    payload.setup()
+    manifest = Manifest(payload.manifest_path)
 
-    try:
-        payload.setup()
-        manifest = Manifest(payload.manifest_path)
+    # List mode
+    if args.list_mode:
+        manifest.list_recipes()
+        return
 
-        # List mode
-        if args.list_mode:
-            manifest.list_recipes()
-            return
+    print_banner()
 
-        print_banner()
+    # Prerequisites
+    print(f"  {C.bold('Prerequisites')}")
+    check_prerequisites(args.yes)
+    print()
 
-        # Prerequisites
-        print(f"  {C.bold('Prerequisites')}")
-        check_prerequisites(args.yes)
-        print()
+    # ADE detection
+    ades = get_target_ades(args.ade, args.yes)
 
-        # ADE detection
-        ades = get_target_ades(args.ade, args.yes)
+    # Uninstall mode
+    if args.uninstall:
+        uninstall(ades, manifest, payload, args.dry_run)
+        print(f"  {C.green('Uninstall complete.')}")
+        return
 
-        # Uninstall mode
-        if args.uninstall:
-            uninstall(ades, manifest, payload, args.dry_run)
-            print(f"  {C.green('Uninstall complete.')}")
-            return
+    # if auto configure is turned on and manual, need to remove rules
+    def remove_legacy_SAI_directives(ade: str, scope: str) -> None:
+        mcp_tool_name = "claude-cli" if ade == "claude" else ade
+        print(f"    Cleaning up {scope} skills for {ade}...")
+        subprocess.run(["snyk", "mcp", "configure",
+            "--tool", mcp_tool_name, "--rm", "--rules-scope",
+            scope, "--rule-type", "always-apply",
+            "--workspace", ".", "--configure-mcp=false",
+            "--configure-rules=true"], timeout=10)
 
-        # Verify mode
-        if args.verify:
-            recipes = manifest.resolve_recipes(args.profile)
-            all_ok = True
-            for ade in ades:
-                for recipe_id in recipes:
-                    if not verify_recipe(recipe_id, ade, manifest, payload):
-                        all_ok = False
-            if all_ok:
-                print(f"\n  {C.green('All checks passed.')}")
-            else:
-                print(f"\n  {C.red('Some checks failed.')}")
-                sys.exit(1)
-            return
+    # ADE conflict detection
+    for ade in ades:
+        # check if any of the ADEs have snyk extension settings and if there are conflicts
+        if manifest.are_extension_settings_conflicting(ade):
+            print(f"  {C.yellow('WARNING')} Conflicting Snyk extension settings found for: {ade} - Please remove conflict by setting 'Secure At Inception Execution Frequency' to 'Manual'")
+            print(
+                f"    See documentation for more details: {C.underline('https://docs.snyk.io/integrations/snyk-studio-agentic-integrations/quickstart-guides-for-snyk-studio/github-copilot-guide#updating-secure-at-inception-settings')}"
+            )
+            if not args.yes and not args.dry_run:
+                reply = input(f"  Install anyway for {ade}? (y/n) ").strip().lower()
+                if reply not in ("y", "yes"):
+                    print("  Cancelled.")
+                    return
+        if manifest.are_rules_conflicting(ade):
+            print(f"  {C.yellow('WARNING')} Conflicting rule(s) found for: {ade}")
+            reply = input(f"  Run 'snyk mcp configure' to remove the conflicting rules for {ade}? (y/n) ").strip().lower()
+            if reply in ("y", "yes"):
+                for scope in manifest.get_conflicting_resource_scope(ade, "rules"):
+                        remove_legacy_SAI_directives(ade, scope)
+        if manifest.are_skills_conflicting(ade):
+            print(f"  {C.yellow('WARNING')} Conflicting skill(s) found for: {ade}")
+            reply = input(f"  Run 'snyk mcp configure' to remove the conflicting skills for {ade}? (y/n) ").strip().lower()
+            if reply in ("y", "yes"):
+                for scope in manifest.get_conflicting_resource_scope(ade, "skills"):
+                    remove_legacy_SAI_directives(ade, scope)
 
-        # Normal installation
+    # Verify mode
+    if args.verify:
         recipes = manifest.resolve_recipes(args.profile)
-        show_plan(ades, recipes, args.profile, manifest)
-
-        if not args.yes and not args.dry_run:
-            reply = input("  Proceed with installation? (y/n) ").strip().lower()
-            if reply not in ("y", "yes"):
-                print("  Cancelled.")
-                return
-
-        # Install
+        all_ok = True
         for ade in ades:
             for recipe_id in recipes:
-                install_recipe(recipe_id, ade, manifest, payload, args.dry_run)
+                if not verify_recipe(recipe_id, ade, manifest, payload):
+                    all_ok = False
+        if all_ok:
+            print(f"\n  {C.green('All checks passed.')}")
+        else:
+            print(f"\n  {C.red('Some checks failed.')}")
+            sys.exit(1)
+        return
 
-        # Post-install verification
-        if not args.dry_run:
-            print()
-            print(f"  {C.bold('Verification')}")
-            all_ok = True
-            for ade in ades:
-                for recipe_id in recipes:
-                    if not verify_recipe(recipe_id, ade, manifest, payload):
-                        all_ok = False
-            if not all_ok:
-                print(f"\n  {C.yellow('Some verifications failed. Check output above.')}")
+    # Normal installation
+    recipes = manifest.resolve_recipes(args.profile)
+    show_plan(ades, recipes, args.profile, manifest)
 
-        print_summary(ades, recipes, args.dry_run)
+    if not args.yes and not args.dry_run:
+        reply = input("  Proceed with installation? (y/n) ").strip().lower()
+        if reply not in ("y", "yes"):
+            print("  Cancelled.")
+            return
 
-    finally:
-        payload.cleanup()
+    # Install
+    for ade in ades:
+        for recipe_id in recipes:
+            install_recipe(recipe_id, ade, manifest, payload, args.dry_run)
+
+    # Post-install verification
+    if not args.dry_run:
+        print()
+        print(f"  {C.bold('Verification')}")
+        all_ok = True
+        for ade in ades:
+            for recipe_id in recipes:
+                if not verify_recipe(recipe_id, ade, manifest, payload):
+                    all_ok = False
+        if not all_ok:
+            print(f"\n  {C.yellow('Some verifications failed. Check output above.')}")
+
+    print_summary(ades, recipes, args.dry_run)
 
 
 if __name__ == "__main__":

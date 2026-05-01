@@ -8,7 +8,6 @@ Recipes combine Snyk's security ingredients -- Snyk's CLI & MCP server, along wi
 
 Just like cooking, there's no single right way to combine these ingredients. A team that wants real-time inline feedback will reach for different recipes than one that needs a hard gate at commit time. This repository gives you a collection of recipes to pick from, combine, and customize to meet your security needs across your development environment and lifecycle.
 
-
 ## Mixing and Matching
 
 These recipes are designed to be layered. For example, you might combine:
@@ -34,7 +33,7 @@ These are generic examples, not rigid templates. Every team's security requireme
 
 You can adopt recipes in two ways:
 
-1. **Installer (recommended for Cursor / Claude Code)** — Use the self-contained script under [`installer/`](installer/) to install hooks, commands, skills, and MCP configuration into your user-level Cursor/Claude directories. See [`installer/README.md`](installer/README.md) for how to build `dist/snyk-studio-install.sh`, profiles (`default`, `minimal`), and flags like `--dry-run` and `--uninstall`.
+1. **Installer (recommended for Cursor / Claude Code)** — Build with `python3 build_installer.py` in [`installer/`](installer/), then run **`dist/snyk-studio-install.sh`** or **`dist/snyk-studio-install.ps1`** (self-extracting scripts that unpack and run the Python installer). See [`installer/README.md`](installer/README.md) for profiles (`default`, `minimal`) and flags like `--dry-run` and `--uninstall`.
 
 2. **Manual / copy from repo** — Pick files under `guardrail_directives/`, `command_directives/`, `mcp/`, etc., and wire them into your assistant yourself (useful for customization or IDEs not covered by the installer).
 

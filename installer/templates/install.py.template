@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+# Snyk Studio Recipes — self-extracting installer (generated; do not edit)
+import base64
+import io
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+from pathlib import Path
+
+
+# Embedded gzip-tar bundle (base64, line-wrapped). Filled in by build_installer.py.
+_B64_PAYLOAD = """\
+__B64_BODY__
+"""
+
+def main() -> int:
+    workdir = Path(tempfile.mkdtemp(prefix="snyk-studio-install."))
+    # Env key is a build-time placeholder; build_installer rewrites it to SNYK_STUDIO_BUNDLE_ROOT.
+    os.environ["__BUNDLE_ENV__"] = str(workdir)
+    try:
+        b64 = _payload_b64_string()
+        try:
+            raw = base64.b64decode(b64)
+        except Exception as e:
+            print(f"Error: invalid embedded bundle (base64): {e}", file=sys.stderr)
+            return 1
+        _expand_bundle_tar_gz(raw, workdir)
+        installer = workdir / "snyk-studio-installer.py"
+        if not installer.is_file():
+            print(f"Error: missing {installer.name} in bundle.", file=sys.stderr)
+            return 1
+        proc = subprocess.run(
+            [sys.executable, str(installer), *sys.argv[1:]],
+            check=False,
+        )
+        return int(proc.returncode)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _payload_b64_string() -> str:
+    return "".join(line.strip().replace(" ", "") for line in _B64_PAYLOAD.splitlines())
+
+
+def _expand_bundle_tar_gz(blob: bytes, workdir: Path) -> None:
+    workdir.mkdir(parents=True, exist_ok=True)
+    extract_kw: dict = {}
+    if hasattr(tarfile, "data_filter"):
+        extract_kw["filter"] = "data"
+    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tf:
+        tf.extractall(workdir, **extract_kw)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Snyk Studio Recipes — self-extracting installer (generated; do not edit)
+set -euo pipefail
+Main() {
+  local workdir
+  local bundle
+  local archive
+
+  workdir="$(mktemp -d "${TMPDIR:-/tmp}/snyk-studio-install.XXXXXX")"
+  cleanup() { rm -rf "${workdir:-}"; }
+  trap cleanup EXIT INT TERM
+  # Export name is a build-time placeholder; build_installer rewrites it to SNYK_STUDIO_BUNDLE_ROOT.
+  export __BUNDLE_ENV__="$workdir"
+
+  bundle="$workdir/bundle.base64"
+  WriteEmbeddedPayload "$bundle"
+
+  archive="$workdir/bundle.tar.gz"
+  DecodeBase64Bundle "$bundle" "$archive"
+  ExpandArchive "$archive" "$workdir"
+  rm -f "$archive"
+
+  python3 "$workdir/snyk-studio-installer.py" "$@"
+}
+
+WriteEmbeddedPayload() {
+  local bundle="$1"
+  local payload
+
+  local marker='__MARKER__'
+  local foundBundleMarker=0
+  local line
+  local b64_payload=""
+
+  while IFS= read -r line || [[ -n "${line:-}" ]]; do
+    if [[ "$foundBundleMarker" -eq 0 ]]; then
+      if [[ "$line" == "$marker" ]]; then
+        foundBundleMarker=1
+      fi
+      continue
+    fi
+    line="${line//$'\r'/}"
+    b64_payload+="$line"
+  done < "$0"
+
+  if [[ "$foundBundleMarker" -eq 0 ]]; then
+    echo "Error: missing bundle marker in $0" >&2
+    exit 1
+  fi
+
+  printf '%s' "$b64_payload" > "$bundle"
+}
+
+DecodeBase64Bundle() {
+  local bundle="$1"
+  local archive="$2"
+
+  rm -f "$archive"
+  if command -v openssl >/dev/null 2>&1; then
+    cat "$bundle" | openssl base64 -d -A -out "$archive" 2>/dev/null || true
+  fi
+  if [[ ! -s "$archive" ]] && echo YQ== | base64 -d >/dev/null 2>&1; then
+    cat "$bundle" | base64 -d >"$archive" 2>/dev/null || true
+  fi
+  if [[ ! -s "$archive" ]] && echo YQ== | base64 --decode >/dev/null 2>&1; then
+    cat "$bundle" | base64 --decode >"$archive" 2>/dev/null || true
+  fi
+  if [[ ! -s "$archive" ]] && echo YQ== | base64 -D >/dev/null 2>&1; then
+    cat "$bundle" | base64 -D >"$archive" 2>/dev/null || true
+  fi
+  if [[ ! -s "$archive" ]]; then
+    echo "Error: need openssl or base64 to decode the embedded bundle (decoded file empty)." >&2
+    exit 1
+  fi
+}
+
+ExpandArchive() {
+  local archive="$1"
+  local workdir="$2"
+  if ! tar xzf "$archive" -C "$workdir"; then
+    echo "Error: tar failed to extract bundle (need GNU/BSD tar with gzip)." >&2
+    exit 1
+  fi
+}
+
+Main "$@"
+exit $?
+__MARKER__
+__B64_BODY__

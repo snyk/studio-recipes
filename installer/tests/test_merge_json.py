@@ -179,6 +179,12 @@ class TestMergeCursorHooks:
         merge_cursor_hooks(empty_target, snyk_cursor_source)
         assert not os.path.isfile(empty_target + ".bak")
 
+    def test_merge_fails_on_invalid_json(self, tmp_path, snyk_cursor_source):
+        target = tmp_path / "target.json"
+        target.write_text("{ invalid }")
+        with pytest.raises(ValueError, match="Invalid JSON in file"):
+            merge_cursor_hooks(str(target), snyk_cursor_source)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # merge_claude_settings
@@ -255,6 +261,12 @@ class TestMergeClaudeSettings:
     def test_merge_creates_backup(self, existing_claude_target, snyk_claude_source):
         merge_claude_settings(existing_claude_target, snyk_claude_source)
         assert os.path.isfile(existing_claude_target + ".bak")
+
+    def test_merge_fails_on_invalid_json(self, tmp_path, snyk_claude_source):
+        target = tmp_path / "target.json"
+        target.write_text("{ invalid }")
+        with pytest.raises(ValueError, match="Invalid JSON in file"):
+            merge_claude_settings(str(target), snyk_claude_source)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

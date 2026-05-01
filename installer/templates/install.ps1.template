@@ -1,0 +1,120 @@
+# Snyk Studio Recipes — self-extracting installer (generated; do not edit)
+$ErrorActionPreference = "Stop"
+
+function Main {
+    param(
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]]$ForwardArgs
+    )
+    $scriptPath = $PSCommandPath
+    if ([string]::IsNullOrWhiteSpace($scriptPath)) {
+        $scriptPath = $MyInvocation.PSCommandPath
+    }
+    if ([string]::IsNullOrWhiteSpace($scriptPath)) {
+        throw "Unable to determine script path for embedded payload extraction."
+    }
+    $workDir = Join-Path ([System.IO.Path]::GetTempPath()) ("snyk-studio-install-" + [Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+    # Env name is a build-time placeholder; build_installer rewrites it to SNYK_STUDIO_BUNDLE_ROOT.
+    $env:__BUNDLE_ENV__ = $workDir
+    $bytes = Get-EmbeddedPayloadBytes -ScriptPath $scriptPath -Marker '__MARKER__'
+    Expand-BundleZip -BundleBytes $bytes -DestinationDir $workDir
+    $installer = Join-Path $workDir "snyk-studio-installer.py"
+    try {
+        if (Get-Command py -ErrorAction SilentlyContinue) {
+            & py -3 $installer @ForwardArgs
+        } elseif (Get-Command python3 -ErrorAction SilentlyContinue) {
+            & python3 $installer @ForwardArgs
+        } else {
+            & python $installer @ForwardArgs
+        }
+        exit $LASTEXITCODE
+    } finally {
+        Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-EmbeddedPayloadBytes {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptPath,
+        [Parameter(Mandatory = $true)][string]$Marker
+    )
+
+    $allLines = Get-Content -LiteralPath $ScriptPath -Encoding UTF8
+    $markerLine = -1
+    for ($i = 0; $i -lt $allLines.Count; $i++) {
+        if ($allLines[$i] -eq $Marker) { $markerLine = $i; break }
+    }
+    if ($markerLine -lt 0) { throw "Missing bundle marker in script." }
+
+    $payloadLines = @()
+    for ($j = $markerLine + 1; $j -lt $allLines.Count; $j++) {
+        $line = $allLines[$j]
+        if ($line.Trim() -eq '#>') { break }
+        $payloadLines += $line
+    }
+
+    $b64 = ($payloadLines -join '').Replace(' ', '')
+    # Keep the byte array as a single object (don't enumerate into Object[]).
+    return ,([Convert]::FromBase64String($b64))
+}
+
+function Expand-BundleZip {
+    param(
+        [Parameter(Mandatory = $true)][byte[]]$BundleBytes,
+        [Parameter(Mandatory = $true)][string]$DestinationDir
+    )
+
+    # The built-in Expand-Archive does not operate on memory streams so we 
+    # use System.IO.Compression and iterate over the zip ourselves 
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+    $ms = New-Object System.IO.MemoryStream(,[byte[]]$BundleBytes)
+    $zip = New-Object System.IO.Compression.ZipArchive($ms, [System.IO.Compression.ZipArchiveMode]::Read)
+    try {
+        $rootFull = [System.IO.Path]::GetFullPath($DestinationDir)
+        if (-not $rootFull.EndsWith([System.IO.Path]::DirectorySeparatorChar)) {
+            $rootFull += [System.IO.Path]::DirectorySeparatorChar
+        }
+        foreach ($entry in $zip.Entries) {
+            $name = $entry.FullName.Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+            if ($name.EndsWith([System.IO.Path]::DirectorySeparatorChar)) {
+                $dirPath = [System.IO.Path]::GetFullPath((Join-Path $DestinationDir $name.TrimEnd([System.IO.Path]::DirectorySeparatorChar)))
+                if (-not $dirPath.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    throw "Refusing unsafe zip path: $($entry.FullName)"
+                }
+                New-Item -ItemType Directory -Path $dirPath -Force | Out-Null
+                continue
+            }
+            $destPath = [System.IO.Path]::GetFullPath((Join-Path $DestinationDir $name))
+            if (-not $destPath.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw "Refusing unsafe zip path: $($entry.FullName)"
+            }
+            $parent = [System.IO.Path]::GetDirectoryName($destPath)
+            if (-not [string]::IsNullOrEmpty($parent)) {
+                New-Item -ItemType Directory -Path $parent -Force | Out-Null
+            }
+            $in = $entry.Open()
+            try {
+                $out = New-Object System.IO.FileStream($destPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
+                try {
+                    $in.CopyTo($out)
+                } finally {
+                    $out.Close()
+                }
+            } finally {
+                $in.Close()
+            }
+        }
+    } finally {
+        $zip.Dispose()
+        $ms.Close()
+    }
+}
+
+Main @args
+<#
+__MARKER__
+__B64_BODY__
+#>

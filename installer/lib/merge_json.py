@@ -53,8 +53,12 @@ def merge_cursor_hooks(target_path, source_path):
     Deduplicates by 'command' field. Preserves existing non-Snyk hooks.
     """
     _backup(target_path)
-    target = _load_json(target_path)
     source = _load_json(source_path)
+
+    try:
+        target = _load_json(target_path)
+    except Exception:
+        raise ValueError(f"Invalid JSON in file: {target_path}")
 
     # Ensure target has basic structure
     if "version" not in target:
@@ -90,8 +94,12 @@ def merge_claude_settings(target_path, source_path):
     Preserves existing non-Snyk settings.
     """
     _backup(target_path)
-    target = _load_json(target_path)
     source = _load_json(source_path)
+
+    try:
+        target = _load_json(target_path)
+    except Exception:
+        raise ValueError(f"Invalid JSON in file: {target_path}")
 
     if "hooks" not in target:
         target["hooks"] = {}

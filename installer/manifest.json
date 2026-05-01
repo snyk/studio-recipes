@@ -79,14 +79,14 @@
       "sources": {
         "cursor": {
           "config_merge": {
-            "target": ".mcp.json",
+            "target": ".cursor/.mcp.json",
             "source": "mcp/.mcp.json",
             "strategy": "merge_mcp_servers"
           }
         },
         "claude": {
           "config_merge": {
-            "target": ".mcp.json",
+            "target": ".claude/.mcp.json",
             "source": "mcp/.mcp.json",
             "strategy": "merge_mcp_servers"
           }
@@ -113,6 +113,36 @@
           ]
         }
       }
+    }
+  },
+  "conflicting-resources": {
+    "cursor" :{
+      "rules": [
+        {"global": false, "src":".cursor/rules/snyk_rules.mdc"}
+      ],
+      "skills": [
+        {"global": true, "src": ".cursor/skills/snyk-rules/SKILL.md"}
+      ],
+      "extension-settings": [
+        {"global": true, "src": "Cursor/User/settings.json"},
+        {"global": false, "src": ".vscode/settings.json"}
+      ]
+    },
+    "windsurf": {
+      "rules": [
+        {"global": true, "src": ".codeium/windsurf/memories/global_rules.md"},
+        {"global": false, "src": ".windsurf/rules/snyk_rules.md"}
+      ]
+    },
+    "gemini": {
+      "rules": [
+        {"global": true, "src": ".gemini/GEMINI.md"}
+      ]
+    },
+    "claude": {
+      "rules": [
+        {"global": true, "src": ".claude/CLAUDE.md"}
+      ]
     }
   },
   "profiles": {

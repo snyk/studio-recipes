@@ -169,6 +169,9 @@ class PayloadContext:
 class Manifest:
     """Parsed manifest.json with profile resolution."""
 
+    AUTO_CONFIGURE = "snyk.securityAtInception.autoConfigureSnykMcpServer"
+    EXECUTION_FREQUENCY = "snyk.securityAtInception.executionFrequency"
+
     def __init__(self, path: Path):
         with open(path) as f:
             self.data = json.load(f)
@@ -253,12 +256,9 @@ class Manifest:
         resource_locations = self.conflicting_resources.get(ade, {}).get(resource_type, [])
         return list(map(lambda x: GLOBAL if x.get(GLOBAL) else WORKSPACE, resource_locations))
 
-    def are_extension_settings_conflicting(self, ade: str) -> bool:
-        """Determine if the Snyk extension setting has conflicting values that would override hooks installation"""
-
+    def get_extension_settings_path(self, ade: str) -> List[Path]:
+        """Get the paths to the extension settings files for the given ADE based on OS"""
         home = Path.home()
-        auto_configure = "snyk.securityAtInception.autoConfigureSnykMcpServer"
-        execution_frequency = "snyk.securityAtInception.executionFrequency"
         path_prefix = ""
         settings_paths = []
 
@@ -275,6 +275,17 @@ class Manifest:
             setting_path = Path(path_prefix, setting_path) if setting.get(GLOBAL) else setting_path
 
             settings_paths.append(setting_path)
+
+        return settings_paths
+
+    def are_extension_settings_conflicting(self, ade: str) -> List[str]:
+        """Determine if the Snyk extension setting has conflicting values that would
+        override hooks installation and return the list of paths
+        """
+
+        home = Path.home()
+        conflicting_paths = []
+        settings_paths = self.get_extension_settings_path(ade)
 
         # Merge settings hierarchically, workspace settings will overwrite global
         resolved_settings: Dict[str, Any] = {}
@@ -318,12 +329,37 @@ class Manifest:
                 settings_data = json.loads(content)
 
                 resolved_settings.update(settings_data)
+                conflicting_paths.append(safe_path_abs)
             except Exception:
                 continue
 
         # Check the final resolved state
-        return (resolved_settings.get(auto_configure, False) and
-            resolved_settings.get(execution_frequency, "Manual") != "Manual")
+        if (resolved_settings.get(self.AUTO_CONFIGURE, False) and
+            resolved_settings.get(self.EXECUTION_FREQUENCY, "Manual") != "Manual"):
+            return conflicting_paths
+
+        return []
+
+    def resolve_extension_conflicts(self, settings_paths: List[str]) -> None:
+        """Resolve conflicting extension settings in the given paths.
+        Based on its caller (are_extension_settings_conflicting), files given are guaranteed
+        to exist and some combination of their settings are guaranteed to be conflicting.
+        """
+
+        for path in settings_paths:
+            try:
+                with open(path, "r+", encoding="utf-8") as f:
+                    settings_data = json.load(f)
+
+                    settings_data[self.AUTO_CONFIGURE] = False
+                    settings_data[self.EXECUTION_FREQUENCY] = "Manual"
+                    f.seek(0)
+                    json.dump(settings_data, f, indent=4)
+                    f.truncate()
+            except Exception as e:
+                print(f"  {C.red('ERROR')} Failed to update settings file {path}: {e}")
+
+        return None
 
 
 # =============================================================================
@@ -338,7 +374,8 @@ def check_prerequisites(auto_yes: bool) -> None:
 
     snyk_path = shutil.which("snyk")
 
-    parse_version = lambda v: tuple(map(int, v.split('.')))
+    def parse_version(x):
+        return tuple(map(int, x.split('.')))
 
     minimum_snyk_version = parse_version(SNYK_MINIMUM_VERSION)
 
@@ -385,7 +422,6 @@ def check_prerequisites(auto_yes: bool) -> None:
         reply = input("\n  Continue with warnings? (y/n) ").strip().lower()
         if reply not in ("y", "yes"):
             sys.exit(1)
-
 
 # =============================================================================
 # ADE DETECTION
@@ -862,32 +898,6 @@ def main() -> None:
             "--workspace", ".", "--configure-mcp=false",
             "--configure-rules=true"], timeout=10)
 
-    # ADE conflict detection
-    for ade in ades:
-        # check if any of the ADEs have snyk extension settings and if there are conflicts
-        if manifest.are_extension_settings_conflicting(ade):
-            print(f"  {C.yellow('WARNING')} Conflicting Snyk extension settings found for: {ade} - Please remove conflict by setting 'Secure At Inception Execution Frequency' to 'Manual'")
-            print(
-                f"    See documentation for more details: {C.underline('https://docs.snyk.io/integrations/snyk-studio-agentic-integrations/quickstart-guides-for-snyk-studio/github-copilot-guide#updating-secure-at-inception-settings')}"
-            )
-            if not args.yes and not args.dry_run:
-                reply = input(f"  Install anyway for {ade}? (y/n) ").strip().lower()
-                if reply not in ("y", "yes"):
-                    print("  Cancelled.")
-                    return
-        if manifest.are_rules_conflicting(ade):
-            print(f"  {C.yellow('WARNING')} Conflicting rule(s) found for: {ade}")
-            reply = input(f"  Run 'snyk mcp configure' to remove the conflicting rules for {ade}? (y/n) ").strip().lower()
-            if reply in ("y", "yes"):
-                for scope in manifest.get_conflicting_resource_scope(ade, "rules"):
-                        remove_legacy_SAI_directives(ade, scope)
-        if manifest.are_skills_conflicting(ade):
-            print(f"  {C.yellow('WARNING')} Conflicting skill(s) found for: {ade}")
-            reply = input(f"  Run 'snyk mcp configure' to remove the conflicting skills for {ade}? (y/n) ").strip().lower()
-            if reply in ("y", "yes"):
-                for scope in manifest.get_conflicting_resource_scope(ade, "skills"):
-                    remove_legacy_SAI_directives(ade, scope)
-
     # Verify mode
     if args.verify:
         recipes = manifest.resolve_recipes(args.profile)
@@ -912,6 +922,27 @@ def main() -> None:
         if reply not in ("y", "yes"):
             print("  Cancelled.")
             return
+
+    # ADE conflict detection after user has confirmed installation
+    for ade in ades:
+        # check if any of the ADEs have snyk extension settings and if there are conflicts
+        conflicting_paths = manifest.are_extension_settings_conflicting(ade)
+
+        if conflicting_paths and not args.dry_run:
+            manifest.resolve_extension_conflicts(conflicting_paths)
+            print(f"  {C.yellow('WARNING')} Detected and resolved conflicting Snyk extension settings for: {ade}\n")
+        if manifest.are_rules_conflicting(ade):
+            print(f"  {C.yellow('WARNING')} Conflicting rule(s) found for: {ade}")
+            reply = input(f"  Run 'snyk mcp configure' to remove the conflicting rules for {ade}? (y/n) ").strip().lower()
+            if reply in ("y", "yes"):
+                for scope in manifest.get_conflicting_resource_scope(ade, "rules"):
+                    remove_legacy_SAI_directives(ade, scope)
+        if manifest.are_skills_conflicting(ade):
+            print(f"  {C.yellow('WARNING')} Conflicting skill(s) found for: {ade}")
+            reply = input(f"  Run 'snyk mcp configure' to remove the conflicting skills for {ade}? (y/n) ").strip().lower()
+            if reply in ("y", "yes"):
+                for scope in manifest.get_conflicting_resource_scope(ade, "skills"):
+                    remove_legacy_SAI_directives(ade, scope)
 
     # Install
     for ade in ades:

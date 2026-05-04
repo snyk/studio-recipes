@@ -25,7 +25,7 @@ installer = importlib.import_module("snyk-studio-installer")
 class TestCheckPrerequisites:
     def test_all_ok(self, monkeypatch, capsys):
         monkeypatch.setattr("shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None)
-        
+
         def mock_run(cmd, **kwargs):
             m = MagicMock()
             if cmd[0] == "snyk" and cmd[1] == "--version":
@@ -35,9 +35,9 @@ class TestCheckPrerequisites:
                 m.stdout = "user@snyk.io\n"
                 m.returncode = 0
             return m
-            
+
         monkeypatch.setattr("subprocess.run", mock_run)
-        
+
         # Should not raise SystemExit
         installer.check_prerequisites(auto_yes=True)
         captured = capsys.readouterr()
@@ -46,7 +46,7 @@ class TestCheckPrerequisites:
 
     def test_outdated_snyk_warning(self, monkeypatch, capsys):
         monkeypatch.setattr("shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None)
-        
+
         def mock_run(cmd, **kwargs):
             m = MagicMock()
             if cmd[0] == "snyk" and cmd[1] == "--version":
@@ -56,9 +56,9 @@ class TestCheckPrerequisites:
                 m.stdout = "user@snyk.io\n"
                 m.returncode = 0
             return m
-            
+
         monkeypatch.setattr("subprocess.run", mock_run)
-        
+
         # With auto_yes=True, it should just print warning and continue
         installer.check_prerequisites(auto_yes=True)
         captured = capsys.readouterr()
@@ -66,7 +66,7 @@ class TestCheckPrerequisites:
 
     def test_outdated_snyk_cancel(self, monkeypatch, capsys):
         monkeypatch.setattr("shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None)
-        
+
         def mock_run(cmd, **kwargs):
             m = MagicMock()
             if cmd[0] == "snyk" and cmd[1] == "--version":
@@ -76,29 +76,29 @@ class TestCheckPrerequisites:
                 m.stdout = "user@snyk.io\n"
                 m.returncode = 0
             return m
-            
+
         monkeypatch.setattr("subprocess.run", mock_run)
         monkeypatch.setattr("builtins.input", lambda _: "n")
-        
+
         with pytest.raises(SystemExit):
             installer.check_prerequisites(auto_yes=False)
-        
+
         captured = capsys.readouterr()
         assert "WARNING Snyk CLI 1.1301.0 is outdated" in captured.out
 
     def test_snyk_not_found(self, monkeypatch, capsys):
         monkeypatch.setattr("shutil.which", lambda cmd: None)
-        
+
         # Mock input to say 'y' to continue
         monkeypatch.setattr("builtins.input", lambda _: "y")
-        
+
         installer.check_prerequisites(auto_yes=False)
         captured = capsys.readouterr()
         assert "WARNING Snyk CLI not found" in captured.out
 
     def test_version_parse_edge_case(self, monkeypatch, capsys):
         monkeypatch.setattr("shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None)
-        
+
         def mock_run(cmd, **kwargs):
             m = MagicMock()
             if cmd[0] == "snyk" and cmd[1] == "--version":
@@ -108,9 +108,9 @@ class TestCheckPrerequisites:
                 m.stdout = "user@snyk.io\n"
                 m.returncode = 0
             return m
-            
+
         monkeypatch.setattr("subprocess.run", mock_run)
-        
+
         installer.check_prerequisites(auto_yes=True)
         captured = capsys.readouterr()
         assert "OK Snyk CLI 1.1302.0 (standalone)" in captured.out
@@ -118,7 +118,7 @@ class TestCheckPrerequisites:
 
     def test_version_malformed_no_error(self, monkeypatch, capsys):
         monkeypatch.setattr("shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None)
-        
+
         def mock_run(cmd, **kwargs):
             m = MagicMock()
             if cmd[0] == "snyk" and cmd[1] == "--version":
@@ -128,9 +128,9 @@ class TestCheckPrerequisites:
                 m.stdout = "user@snyk.io\n"
                 m.returncode = 0
             return m
-            
+
         monkeypatch.setattr("subprocess.run", mock_run)
-        
+
         installer.check_prerequisites(auto_yes=True)
         captured = capsys.readouterr()
         assert "OK Snyk CLI development-version (could not parse version)" in captured.out
@@ -555,11 +555,11 @@ class TestMergeConfig:
             source.write_text('{"hooks": {}}')
             target = tmp_path / "target.json"
             target.write_text("{ invalid }")
-            
+
             installer.merge_config("merge_cursor_hooks", target, source, payload, dry_run=False)
         finally:
             payload.cleanup()
-            
+
         assert "Cannot update configuration, parse error in file" in capsys.readouterr().out
 
 
@@ -632,15 +632,15 @@ class TestVerifyRecipe:
         payload = installer.PayloadContext()
         payload.setup()
         manifest = installer.Manifest(payload.manifest_path)
-        
+
         # Create an invalid JSON file at the target location for claude settings
         settings_path = tmp_path / ".claude" / "settings.json"
         settings_path.parent.mkdir(parents=True)
         settings_path.write_text("{ invalid }")
-        
+
         # sai-hooks-async for claude uses merge_claude_settings
         result = installer.verify_recipe("sai-hooks-async", "claude", manifest, payload)
-        
+
         assert result is False
         assert "Cannot update configuration, parse error in file" in capsys.readouterr().out
 
@@ -665,7 +665,7 @@ class TestVSCodeSettingsConflict:
         monkeypatch.chdir(tmp_path)
         # Default to non-windows for consistent testing
         monkeypatch.setattr(sys, "platform", "darwin")
-        
+
         # Paths must align with entries in manifest.json:
         # global: Cursor/User/settings.json (on Darwin, prefixed with Library/Application Support)
         # local: .vscode/settings.json
@@ -677,7 +677,7 @@ class TestVSCodeSettingsConflict:
         }
 
     def test_no_settings_files(self, manifest, vscode_env):
-        assert manifest.are_extension_settings_conflicting("cursor") is False
+        assert not manifest.are_extension_settings_conflicting("cursor")
 
     def test_workspace_conflict(self, manifest, vscode_env):
         ws_dir = vscode_env["workspace_dir"]
@@ -686,7 +686,7 @@ class TestVSCodeSettingsConflict:
             "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
             "snyk.securityAtInception.executionFrequency": "On Code Generation"
         }))
-        assert manifest.are_extension_settings_conflicting("cursor") is True
+        assert manifest.are_extension_settings_conflicting("cursor")
 
     def test_workspace_no_conflict_global_conflict(self, manifest, vscode_env):
         # Global has it enabled
@@ -705,8 +705,8 @@ class TestVSCodeSettingsConflict:
             "snyk.securityAtInception.autoConfigureSnykMcpServer": False,
             "snyk.securityAtInception.executionFrequency": "On Code Generation"
         }))
-        
-        assert manifest.are_extension_settings_conflicting("cursor") is False
+
+        assert not manifest.are_extension_settings_conflicting("cursor")
 
     def test_workspace_manual_frequency_is_no_conflict(self, manifest, vscode_env):
         ws_dir = vscode_env["workspace_dir"]
@@ -715,7 +715,7 @@ class TestVSCodeSettingsConflict:
             "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
             "snyk.securityAtInception.executionFrequency": "Manual"
         }))
-        assert manifest.are_extension_settings_conflicting("cursor") is False
+        assert not manifest.are_extension_settings_conflicting("cursor")
 
     def test_unset_execution_frequency_defaults_to_manual_no_conflict(self, manifest, vscode_env):
         ws_dir = vscode_env["workspace_dir"]
@@ -723,27 +723,27 @@ class TestVSCodeSettingsConflict:
         (ws_dir / "settings.json").write_text(json.dumps({
             "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
         }))
-        assert manifest.are_extension_settings_conflicting("cursor") is False
+        assert not manifest.are_extension_settings_conflicting("cursor")
 
     def test_windows_global_path(self, manifest, vscode_env, monkeypatch):
         monkeypatch.setattr(sys, "platform", "win32")
         appdata = vscode_env["home"] / "AppData" / "Roaming"
         monkeypatch.setitem(os.environ, "APPDATA", str(appdata))
-        
+
         win_global_dir = appdata / "Cursor" / "User"
         win_global_dir.mkdir(parents=True)
         (win_global_dir / "settings.json").write_text(json.dumps({
             "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
             "snyk.securityAtInception.executionFrequency": "On Code Generation"
         }))
-        
-        assert manifest.are_extension_settings_conflicting("cursor") is True
+
+        assert manifest.are_extension_settings_conflicting("cursor")
 
     def test_invalid_json_skips(self, manifest, vscode_env):
         ws_dir = vscode_env["workspace_dir"]
         ws_dir.mkdir(parents=True)
         (ws_dir / "settings.json").write_text("{ invalid json")
-        assert manifest.are_extension_settings_conflicting("cursor") is False
+        assert not manifest.are_extension_settings_conflicting("cursor")
 
     def test_skips_check_if_ade_not_configured_in_manifest(self, manifest, vscode_env):
         # Global has conflict values
@@ -754,5 +754,61 @@ class TestVSCodeSettingsConflict:
             "snyk.securityAtInception.executionFrequency": "On Code Generation"
         }))
         # 'claude' has no extension-settings entries in manifest.json, so it should return False.
-        assert manifest.are_extension_settings_conflicting("claude") is False
+        assert not manifest.are_extension_settings_conflicting("claude")
 
+    def test_resolve_extension_conflicts(self, manifest, vscode_env):
+        ws_dir = vscode_env["workspace_dir"]
+        ws_dir.mkdir(parents=True)
+        settings_file = ws_dir / "settings.json"
+        original_data = {
+            "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
+            "snyk.securityAtInception.executionFrequency": "On Code Generation",
+            "other.setting": "value"
+        }
+        settings_file.write_text(json.dumps(original_data))
+
+        manifest.resolve_extension_conflicts([str(settings_file)])
+
+        # Check that settings were updated
+        updated_data = json.loads(settings_file.read_text())
+        assert updated_data["snyk.securityAtInception.autoConfigureSnykMcpServer"] is False
+        assert updated_data["snyk.securityAtInception.executionFrequency"] == "Manual"
+        assert updated_data["other.setting"] == "value"
+
+# ===========================================================================
+# TestConflictResolution
+# ===========================================================================
+
+class TestConflictResolution:
+    @pytest.fixture
+    def manifest(self):
+        return installer.Manifest(INSTALLER_DIR / "manifest.json")
+
+    def test_get_extension_settings_path_darwin(self, manifest, monkeypatch, tmp_path):
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        paths = manifest.get_extension_settings_path("cursor")
+        # Global path on Darwin for cursor: ~/Library/Application Support/Cursor/User/settings.json
+        expected_global = tmp_path / "Library/Application Support/Cursor/User/settings.json"
+        assert expected_global in paths
+
+    def test_get_extension_settings_path_linux(self, manifest, monkeypatch, tmp_path):
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setitem(os.environ, "XDG_CONFIG_HOME", str(tmp_path / ".config"))
+
+        paths = manifest.get_extension_settings_path("cursor")
+        # Global path on Linux for cursor: ~/.config/Cursor/User/settings.json
+        expected_global = tmp_path / ".config/Cursor/User/settings.json"
+        assert expected_global in paths
+
+    def test_resolve_extension_conflicts_write_error(self, manifest, tmp_path, capsys):
+        # Setup a file that exists but we can't write to (mocking open failure)
+        settings_file = tmp_path / "settings.json"
+        settings_file.write_text("{}")
+
+        with patch("builtins.open", side_effect=IOError("Permission denied")):
+            manifest.resolve_extension_conflicts([str(settings_file)])
+
+        assert "Failed to update settings file" in capsys.readouterr().out

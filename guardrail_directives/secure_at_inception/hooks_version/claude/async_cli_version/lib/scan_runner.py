@@ -21,8 +21,9 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from platform_utils import (
     get_detached_popen_kwargs,
@@ -254,8 +255,6 @@ def write_early_status(workspace: str, status: str, error_detail: str = "") -> N
     CLI not found) so the Stop handler doesn't wait for a scan that
     will never complete.
     """
-    from datetime import datetime
-
     ensure_cache_dirs(workspace)
     done_file = get_scan_done_file(workspace)
     done_data = {
@@ -403,3 +402,215 @@ def clear_scan_state(workspace: str) -> None:
                 os.remove(file_path)
             except OSError:
                 pass
+
+
+# =============================================================================
+# SCA SCAN STATE MANAGEMENT
+# =============================================================================
+
+def get_sca_pid_file(workspace: str) -> str:
+    return os.path.join(get_cache_dir(workspace), "sca_scan.pid")
+
+
+def get_sca_done_file(workspace: str) -> str:
+    return os.path.join(get_cache_dir(workspace), "sca_scan.done")
+
+
+def is_sca_scan_running(workspace: str) -> bool:
+    pid_file = get_sca_pid_file(workspace)
+    if not os.path.exists(pid_file):
+        return False
+
+    try:
+        age = time.time() - os.path.getmtime(pid_file)
+        if age > PID_STALENESS_TIMEOUT:
+            _cleanup_sca_pid_file(workspace)
+            return False
+    except OSError:
+        pass
+
+    try:
+        with open(pid_file, "r") as f:
+            pid = int(f.read().strip())
+        if is_pid_alive(pid):
+            return True
+        _cleanup_sca_pid_file(workspace)
+        return False
+    except (ValueError, OSError):
+        _cleanup_sca_pid_file(workspace)
+        return False
+
+
+def is_sca_scan_complete(workspace: str) -> bool:
+    return os.path.exists(get_sca_done_file(workspace))
+
+
+def _cleanup_sca_pid_file(workspace: str) -> None:
+    pid_file = get_sca_pid_file(workspace)
+    if os.path.exists(pid_file):
+        try:
+            os.remove(pid_file)
+        except OSError:
+            pass
+
+
+def launch_background_sca_scan(workspace: str) -> bool:
+    """Launch a background Snyk SCA scan as a detached subprocess.
+    PID file is written by the launcher to close the race window."""
+    ensure_cache_dirs(workspace)
+
+    if is_sca_scan_running(workspace):
+        return False
+
+    done_file = get_sca_done_file(workspace)
+    if os.path.exists(done_file):
+        os.remove(done_file)
+
+    worker_script = str(Path(__file__).parent.resolve() / "sca_scan_worker.py")
+    env = os.environ.copy()
+    _augment_path_for_snyk(env)
+    _ensure_snyk_token(env)
+    env["SAI_WORKSPACE"] = workspace
+    env["SAI_CACHE_DIR"] = get_cache_dir(workspace)
+    env["SAI_LIB_DIR"] = str(Path(__file__).parent.resolve())
+
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, worker_script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=workspace,
+            env=env,
+            **get_detached_popen_kwargs(),
+        )
+        pid_file = get_sca_pid_file(workspace)
+        with open(pid_file, "w") as f:
+            f.write(str(proc.pid))
+        return True
+    except Exception:
+        return False
+
+
+def get_sca_completion_info(workspace: str) -> Optional[Dict[str, Any]]:
+    """Read the full sca_scan.done record (status, started_at, vulnerabilities)."""
+    done_file = get_sca_done_file(workspace)
+    try:
+        with open(done_file, "r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError, FileNotFoundError):
+        return None
+
+
+def _read_sca_scan_status(workspace: str) -> Optional[str]:
+    done_file = get_sca_done_file(workspace)
+    try:
+        with open(done_file, "r") as f:
+            data = json.load(f)
+        return data.get("status", "unknown")
+    except (json.JSONDecodeError, IOError, FileNotFoundError):
+        return None
+
+
+def wait_for_sca_scan(
+    workspace: str, timeout: float = SCAN_WAIT_TIMEOUT, log_fn=None
+) -> Optional[str]:
+    """Wait for a background SCA scan to complete. Returns the status string
+    or None if the wait timed out."""
+    if log_fn is None:
+        log_fn = lambda msg: None
+
+    if is_sca_scan_complete(workspace):
+        return _read_sca_scan_status(workspace)
+
+    if not is_sca_scan_running(workspace) and not is_sca_scan_complete(workspace):
+        if not launch_background_sca_scan(workspace):
+            if is_sca_scan_complete(workspace):
+                return _read_sca_scan_status(workspace)
+            return None
+
+    log_fn("[SAI] Waiting for SCA scan to complete...")
+
+    start_time = time.time()
+    poll_interval = POLL_INTERVAL_INITIAL
+
+    while (time.time() - start_time) < timeout:
+        if is_sca_scan_complete(workspace):
+            elapsed = time.time() - start_time
+            log_fn(f"[SAI] SCA scan completed ({elapsed:.1f}s)")
+            return _read_sca_scan_status(workspace)
+
+        if not is_sca_scan_running(workspace) and not is_sca_scan_complete(workspace):
+            log_fn("[SAI] SCA scan process terminated unexpectedly")
+            return None
+
+        time.sleep(poll_interval)
+        poll_interval = min(poll_interval * 1.5, POLL_INTERVAL_MAX)
+
+    log_fn(f"[SAI] SCA scan timed out after {timeout:.0f}s")
+    return None
+
+
+def clear_sca_scan_state(workspace: str) -> None:
+    """Clear SCA scan state files (PID, done marker)."""
+    for file_path in [get_sca_pid_file(workspace), get_sca_done_file(workspace)]:
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+
+
+# =============================================================================
+# MANIFEST HASH UTILITIES
+# =============================================================================
+
+_MANIFEST_EXCLUSION_DIRS = frozenset({
+    'node_modules', '.git', '.venv', '__pycache__',
+    'target', 'vendor', '.gradle', 'build',
+    'dist', '.tox', '.eggs', '.mypy_cache',
+    '.ruff_cache', 'pytest_cache',
+})
+
+
+def snapshot_manifest_hashes(
+    workspace: str,
+    manifest_files: Set[str],
+    manifest_suffixes: Set[str],
+) -> Dict[str, str]:
+    """Walk workspace and return SHA-256 hex digests for matching manifest files."""
+    hashes: Dict[str, str] = {}
+    for dirpath, dirnames, filenames in os.walk(workspace, followlinks=False):
+        dirnames[:] = [d for d in dirnames if d not in _MANIFEST_EXCLUSION_DIRS]
+        for filename in filenames:
+            if filename in manifest_files or Path(filename).suffix.lower() in manifest_suffixes:
+                abs_path = os.path.join(dirpath, filename)
+                try:
+                    with open(abs_path, 'rb') as f:
+                        digest = hashlib.sha256(f.read()).hexdigest()
+                    hashes[abs_path] = digest
+                except (IOError, OSError):
+                    pass
+    return hashes
+
+
+def detect_manifest_changes(
+    workspace: str,
+    baseline: Dict[str, str],
+    manifest_files: Set[str],
+    manifest_suffixes: Set[str],
+) -> List[str]:
+    """Return paths of manifest files that changed, were added, or were deleted since baseline.
+
+    Returns an empty list when baseline is empty (safe default — no comparison possible).
+    """
+    if not baseline:
+        return []
+    current = snapshot_manifest_hashes(workspace, manifest_files, manifest_suffixes)
+    changed: List[str] = []
+    for path, old_hash in baseline.items():
+        if path not in current or current[path] != old_hash:
+            changed.append(path)
+    for path in current:
+        if path not in baseline:
+            changed.append(path)
+    return changed

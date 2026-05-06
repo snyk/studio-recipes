@@ -15,8 +15,16 @@ Verify strategies (read-only, exit 1 if entries missing):
 
 import json
 import os
+import shlex
 import shutil
 import sys
+
+LEGACY_LAUNCHERS = frozenset({"python", "python3"})
+
+# Tokens that start shell redirection / piping; truncate argv before these for script identity.
+_REDIR_PIPE_TOKENS = frozenset({
+    ">>", ">", "<", "|", "2>", "2>>", "&>", "&>>", "2>&1", "<&", ">&", ">>&",
+})
 
 
 def _load_json(path):
@@ -46,6 +54,154 @@ def _is_snyk_command(command_str):
     return "snyk" in command_str.lower()
 
 
+def _split_command_argv(command_str):
+    """Split a hook command like a shell line; return argv list or None."""
+    if not isinstance(command_str, str) or not command_str.strip():
+        return None
+
+    for posix in (True, False):
+        try:
+            parsed = shlex.split(command_str, posix=posix)
+        except ValueError:
+            continue
+        if parsed:
+            return parsed
+    return None
+
+
+def _strip_outer_quotes(token: str) -> str:
+    s = token.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        return s[1:-1]
+    return s
+
+
+def _is_redirect_or_pipe_token(token: str) -> bool:
+    if not token:
+        return False
+    if token in _REDIR_PIPE_TOKENS:
+        return True
+    # e.g. 2>, 1>>, &>file (if ever unsplit)
+    if token[0].isdigit() and ">" in token:
+        return True
+    return False
+
+
+def _strip_shell_redirects(tokens):
+    """Drop redirect/pipe suffix (e.g. `>> log`) so the hook executable argv remains."""
+    out = []
+    for t in tokens:
+        if _is_redirect_or_pipe_token(t):
+            break
+        out.append(t)
+    return out
+
+
+def _pick_script_index_and_key(effective_tokens):
+    """Choose script token index and normalized path key for dedup/migration.
+
+    Prefer the last token ending in ``.py`` (option 2); else last token (option 1).
+    """
+    if not effective_tokens:
+        return None, None
+
+    n = len(effective_tokens)
+    for i in range(n - 1, -1, -1):
+        norm = _strip_outer_quotes(effective_tokens[i])
+        if norm.lower().endswith(".py"):
+            return i, norm or None
+    last = _strip_outer_quotes(effective_tokens[-1])
+    return n - 1, last or None
+
+
+def _command_script_key(command_str):
+    """Return a stable script path key for dedup and migration.
+
+    Parses like a shell command (quoting honored). Strips shell redirections
+    (``>>``, ``>``, etc.) before resolving the script. The script is the last
+    ``*.py`` token when present; otherwise the last argv token of the command
+    portion (options 1 and 2).
+    """
+    args = _split_command_argv(command_str)
+    if not args:
+        return None
+
+    effective = _strip_shell_redirects(args)
+    _, key = _pick_script_index_and_key(effective)
+    return key
+
+
+def _command_launcher(command_str):
+    """Return the launcher argv (everything before the chosen script token)."""
+    args = _split_command_argv(command_str)
+    if not args:
+        return None
+
+    effective = _strip_shell_redirects(args)
+    if not effective:
+        return ""
+
+    idx, _ = _pick_script_index_and_key(effective)
+    if idx is None:
+        return ""
+    if idx == 0:
+        return ""
+    return " ".join(effective[:idx]).strip()
+
+
+def _merge_command_entries(target_entries, source_entries):
+    """Merge source command entries into target entries.
+
+    Matching priority:
+      1. Same script key (after stripping redirects / pipes; last ``*.py`` token
+         when present) and target launcher in LEGACY_LAUNCHERS (e.g. python,
+         python3): replace target entry with source entry.
+      2. Same command string: dedupe (skip append).
+      3. Otherwise: append source entry.
+    """
+    command_to_idx = {}
+    script_to_idx = {}
+
+    for idx, entry in enumerate(target_entries):
+        cmd = entry.get("command")
+        if isinstance(cmd, str):
+            command_to_idx[cmd] = idx
+            script_key = _command_script_key(cmd)
+            if script_key and script_key not in script_to_idx:
+                script_to_idx[script_key] = idx
+
+    for src_entry in source_entries:
+        cmd = src_entry.get("command")
+        if not isinstance(cmd, str):
+            target_entries.append(src_entry)
+            continue
+
+        script_key = _command_script_key(cmd)
+        if script_key and script_key in script_to_idx:
+            idx = script_to_idx[script_key]
+            old_cmd = target_entries[idx].get("command")
+            old_launcher = _command_launcher(old_cmd)
+
+            # Only migrate launcher for known legacy launchers.
+            if old_launcher in LEGACY_LAUNCHERS:
+                target_entries[idx] = src_entry
+
+                if isinstance(old_cmd, str) and command_to_idx.get(old_cmd) == idx:
+                    del command_to_idx[old_cmd]
+                command_to_idx[cmd] = idx
+                script_to_idx[script_key] = idx
+                continue
+
+        if cmd in command_to_idx:
+            continue
+
+        target_entries.append(src_entry)
+        idx = len(target_entries) - 1
+        command_to_idx[cmd] = idx
+        if script_key and script_key not in script_to_idx:
+            script_to_idx[script_key] = idx
+
+
 def merge_cursor_hooks(target_path, source_path):
     """Merge Snyk hooks into Cursor's top-level hooks.json (~/.cursor/hooks.json).
 
@@ -71,16 +227,7 @@ def merge_cursor_hooks(target_path, source_path):
         if event not in target["hooks"]:
             target["hooks"][event] = []
 
-        # Collect existing commands for dedup
-        existing_commands = {
-            e.get("command") for e in target["hooks"][event] if "command" in e
-        }
-
-        for entry in entries:
-            cmd = entry.get("command", "")
-            if cmd not in existing_commands:
-                target["hooks"][event].append(entry)
-                existing_commands.add(cmd)
+        _merge_command_entries(target["hooks"][event], entries)
 
     _write_json(target_path, target)
 
@@ -120,17 +267,9 @@ def merge_claude_settings(target_path, source_path):
                     if "hooks" not in tgt_group:
                         tgt_group["hooks"] = []
 
-                    existing_commands = {
-                        h.get("command")
-                        for h in tgt_group["hooks"]
-                        if "command" in h
-                    }
-
-                    for hook in src_group.get("hooks", []):
-                        cmd = hook.get("command", "")
-                        if cmd not in existing_commands:
-                            tgt_group["hooks"].append(hook)
-                            existing_commands.add(cmd)
+                    _merge_command_entries(
+                        tgt_group["hooks"], src_group.get("hooks", [])
+                    )
 
                     merged = True
                     break

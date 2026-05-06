@@ -6,6 +6,8 @@ function Main {
         [Parameter(ValueFromRemainingArguments = $true)]
         [string[]]$ForwardArgs
     )
+    Ensure-Uv -ForwardArgs $ForwardArgs
+
     $scriptPath = $PSCommandPath
     if ([string]::IsNullOrWhiteSpace($scriptPath)) {
         $scriptPath = $MyInvocation.PSCommandPath
@@ -21,16 +23,59 @@ function Main {
     Expand-BundleZip -BundleBytes $bytes -DestinationDir $workDir
     $installer = Join-Path $workDir "snyk-studio-installer.py"
     try {
-        if (Get-Command py -ErrorAction SilentlyContinue) {
-            & py -3 $installer @ForwardArgs
-        } elseif (Get-Command python3 -ErrorAction SilentlyContinue) {
-            & python3 $installer @ForwardArgs
-        } else {
-            & python $installer @ForwardArgs
+        $uvLocalBin = Join-Path $env:USERPROFILE ".local\bin"
+        if (Test-Path -LiteralPath $uvLocalBin) {
+            $env:Path = "$uvLocalBin$([System.IO.Path]::PathSeparator)$env:Path"
         }
+        & uv run $installer @ForwardArgs
         exit $LASTEXITCODE
     } finally {
         Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Ensure-Uv {
+    param([string[]]$ForwardArgs)
+
+    $autoYes = $false
+    if ($null -ne $ForwardArgs) {
+        foreach ($a in $ForwardArgs) {
+            if ($a -eq "-y" -or $a -eq "--yes") {
+                $autoYes = $true
+                break
+            }
+        }
+    }
+
+    $uvLocalBin = Join-Path $env:USERPROFILE ".local\bin"
+    if (Test-Path -LiteralPath $uvLocalBin) {
+        $env:Path = "$uvLocalBin$([System.IO.Path]::PathSeparator)$env:Path"
+    }
+
+    if (Get-Command uv -ErrorAction SilentlyContinue) {
+        $ver = (& uv --version 2>$null | Select-Object -First 1)
+        Write-Host "  OK uv $ver"
+        return
+    }
+
+    Write-Host "  WARNING uv not found" -ForegroundColor Yellow
+    Write-Host "    Install with: irm https://astral.sh/uv/install.ps1 | iex"
+
+    if (-not $autoYes) {
+        $reply = (Read-Host "`n  Install uv now? (y/n)").Trim().ToLowerInvariant()
+        if ($reply -ne "y" -and $reply -ne "yes") {
+            Write-Error "  Cancelled: uv is required to run this installer."
+            exit 1
+        }
+    }
+
+    Invoke-Expression (Invoke-RestMethod -Uri 'https://astral.sh/uv/install.ps1')
+
+    if (Test-Path -LiteralPath $uvLocalBin) {
+        $env:Path = "$uvLocalBin$([System.IO.Path]::PathSeparator)$env:Path"
+    }
+    if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
+        throw "uv was installed but is not on PATH. Add $uvLocalBin to PATH and retry."
     }
 }
 

@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # Snyk Studio Recipes — self-extracting installer (generated; do not edit)
 set -euo pipefail
+
 Main() {
   local workdir
   local bundle
   local archive
+
+  EnsureUvOnPath
+  EnsureUv "$@"
 
   workdir="$(mktemp -d "${TMPDIR:-/tmp}/snyk-studio-install.XXXXXX")"
   cleanup() { rm -rf "${workdir:-}"; }
@@ -20,7 +24,59 @@ Main() {
   ExpandArchive "$archive" "$workdir"
   rm -f "$archive"
 
-  python3 "$workdir/snyk-studio-installer.py" "$@"
+  uv run "$workdir/snyk-studio-installer.py" "$@"
+}
+
+# Common install location for uv (astral.sh installer); prepend so a fresh install is visible.
+EnsureUvOnPath() {
+  case "${HOME:-}" in
+    "") ;;
+    *) export PATH="${HOME}/.local/bin:${PATH}" ;;
+  esac
+}
+
+EnsureUv() {
+  local auto_yes=0
+  local arg
+  for arg in "$@"; do
+    if [[ "$arg" == "-y" || "$arg" == "--yes" ]]; then
+      auto_yes=1
+      break
+    fi
+  done
+
+  if command -v uv >/dev/null 2>&1; then
+    echo "  OK uv $(uv --version 2>/dev/null | head -n 1)"
+    return 0
+  fi
+
+  echo "  WARNING uv not found" >&2
+  echo "    Install with: curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+
+  if [[ "$auto_yes" -eq 0 ]]; then
+    printf '\n  Install uv now? (y/n) '
+    IFS= read -r reply || true
+    reply="$(printf '%s' "$reply" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+    if [[ "$reply" != "y" && "$reply" != "yes" ]]; then
+      echo "  Cancelled: uv is required to run this installer." >&2
+      exit 1
+    fi
+  fi
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO- https://astral.sh/uv/install.sh | sh
+  else
+    echo "  Error: need curl or wget to install uv." >&2
+    exit 1
+  fi
+
+  EnsureUvOnPath
+  if ! command -v uv >/dev/null 2>&1; then
+    echo "  Error: uv was installed but is not on PATH. Add ~/.local/bin to PATH and retry." >&2
+    exit 1
+  fi
 }
 
 WriteEmbeddedPayload() {

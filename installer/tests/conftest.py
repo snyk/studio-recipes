@@ -36,10 +36,10 @@ SNYK_CURSOR_HOOKS = {
     "version": 1,
     "hooks": {
         "afterFileEdit": [
-            {"command": 'python3 "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'}
+            {"command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'}
         ],
         "stop": [
-            {"command": 'python3 "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'}
+            {"command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'}
         ],
     },
 }
@@ -75,7 +75,7 @@ SNYK_CLAUDE_SETTINGS = {
                 "hooks": [
                     {
                         "type": "command",
-                        "command": 'python3 "$HOME/.claude/hooks/snyk_secure_at_inception.py"',
+                        "command": 'uv run "$HOME/.claude/hooks/snyk_secure_at_inception.py"',
                         "statusMessage": "Tracking code changes for security scan...",
                     }
                 ],
@@ -86,7 +86,7 @@ SNYK_CLAUDE_SETTINGS = {
                 "hooks": [
                     {
                         "type": "command",
-                        "command": 'python3 "$HOME/.claude/hooks/snyk_secure_at_inception.py"',
+                        "command": 'uv run "$HOME/.claude/hooks/snyk_secure_at_inception.py"',
                         "statusMessage": "Evaluating security scan results...",
                     }
                 ]

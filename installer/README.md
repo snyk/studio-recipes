@@ -1,6 +1,6 @@
 # Snyk Studio Recipes — Installer
 
-Cross-platform installer that copies recipes from this repo into **your user home** so **Cursor**, **Claude Code**, and/or **Gemini Code** can use them globally (hooks, commands, skills, MCP merge)
+Cross-platform installer that copies recipes from this repo into **your user home** so **Cursor**, **Claude Code**, **Gemini Code**, and/or **Windsurf** can use them globally (hooks, commands, skills, MCP merge). Windsurf installs commands, skills, and MCP only — no SAI hooks.
 
 
 | File | Platform | Role |
@@ -12,14 +12,14 @@ Cross-platform installer that copies recipes from this repo into **your user hom
 
 ## What it installs
 
-Paths are resolved under `$HOME` (e.g. `~/.cursor/...`, `~/.claude/...`, `~/.gemini/...`). The installer **detects** which ADEs you use or you can target one with `--ade`.
+Paths are resolved under `$HOME` (e.g. `~/.cursor/...`, `~/.claude/...`, `~/.gemini/...`, `~/.codeium/windsurf/...`, `~/.agents/skills/...` for Windsurf skills). The installer **detects** which ADEs you use or you can target one with `--ade`.
 
 | Recipe type (in manifest) | Typical outcome |
 |-----------------------------|-----------------|
-| **hooks** | Hook scripts + JSON merge into Cursor `hooks.json`, Claude `settings.json`, or Gemini `settings.json` |
-| **command** | Slash commands under `.cursor/commands/`, `.claude/commands/`, or `.gemini/commands/` |
-| **skill** | Cursor: skills under `.cursor/skills/snyk/...`; Claude / Gemini: transformed into a command `.md` |
-| **mcp** | Merge of Snyk MCP server entries into `~/.cursor/.mcp.json`, `~/.claude/.mcp.json`, or `~/.gemini/settings.json` (source: `mcp/.mcp.json` in the repo) |
+| **hooks** | Hook scripts + JSON merge into Cursor `hooks.json`, Claude `settings.json`, or Gemini `settings.json` (Windsurf is not configured for hooks) |
+| **command** | Slash commands under `.cursor/commands/`, `.claude/commands/`, `.gemini/commands/`, or Windsurf global workflows under `.codeium/windsurf/global_workflows/` |
+| **skill** | Cursor: skills under `.cursor/skills/snyk/...`; Windsurf: skills under `~/.agents/skills/<skill>/SKILL.md`; Claude / Gemini: transformed into a command `.md` |
+| **mcp** | Merge of Snyk MCP server entries into `~/.cursor/.mcp.json`, `~/.claude/.mcp.json`, `~/.gemini/settings.json`, or `~/.codeium/windsurf/mcp_config.json` (source: `mcp/.mcp.json` in the repo) |
 
 ## Prerequisites
 
@@ -61,7 +61,7 @@ python3 snyk-studio-installer.py [options]
 | Option | Description |
 |--------|-------------|
 | `--profile <name>` | `default` or `minimal` |
-| `--ade <cursor\|claude\|gemini>` | Install only for one ADE (otherwise auto-detect / prompt) |
+| `--ade <cursor\|claude\|gemini\|windsurf>` | Install only for one ADE (otherwise auto-detect / prompt) |
 | `--dry-run` | Show what would be installed without making changes |
 | `--uninstall` | Remove installed Snyk recipe artifacts from detected ADEs |
 | `--verify` | Check that installed files and merged configs match the manifest (read-only) |

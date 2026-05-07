@@ -95,7 +95,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--profile", default="default",
                         help="Installation profile (default: 'default')")
-    parser.add_argument("--ade", choices=["cursor", "claude", "gemini"], default=None,
+    parser.add_argument("--ade", choices=["cursor", "claude", "gemini", "windsurf"], default=None,
                         help="Target specific ADE (auto-detect if omitted)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be installed without making changes")
@@ -414,10 +414,10 @@ def check_prerequisites(auto_yes: bool) -> None:
 # ADE DETECTION
 # =============================================================================
 
-ADE_HOMES = {"cursor": ".cursor", "claude": ".claude", "gemini": ".gemini"}
+ADE_HOMES = {"cursor": ".cursor", "claude": ".claude", "gemini": ".gemini", "windsurf": ".codeium/windsurf"}
 
 # Mapping from installer ADE name to the value `snyk mcp configure --tool` expects.
-SNYK_MCP_TOOL_NAMES = {"cursor": "cursor", "claude": "claude-cli", "gemini": "gemini-cli"}
+SNYK_MCP_TOOL_NAMES = {"cursor": "cursor", "claude": "claude-cli", "gemini": "gemini-cli", "windsurf": "windsurf"}
 
 
 def get_ade_home(ade: str) -> Path:
@@ -468,6 +468,13 @@ def detect_ades() -> List[str]:
     elif shutil.which("gemini"):
         detected.append("gemini")
 
+    if (home / ".codeium" / "windsurf").is_dir():
+        detected.append("windsurf")
+    elif (home / ".windsurf").is_dir():
+        detected.append("windsurf")
+    elif shutil.which("windsurf"):
+        detected.append("windsurf")
+
     return detected
 
 
@@ -488,14 +495,16 @@ def get_target_ades(
     print("  1) Cursor")
     print("  2) Claude Code")
     print("  3) Gemini Code")
-    print("  4) All")
+    print("  4) Windsurf")
+    print("  5) All")
     print()
-    reply = input("  Choose (1/2/3/4): ").strip()
+    reply = input("  Choose (1/2/3/4/5): ").strip()
     choices = {
         "1": ["cursor"],
         "2": ["claude"],
         "3": ["gemini"],
-        "4": ["cursor", "claude", "gemini"],
+        "4": ["windsurf"],
+        "5": ["cursor", "claude", "gemini", "windsurf"],
     }
     if reply in choices:
         return choices[reply]

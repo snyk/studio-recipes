@@ -4,13 +4,14 @@
 Merge strategies (create .bak backup, write pretty-printed JSON, idempotent):
   - merge_cursor_hooks:    ~/.cursor/hooks.json
   - merge_claude_settings: ~/.claude/settings.json
+  - merge_gemini_settings: ~/.gemini/settings.json
   - merge_mcp_servers:     ~/.mcp.json or ~/.cursor/.mcp.json
 
 Unmerge strategies (remove Snyk entries, idempotent):
-  - unmerge_cursor_hooks, unmerge_claude_settings, unmerge_mcp_servers
+  - unmerge_cursor_hooks, unmerge_claude_settings, unmerge_gemini_settings, unmerge_mcp_servers
 
 Verify strategies (read-only, exit 1 if entries missing):
-  - verify_cursor_hooks, verify_claude_settings, verify_mcp_servers
+  - verify_cursor_hooks, verify_claude_settings, verify_gemini_settings, verify_mcp_servers
 """
 
 import json
@@ -281,6 +282,16 @@ def merge_claude_settings(target_path, source_path):
     _write_json(target_path, target)
 
 
+def merge_gemini_settings(target_path, source_path):
+    """Merge Snyk hooks into Gemini settings.json.
+
+    Gemini's hooks schema mirrors Claude's: hooks -> event -> list of
+    {matcher, hooks: [...]} groups. The merge logic is identical — match groups
+    by `matcher`, deduplicate hook entries by `command`.
+    """
+    merge_claude_settings(target_path, source_path)
+
+
 def merge_mcp_servers(target_path, source_path):
     """Merge Snyk MCP server config into .mcp.json.
 
@@ -385,6 +396,11 @@ def unmerge_claude_settings(target_path, source_path):
     _write_json(target_path, target)
 
 
+def unmerge_gemini_settings(target_path, source_path):
+    """Remove Snyk hooks from Gemini settings.json (mirrors Claude's schema)."""
+    unmerge_claude_settings(target_path, source_path)
+
+
 def unmerge_mcp_servers(target_path, source_path):
     """Remove Snyk MCP server entries from .mcp.json.
 
@@ -486,6 +502,11 @@ def verify_claude_settings(target_path, source_path):
         sys.exit(1)
 
 
+def verify_gemini_settings(target_path, source_path):
+    """Verify Snyk hooks in Gemini settings.json (mirrors Claude's schema)."""
+    verify_claude_settings(target_path, source_path)
+
+
 def verify_mcp_servers(target_path, source_path):
     """Verify that all Snyk MCP servers from source exist in target.
 
@@ -511,12 +532,15 @@ def verify_mcp_servers(target_path, source_path):
 STRATEGIES = {
     "merge_cursor_hooks": merge_cursor_hooks,
     "merge_claude_settings": merge_claude_settings,
+    "merge_gemini_settings": merge_gemini_settings,
     "merge_mcp_servers": merge_mcp_servers,
     "unmerge_cursor_hooks": unmerge_cursor_hooks,
     "unmerge_claude_settings": unmerge_claude_settings,
+    "unmerge_gemini_settings": unmerge_gemini_settings,
     "unmerge_mcp_servers": unmerge_mcp_servers,
     "verify_cursor_hooks": verify_cursor_hooks,
     "verify_claude_settings": verify_claude_settings,
+    "verify_gemini_settings": verify_gemini_settings,
     "verify_mcp_servers": verify_mcp_servers,
 }
 

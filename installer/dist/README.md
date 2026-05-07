@@ -1,6 +1,6 @@
 # Snyk Studio Recipes — `snyk-studio-install.sh`
 
-Single-file installer for Snyk Studio recipes. It unpacks an embedded payload and installs into your **home directory** so **Cursor** and/or **Claude Code** can use the bundled hooks, slash commands, skills, and MCP configuration.
+Single-file installer for Snyk Studio recipes. It unpacks an embedded payload and installs into your **home directory** so **Cursor**, **Claude Code**, and/or **Gemini Code** can use the bundled hooks, slash commands, skills, and MCP configuration.
 
 No separate download is required beyond this script.
 
@@ -31,14 +31,14 @@ Pick one:
 ./snyk-studio-install.sh [options]
 ```
 
-Installs into paths under `$HOME` (for example `~/.cursor/` and `~/.claude/`). The installer can **auto-detect** Cursor / Claude Code, or you can target one environment with `--ade`.
+Installs into paths under `$HOME` (for example `~/.cursor/`, `~/.claude/`, and `~/.gemini/`). The installer can **auto-detect** Cursor / Claude Code / Gemini Code, or you can target one environment with `--ade`.
 
 ### Options
 
 | Option | Description |
 |--------|-------------|
 | `--profile <name>` | Installation profile: `default` or `minimal` |
-| `--ade <cursor\|claude>` | Install only for that ADE (otherwise auto-detect or prompt) |
+| `--ade <cursor\|claude\|gemini>` | Install only for that ADE (otherwise auto-detect or prompt) |
 | `--dry-run` | Show what would happen without writing files |
 | `--uninstall` | Remove Snyk recipe artifacts installed by this installer |
 | `--verify` | Verify the install: files on disk and merged JSON match the manifest (read-only) |
@@ -53,7 +53,7 @@ After a normal install (not `--dry-run`), the script **runs these checks automat
 **`./snyk-studio-install.sh --verify`** walks the recipes for your current **profile** and **ADE** (respects `--profile` and `--ade` if you pass them) and:
 
 - Confirms each **file** from the manifest exists under your home directory.
-- Confirms **merged configs** still contain the expected Snyk content: Cursor `hooks.json`, Claude `settings.json` hook entries, and MCP server entries in `~/.cursor/.mcp.json` and `~/.claude/.mcp.json`, as defined in the bundled manifest.
+- Confirms **merged configs** still contain the expected Snyk content: Cursor `hooks.json`, Claude `settings.json` hook entries, Gemini `settings.json` hook entries, and MCP server entries in `~/.cursor/.mcp.json`, `~/.claude/.mcp.json`, and `~/.gemini/settings.json`, as defined in the bundled manifest.
 
 This does not launch the IDE or run `snyk` scans—it only validates paths and JSON. Exit code **1** means a mismatch or missing piece; run the installer again to fix.
 

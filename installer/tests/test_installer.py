@@ -155,6 +155,10 @@ class TestParseArgs:
         with pytest.raises(SystemExit):
             installer.parse_args(["--ade", "vscode"])
 
+    def test_gemini_ade_accepted(self):
+        args = installer.parse_args(["--ade", "gemini"])
+        assert args.ade == "gemini"
+
 
 # ===========================================================================
 # TestColor
@@ -193,12 +197,25 @@ class TestDetectAdes:
         result = installer.detect_ades()
         assert "claude" in result
 
+    def test_detects_gemini_from_directory(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        (tmp_path / ".gemini").mkdir()
+        result = installer.detect_ades()
+        assert "gemini" in result
+
+    def test_detects_gemini_from_cli(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr("shutil.which", lambda cmd: "/usr/bin/gemini" if cmd == "gemini" else None)
+        result = installer.detect_ades()
+        assert "gemini" in result
+
     def test_detects_both(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
         (tmp_path / ".cursor").mkdir()
         (tmp_path / ".claude").mkdir()
+        (tmp_path / ".gemini").mkdir()
         result = installer.detect_ades()
-        assert result == ["cursor", "claude"]
+        assert result == ["cursor", "claude", "gemini"]
 
     def test_detects_none(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
@@ -315,6 +332,17 @@ class TestManifest:
         sources = manifest.get_sources("sai-hooks-async", "cursor")
         assert "files" in sources
         assert "config_merge" in sources
+
+    def test_get_sources_gemini(self, manifest):
+        sources = manifest.get_sources("sai-hooks-async", "gemini")
+        assert "files" in sources
+        assert sources["config_merge"]["strategy"] == "merge_gemini_settings"
+        assert sources["config_merge"]["target"] == ".gemini/settings.json"
+
+    def test_gemini_sources_for_all_default_recipes(self, manifest):
+        for recipe_id in manifest.resolve_recipes("default"):
+            sources = manifest.get_sources(recipe_id, "gemini")
+            assert sources, f"missing gemini sources for {recipe_id}"
 
     def test_get_sources_missing_ade(self, manifest):
         sources = manifest.get_sources("sai-hooks-async", "vscode")
@@ -559,6 +587,7 @@ class TestLifecycle:
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
         (tmp_path / ".claude").mkdir()
         (tmp_path / ".cursor").mkdir()
+        (tmp_path / ".gemini").mkdir()
         return tmp_path
 
     @pytest.fixture
@@ -597,6 +626,40 @@ class TestLifecycle:
 
         # Verify files removed
         assert not (fake_home / ".claude" / "hooks" / "snyk_secure_at_inception.py").exists()
+
+    def test_install_verify_uninstall_gemini(self, fake_home, payload, manifest):
+        ades = ["gemini"]
+        recipes = manifest.resolve_recipes("default")
+
+        for ade in ades:
+            for recipe_id in recipes:
+                installer.install_recipe(recipe_id, ade, manifest, payload, dry_run=False)
+
+        gemini_settings = fake_home / ".gemini" / "settings.json"
+        assert (fake_home / ".gemini" / "hooks" / "snyk_secure_at_inception.py").exists()
+        assert (fake_home / ".gemini" / "hooks" / "lib" / "scan_runner.py").exists()
+        assert (fake_home / ".gemini" / "commands" / "snyk-fix.md").exists()
+        assert gemini_settings.exists()
+
+        settings_after_install = json.loads(gemini_settings.read_text())
+        assert settings_after_install.get("hooks"), "expected hooks merged into gemini settings.json"
+        assert settings_after_install.get("mcpServers", {}).get("Snyk"), \
+            "expected MCP server merged into gemini settings.json"
+
+        for ade in ades:
+            for recipe_id in recipes:
+                assert installer.verify_recipe(recipe_id, ade, manifest, payload)
+
+        installer.uninstall(ades, manifest, payload, dry_run=False)
+
+        assert not (fake_home / ".gemini" / "hooks" / "snyk_secure_at_inception.py").exists()
+        assert not (fake_home / ".gemini" / "commands" / "snyk-fix.md").exists()
+
+        settings_after_uninstall = json.loads(gemini_settings.read_text())
+        assert not settings_after_uninstall.get("hooks"), \
+            "unmerge_gemini_settings should remove Snyk hooks from settings.json"
+        assert "Snyk" not in settings_after_uninstall.get("mcpServers", {}), \
+            "unmerge_mcp_servers should remove the Snyk MCP server from settings.json"
 
     def test_dry_run_makes_no_changes(self, fake_home, payload, manifest):
         recipes = manifest.resolve_recipes("default")

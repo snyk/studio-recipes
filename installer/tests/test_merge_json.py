@@ -6,6 +6,7 @@ import os
 import pytest
 
 from merge_json import (
+    STRATEGIES,
     _backup,
     _command_launcher,
     _command_script_key,
@@ -15,12 +16,15 @@ from merge_json import (
     main,
     merge_claude_settings,
     merge_cursor_hooks,
+    merge_gemini_settings,
     merge_mcp_servers,
     unmerge_claude_settings,
     unmerge_cursor_hooks,
+    unmerge_gemini_settings,
     unmerge_mcp_servers,
     verify_claude_settings,
     verify_cursor_hooks,
+    verify_gemini_settings,
     verify_mcp_servers,
 )
 
@@ -863,6 +867,94 @@ class TestUnmergeMcpServers:
         original = read_json(existing_mcp_target)
         unmerge_mcp_servers(existing_mcp_target, source)
         assert read_json(existing_mcp_target) == original
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# merge_gemini_settings / unmerge / verify
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+SNYK_GEMINI_SETTINGS = {
+    "hooks": {
+        "AfterTool": [
+            {
+                "matcher": "write_file|replace",
+                "hooks": [
+                    {
+                        "name": "snyk_secure_at_inception_after_tool_edit",
+                        "type": "command",
+                        "command": 'python3 "$HOME/.gemini/hooks/snyk_secure_at_inception.py"',
+                        "description": "Scans code changes for vulnerabilities using Snyk",
+                    }
+                ],
+            }
+        ],
+        "AfterAgent": [
+            {
+                "matcher": "*",
+                "hooks": [
+                    {
+                        "name": "snyk_secure_at_inception_after_agent",
+                        "type": "command",
+                        "command": 'python3 "$HOME/.gemini/hooks/snyk_secure_at_inception.py"',
+                        "description": "Evaluate Snyk scan results before agent completes",
+                    }
+                ],
+            }
+        ],
+    }
+}
+
+
+class TestGeminiSettingsStrategies:
+    @pytest.fixture
+    def snyk_gemini_source(self, write_json):
+        return write_json("source/gemini_settings.json", SNYK_GEMINI_SETTINGS)
+
+    def test_merge_into_empty_target(self, empty_target, snyk_gemini_source):
+        merge_gemini_settings(empty_target, snyk_gemini_source)
+        result = read_json(empty_target)
+        assert "AfterTool" in result["hooks"]
+        assert "AfterAgent" in result["hooks"]
+
+    def test_merge_preserves_unrelated_top_level_keys(
+        self, write_json, snyk_gemini_source
+    ):
+        target = write_json("target.json", {"theme": "dark", "hooks": {}})
+        merge_gemini_settings(target, snyk_gemini_source)
+        result = read_json(target)
+        assert result["theme"] == "dark"
+        assert "AfterTool" in result["hooks"]
+
+    def test_merge_is_idempotent(self, empty_target, snyk_gemini_source):
+        merge_gemini_settings(empty_target, snyk_gemini_source)
+        merge_gemini_settings(empty_target, snyk_gemini_source)
+        result = read_json(empty_target)
+        for groups in result["hooks"].values():
+            for group in groups:
+                commands = [h["command"] for h in group["hooks"]]
+                assert len(commands) == len(set(commands))
+
+    def test_unmerge_removes_snyk_hooks(self, empty_target, snyk_gemini_source):
+        merge_gemini_settings(empty_target, snyk_gemini_source)
+        unmerge_gemini_settings(empty_target, snyk_gemini_source)
+        result = read_json(empty_target)
+        assert "AfterTool" not in result.get("hooks", {})
+        assert "AfterAgent" not in result.get("hooks", {})
+
+    def test_verify_passes_after_merge(self, empty_target, snyk_gemini_source):
+        merge_gemini_settings(empty_target, snyk_gemini_source)
+        # Should not raise
+        verify_gemini_settings(empty_target, snyk_gemini_source)
+
+    def test_verify_fails_when_missing(self, empty_target, snyk_gemini_source):
+        with pytest.raises(SystemExit):
+            verify_gemini_settings(empty_target, snyk_gemini_source)
+
+    def test_strategies_registered(self):
+        assert "merge_gemini_settings" in STRATEGIES
+        assert "unmerge_gemini_settings" in STRATEGIES
+        assert "verify_gemini_settings" in STRATEGIES
 
 
 # ═══════════════════════════════════════════════════════════════════════════

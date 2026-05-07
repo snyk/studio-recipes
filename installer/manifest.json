@@ -36,6 +36,19 @@
             "source": "guardrail_directives/secure_at_inception/hooks_version/claude/async_cli_version/settings.json",
             "strategy": "merge_claude_settings"
           }
+        },
+        "gemini": {
+          "files": [
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/gemini/async_cli_version/snyk_secure_at_inception.py", "dest": ".gemini/hooks/snyk_secure_at_inception.py" },
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/gemini/async_cli_version/lib/platform_utils.py", "dest": ".gemini/hooks/lib/platform_utils.py" },
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/gemini/async_cli_version/lib/scan_runner.py", "dest": ".gemini/hooks/lib/scan_runner.py" },
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/gemini/async_cli_version/lib/scan_worker.py", "dest": ".gemini/hooks/lib/scan_worker.py" }
+          ],
+          "config_merge": {
+            "target": ".gemini/settings.json",
+            "source": "guardrail_directives/secure_at_inception/hooks_version/gemini/async_cli_version/settings.json",
+            "strategy": "merge_gemini_settings"
+          }
         }
       }
     },
@@ -53,6 +66,11 @@
           "files": [
             { "src": "command_directives/synchronous_remediation/command/single_all_in_one_command/snyk-fix.md", "dest": ".claude/commands/snyk-fix.md" }
           ]
+        },
+        "gemini": {
+          "files": [
+            { "src": "command_directives/synchronous_remediation/command/single_all_in_one_command/snyk-fix.md", "dest": ".gemini/commands/snyk-fix.md" }
+          ]
         }
       }
     },
@@ -69,6 +87,11 @@
         "claude": {
           "files": [
             { "src": "command_directives/synchronous_remediation/command/snyk-batch-fix.md", "dest": ".claude/commands/snyk-batch-fix.md" }
+          ]
+        },
+        "gemini": {
+          "files": [
+            { "src": "command_directives/synchronous_remediation/command/snyk-batch-fix.md", "dest": ".gemini/commands/snyk-batch-fix.md" }
           ]
         }
       }
@@ -88,6 +111,13 @@
         "claude": {
           "config_merge": {
             "target": ".claude/.mcp.json",
+            "source": "mcp/.mcp.json",
+            "strategy": "merge_mcp_servers"
+          }
+        },
+        "gemini": {
+          "config_merge": {
+            "target": ".gemini/settings.json",
             "source": "mcp/.mcp.json",
             "strategy": "merge_mcp_servers"
           }
@@ -111,6 +141,14 @@
           ],
           "transforms": [
             { "type": "skill_to_command", "src": "command_directives/synchronous_remediation/skills/secure-dependency-health-check/SKILL.md", "dest": ".claude/commands/secure-dependency-health-check.md" }
+          ]
+        },
+        "gemini": {
+          "files": [
+            { "src": "command_directives/synchronous_remediation/skills/secure-dependency-health-check/SKILL.md", "dest": ".gemini/commands/secure-dependency-health-check.md" }
+          ],
+          "transforms": [
+            { "type": "skill_to_command", "src": "command_directives/synchronous_remediation/skills/secure-dependency-health-check/SKILL.md", "dest": ".gemini/commands/secure-dependency-health-check.md" }
           ]
         }
       }

@@ -405,19 +405,6 @@ def check_prerequisites(auto_yes: bool) -> None:
         print("    Install with: npm install -g snyk")
         warnings += 1
 
-    if snyk_path:
-        try:
-            r = subprocess.run(["snyk", "whoami"], capture_output=True, text=True, timeout=10)
-            if r.returncode == 0:
-                print(f"  {C.green('OK')} Snyk authenticated")
-            else:
-                print(f"  {C.yellow('WARNING')} Snyk not authenticated")
-                print("    Run: snyk auth")
-                warnings += 1
-        except Exception:
-            print(f"  {C.yellow('WARNING')} Snyk auth check failed")
-            warnings += 1
-
     if warnings > 0 and not auto_yes:
         reply = input("\n  Continue with warnings? (y/n) ").strip().lower()
         if reply not in ("y", "yes"):

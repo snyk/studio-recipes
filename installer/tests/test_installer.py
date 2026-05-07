@@ -31,9 +31,6 @@ class TestCheckPrerequisites:
             if cmd[0] == "snyk" and cmd[1] == "--version":
                 m.stdout = "1.1302.0\n"
                 m.returncode = 0
-            elif cmd[0] == "snyk" and cmd[1] == "whoami":
-                m.stdout = "user@snyk.io\n"
-                m.returncode = 0
             return m
 
         monkeypatch.setattr("subprocess.run", mock_run)
@@ -42,7 +39,6 @@ class TestCheckPrerequisites:
         installer.check_prerequisites(auto_yes=True)
         captured = capsys.readouterr()
         assert "OK Snyk CLI 1.1302.0" in captured.out
-        assert "OK Snyk authenticated" in captured.out
 
     def test_outdated_snyk_warning(self, monkeypatch, capsys):
         monkeypatch.setattr("shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None)
@@ -51,9 +47,6 @@ class TestCheckPrerequisites:
             m = MagicMock()
             if cmd[0] == "snyk" and cmd[1] == "--version":
                 m.stdout = "1.1301.0\n"
-                m.returncode = 0
-            elif cmd[0] == "snyk" and cmd[1] == "whoami":
-                m.stdout = "user@snyk.io\n"
                 m.returncode = 0
             return m
 
@@ -71,9 +64,6 @@ class TestCheckPrerequisites:
             m = MagicMock()
             if cmd[0] == "snyk" and cmd[1] == "--version":
                 m.stdout = "1.1301.0\n"
-                m.returncode = 0
-            elif cmd[0] == "snyk" and cmd[1] == "whoami":
-                m.stdout = "user@snyk.io\n"
                 m.returncode = 0
             return m
 
@@ -104,9 +94,6 @@ class TestCheckPrerequisites:
             if cmd[0] == "snyk" and cmd[1] == "--version":
                 m.stdout = "1.1302.0 (standalone)\n"
                 m.returncode = 0
-            elif cmd[0] == "snyk" and cmd[1] == "whoami":
-                m.stdout = "user@snyk.io\n"
-                m.returncode = 0
             return m
 
         monkeypatch.setattr("subprocess.run", mock_run)
@@ -123,9 +110,6 @@ class TestCheckPrerequisites:
             m = MagicMock()
             if cmd[0] == "snyk" and cmd[1] == "--version":
                 m.stdout = "development-version\n"
-                m.returncode = 0
-            elif cmd[0] == "snyk" and cmd[1] == "whoami":
-                m.stdout = "user@snyk.io\n"
                 m.returncode = 0
             return m
 

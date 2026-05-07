@@ -30,6 +30,8 @@ PID_FILE = ""
 DONE_FILE = ""
 LOG_FILE = ".gemini/hooks/hook.log"
 
+SNYK_STUDIO_VERSION = "1.0.0"
+
 
 def log(msg):
     if not LOG_FILE:
@@ -122,6 +124,12 @@ def main():
         finish("snyk_not_found", started_at=started_at)
         return
 
+    env = os.environ.copy()
+    env["SNYK_INTEGRATION_NAME"] = "STUDIO"
+    env["SNYK_INTEGRATION_VERSION"] = SNYK_STUDIO_VERSION
+    env["SNYK_INTEGRATION_ENVIRONMENT"] = "gemini_cli"
+    env["SNYK_INTEGRATION_ENVIRONMENT_VERSION"] = SNYK_STUDIO_VERSION
+
     try:
         result = subprocess.run(
             [snyk_bin, "code", "test", ".", "--json"],
@@ -129,6 +137,7 @@ def main():
             text=True,
             timeout=300,
             cwd=WORKSPACE,
+            env=env,
         )
         exit_code = result.returncode
         stdout = result.stdout

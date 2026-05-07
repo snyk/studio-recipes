@@ -30,6 +30,8 @@ PID_FILE = ""
 DONE_FILE = ""
 LOG_FILE = ""
 
+SNYK_STUDIO_VERSION = "1.0.0"
+
 # Hardcoded well-known Snyk config location
 _SNYK_CONFIG_PATH = os.path.join(
     os.path.expanduser("~"), ".config", "configstore", "snyk.json"
@@ -132,6 +134,12 @@ def main():
             )
             return
 
+    env = os.environ.copy()
+    env["SNYK_INTEGRATION_NAME"] = "STUDIO"
+    env["SNYK_INTEGRATION_VERSION"] = SNYK_STUDIO_VERSION
+    env["SNYK_INTEGRATION_ENVIRONMENT"] = "github_copilot"
+    env["SNYK_INTEGRATION_ENVIRONMENT_VERSION"] = SNYK_STUDIO_VERSION
+
     try:
         result = subprocess.run(
             ["snyk", "code", "test", ".", "--json"],
@@ -139,6 +147,7 @@ def main():
             text=True,
             timeout=300,
             cwd=WORKSPACE,
+            env=env,
         )
         exit_code = result.returncode
         stdout = result.stdout

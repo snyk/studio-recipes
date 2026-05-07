@@ -18,11 +18,14 @@ Usage:
 """
 
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Any
+
+SNYK_STUDIO_VERSION = "1.0.0"
 
 
 @dataclass
@@ -151,12 +154,19 @@ def run_snyk_cli(args: List[str], timeout: int = 300) -> tuple[int, str, str]:
     Returns:
         Tuple of (exit_code, stdout, stderr)
     """
+    env = os.environ.copy()
+    env["SNYK_INTEGRATION_NAME"] = "STUDIO"
+    env["SNYK_INTEGRATION_VERSION"] = SNYK_STUDIO_VERSION
+    env["SNYK_INTEGRATION_ENVIRONMENT"] = "kiro"
+    env["SNYK_INTEGRATION_ENVIRONMENT_VERSION"] = SNYK_STUDIO_VERSION
+
     try:
         result = subprocess.run(
             ['snyk'] + args,
             capture_output=True,
             text=True,
-            timeout=timeout
+            timeout=timeout,
+            env=env,
         )
         return result.returncode, result.stdout, result.stderr
     except subprocess.TimeoutExpired:

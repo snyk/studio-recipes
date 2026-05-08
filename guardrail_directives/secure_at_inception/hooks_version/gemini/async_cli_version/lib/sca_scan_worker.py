@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Scan Worker
-===========
+SCA Scan Worker
+===============
 
-Background subprocess that runs a Snyk CLI scan and writes results
-directly to the scan.done completion marker.
+Background subprocess that runs a Snyk SCA scan and writes results
+directly to the sca_scan.done completion marker.
 
-Launched by scan_runner.launch_background_scan() as a detached process.
+Launched by scan_runner.launch_background_sca_scan() as a detached process.
 Configuration is passed via environment variables.
 
 Environment variables (set by scan_runner):
@@ -22,6 +22,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict, List, Set, Tuple
 
 WORKSPACE = ""
 CACHE_DIR = ""
@@ -29,8 +30,6 @@ LIB_DIR = str(Path(__file__).parent.resolve())
 PID_FILE = ""
 DONE_FILE = ""
 LOG_FILE = ""
-
-SNYK_STUDIO_VERSION = "1.0.0"
 
 
 def log(msg):
@@ -65,7 +64,58 @@ def finish(status, started_at=None, vulnerabilities=None, error_detail=None):
         except OSError:
             pass
 
-    log(f"Scan finished with status: {status}")
+    log(f"SCA scan finished with status: {status}")
+
+
+def parse_snyk_test_results(json_output: str) -> List[Dict[str, Any]]:
+    """Parse snyk test --json output into a list of vulnerability dicts.
+
+    snyk test --json emits either a single project object or an array of
+    project objects for monorepos.  Each project has a ``vulnerabilities``
+    array whose entries are deduplicated by (id, packageName, version).
+    """
+    vulnerabilities: List[Dict[str, Any]] = []
+
+    try:
+        data = json.loads(json_output)
+    except json.JSONDecodeError:
+        return vulnerabilities
+
+    projects = data if isinstance(data, list) else [data]
+
+    seen: Set[Tuple[str, str, str]] = set()
+    for project in projects:
+        if not isinstance(project, dict):
+            continue
+        for vuln in project.get("vulnerabilities", []):
+            pkg_name = vuln.get("packageName", "")
+            version = vuln.get("version", "")
+            vuln_id = vuln.get("id", "")
+            dedup_key = (vuln_id, pkg_name, version)
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+
+            identifiers = vuln.get("identifiers") or {}
+            cve_list = identifiers.get("CVE", [])
+            cve = cve_list[0] if cve_list else None
+
+            fixed_in = vuln.get("fixedIn", [])
+            fix_available = bool(
+                vuln.get("isUpgradable") or vuln.get("isPatchable") or fixed_in
+            )
+
+            vulnerabilities.append({
+                "id": vuln_id,
+                "title": vuln.get("title", vuln_id),
+                "package_name": pkg_name,
+                "version": version,
+                "severity": vuln.get("severity", "unknown"),
+                "cve": cve,
+                "fix_available": fix_available,
+            })
+
+    return vulnerabilities
 
 
 def main():
@@ -75,20 +125,19 @@ def main():
         WORKSPACE = os.environ["SAI_WORKSPACE"]
         CACHE_DIR = os.environ["SAI_CACHE_DIR"]
     except KeyError as e:
-        print(f"[SAI scan_worker] Missing required env var: {e}", file=sys.stderr)
+        print(f"[SAI sca_scan_worker] Missing required env var: {e}", file=sys.stderr)
         sys.exit(1)
 
     LIB_DIR = os.environ.get("SAI_LIB_DIR", str(Path(__file__).parent.resolve()))
 
-    PID_FILE = os.path.join(CACHE_DIR, "scan.pid")
-    DONE_FILE = os.path.join(CACHE_DIR, "scan.done")
-    LOG_FILE = os.path.join(CACHE_DIR, "scan.log")
+    PID_FILE = os.path.join(CACHE_DIR, "sca_scan.pid")
+    DONE_FILE = os.path.join(CACHE_DIR, "sca_scan.done")
+    LOG_FILE = os.path.join(CACHE_DIR, "sca_scan.log")
 
     sys.path.insert(0, LIB_DIR)
-    from scan_runner import parse_sarif_results
 
     started_at = datetime.now().isoformat()
-    log("Scan worker started")
+    log("SCA scan worker started")
 
     if os.path.exists(DONE_FILE):
         os.remove(DONE_FILE)
@@ -124,30 +173,23 @@ def main():
         finish("snyk_not_found", started_at=started_at)
         return
 
-    env = os.environ.copy()
-    env["SNYK_INTEGRATION_NAME"] = "STUDIO"
-    env["SNYK_INTEGRATION_VERSION"] = SNYK_STUDIO_VERSION
-    env["SNYK_INTEGRATION_ENVIRONMENT"] = "gemini_cli"
-    env["SNYK_INTEGRATION_ENVIRONMENT_VERSION"] = SNYK_STUDIO_VERSION
-
     try:
         result = subprocess.run(
-            [snyk_bin, "code", "test", ".", "--json"],
+            [snyk_bin, "test", ".", "--json"],
             capture_output=True,
             text=True,
             timeout=300,
             cwd=WORKSPACE,
-            env=env,
         )
         exit_code = result.returncode
         stdout = result.stdout
         stderr = result.stderr
     except subprocess.TimeoutExpired:
-        log("Scan timed out")
+        log("SCA scan timed out")
         finish("timeout", started_at=started_at)
         return
 
-    log(f"Snyk exited with code {exit_code}")
+    log(f"Snyk test exited with code {exit_code}")
 
     if exit_code > 1:
         combined_output = (stderr + stdout).lower()
@@ -159,12 +201,12 @@ def main():
             finish("auth_required", started_at=started_at,
                    error_detail="Snyk CLI is not authenticated")
             return
-        log(f"Scan error: {stderr[:500]}")
+        log(f"SCA scan error: {stderr[:500]}")
         finish("error", started_at=started_at, error_detail=stderr[:500])
         return
 
-    vulnerabilities = parse_sarif_results(stdout)
-    log(f"Found {len(vulnerabilities)} vulnerabilities")
+    vulnerabilities = parse_snyk_test_results(stdout)
+    log(f"Found {len(vulnerabilities)} SCA vulnerabilities")
 
     finish("success", started_at=started_at, vulnerabilities=vulnerabilities)
 
@@ -173,5 +215,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        log(f"Worker crashed: {e}")
+        log(f"SCA worker crashed: {e}")
         finish("crash")

@@ -425,6 +425,8 @@ SNYK_MCP_TOOL_NAMES = {
     "copilot-vscode": "vs_code",
 }
 
+# ADES that run in the CLI (not via GUI)
+CLI_ADES = ["claude", "gemini", "copilot-cli", "copilot-vscode"]
 
 def _vscode_user_dir() -> Path:
     """Return the platform-specific user-data root that hosts VS Code's `Code/User` dir.
@@ -803,6 +805,9 @@ def install_recipe(recipe_id: str, ade: str, manifest: Manifest,
     if cm:
         target = resolve_ade_path(ade, cm["target"])
         source = payload.resolve_src(cm["source"])
+        if sys.platform == "darwin" and ade not in CLI_ADES and source.name == ".mcp.json":
+            source = payload.resolve_src("mcp/.mcp.mac.json")
+
         merge_config(cm["strategy"], target, source, payload, dry_run)
 
     # chmod +x on Python files
@@ -848,6 +853,9 @@ def verify_recipe(recipe_id: str, ade: str, manifest: Manifest,
             import merge_json
 
             try:
+                if sys.platform == "darwin" and ade not in CLI_ADES and resolved_path.name == ".mcp.json":
+                    resolved_path = payload.resolve_src("mcp/.mcp.mac.json")
+
                 merge_json.STRATEGIES[strategy](str(target), str(resolved_path))
                 print(f"    {C.green('OK')} hooks registered in {cm['target']}")
             except (SystemExit, KeyError):

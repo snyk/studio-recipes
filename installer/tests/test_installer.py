@@ -1,5 +1,6 @@
 """Tests for snyk-studio-installer.py (cross-platform Python installer)."""
 
+import contextlib
 import json
 import os
 import sys
@@ -920,3 +921,85 @@ class TestConflictResolution:
             manifest.resolve_extension_conflicts([str(settings_file)])
 
         assert "Failed to update settings file" in capsys.readouterr().out
+
+# ===========================================================================
+# TestMacMcpLogic
+# ===========================================================================
+
+class TestMacMcpLogic:
+    @pytest.fixture
+    def payload(self):
+        ctx = installer.PayloadContext()
+        ctx.setup()
+        yield ctx
+        ctx.cleanup()
+
+    @pytest.fixture
+    def manifest(self, payload):
+        return installer.Manifest(payload.manifest_path)
+
+    def test_install_recipe_mac_gui_ade_uses_mac_mcp(self, monkeypatch, payload, manifest):
+        monkeypatch.setattr("sys.platform", "darwin")
+
+        mock_merge = MagicMock()
+        monkeypatch.setattr(installer, "merge_config", mock_merge)
+
+        # Cursor is NOT in CLI_ADES
+        installer.install_recipe("mcp-config", "cursor", manifest, payload, dry_run=False)
+
+        # Check that merge_config was called with the mac source
+        args, _ = mock_merge.call_args
+        # args[2] is the source Path
+        assert args[2].name == ".mcp.mac.json"
+
+    def test_install_recipe_mac_cli_ade_uses_regular_mcp(self, monkeypatch, payload, manifest):
+        monkeypatch.setattr("sys.platform", "darwin")
+
+        mock_merge = MagicMock()
+        monkeypatch.setattr(installer, "merge_config", mock_merge)
+
+        # Claude IS in CLI_ADES
+        installer.install_recipe("mcp-config", "claude", manifest, payload, dry_run=False)
+
+        # Check that merge_config was called with the regular source
+        args, _ = mock_merge.call_args
+        assert args[2].name == ".mcp.json"
+
+    def test_verify_recipe_mac_gui_ade_uses_mac_mcp(self, monkeypatch, payload, manifest, tmp_path):
+        monkeypatch.setattr("sys.platform", "darwin")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        import merge_json
+        mock_verify_strategy = MagicMock()
+        monkeypatch.setitem(merge_json.STRATEGIES, "verify_mcp_servers", mock_verify_strategy)
+
+        # Mock _platform_source to just return the path (avoiding Windows rewrite logic)
+        @contextlib.contextmanager
+        def mock_platform_source(strategy, source):
+            yield source
+        monkeypatch.setattr(installer, "_platform_source", mock_platform_source)
+
+        installer.verify_recipe("mcp-config", "cursor", manifest, payload)
+
+        args, _ = mock_verify_strategy.call_args
+        # args[1] is the resolved_path string
+        assert Path(args[1]).name == ".mcp.mac.json"
+
+    def test_verify_recipe_mac_cli_ade_uses_regular_mcp(self, monkeypatch, payload, manifest, tmp_path):
+        monkeypatch.setattr("sys.platform", "darwin")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        import merge_json
+        mock_verify_strategy = MagicMock()
+        monkeypatch.setitem(merge_json.STRATEGIES, "verify_mcp_servers", mock_verify_strategy)
+
+        # Mock _platform_source to just return the path
+        @contextlib.contextmanager
+        def mock_platform_source(strategy, source):
+            yield source
+        monkeypatch.setattr(installer, "_platform_source", mock_platform_source)
+
+        installer.verify_recipe("mcp-config", "claude", manifest, payload)
+
+        args, _ = mock_verify_strategy.call_args
+        assert Path(args[1]).name == ".mcp.json"

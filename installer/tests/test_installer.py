@@ -228,8 +228,6 @@ class TestDetectAdes:
     def test_detects_both(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
         monkeypatch.setattr("shutil.which", lambda cmd: None)
-        monkeypatch.setattr(installer, "_cursor_app_bundle_exists", lambda: False)
-        monkeypatch.setattr(installer, "_cursor_process_running", lambda: False)
         
         (tmp_path / ".cursor").mkdir()
         (tmp_path / ".claude").mkdir()

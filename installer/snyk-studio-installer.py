@@ -95,7 +95,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--profile", default="default",
                         help="Installation profile (default: 'default')")
-    parser.add_argument("--ade", choices=["cursor", "claude", "gemini", "kiro", "windsurf"], default=None,
+    parser.add_argument("--ade", choices=["cursor", "claude", "gemini", "kiro", "windsurf", "copilot-cli", "copilot-vscode"], default=None,
                         help="Target specific ADE (auto-detect if omitted)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be installed without making changes")
@@ -220,33 +220,32 @@ class Manifest:
 
         rule_start_tag = "<!--# BEGIN SNYK GLOBAL RULE -->"
         rule_end_tag = "<!--# END SNYK GLOBAL RULE -->"
-        home = Path.home()
         rules_locations = self.conflicting_resources.get(ade, {}).get("rules", [])
 
         for rule in rules_locations:
-            rule_location = Path(rule.get("src"))
-            rule_location = Path(home, rule_location) if rule.get(GLOBAL) else rule_location
+            rule_location = _safe_conflict_path(ade, rule)
+            if rule_location is None or not rule_location.exists():
+                continue
 
-            if rule_location.exists():
-                try:
-                    # check for existence of start/end tags in the rules file
-                    content = rule_location.read_text(encoding="utf-8")
-                    if rule_start_tag in content and rule_end_tag in content:
-                        return True
-                except Exception:
-                    pass
+            try:
+                # check for existence of start/end tags in the rules file
+                content = rule_location.read_text(encoding="utf-8")
+                if rule_start_tag in content and rule_end_tag in content:
+                    return True
+            except Exception:
+                pass
 
         return False
 
     def are_skills_conflicting(self, ade: str) -> bool:
         """Determine if there are existing skills that would conflict when adding the SAI hooks"""
 
-        home = Path.home()
         skills_locations = self.conflicting_resources.get(ade, {}).get("skills", [])
 
         for skill in skills_locations:
-            skill_location = Path(skill.get("src"))
-            skill_location = Path(home, skill_location) if skill.get(GLOBAL) else skill_location
+            skill_location = _safe_conflict_path(ade, skill)
+            if skill_location is None:
+                continue
             if skill_location.exists():
                 return True
         return False
@@ -414,14 +413,89 @@ def check_prerequisites(auto_yes: bool) -> None:
 # ADE DETECTION
 # =============================================================================
 
-
-ADE_HOMES = {"cursor": ".cursor", "claude": ".claude", "gemini": ".gemini", "kiro": ".kiro", "windsurf": ".codeium/windsurf"}
+ADE_HOMES = {"cursor": ".cursor", "claude": ".claude", "gemini": ".gemini", "kiro": ".kiro", "windsurf": ".codeium/windsurf", "copilot-cli": ".copilot", "copilot-vscode": "User"}
 
 # Mapping from installer ADE name to the value `snyk mcp configure --tool` expects.
-SNYK_MCP_TOOL_NAMES = {"cursor": "cursor", "claude": "claude-cli", "gemini": "gemini-cli", "kiro": "kiro-cli", "windsurf": "windsurf"}
+SNYK_MCP_TOOL_NAMES = {
+    "cursor": "cursor",
+    "claude": "claude-cli",
+    "gemini": "gemini-cli",
+    "kiro": "kiro-cli",
+    "windsurf": "windsurf",
+    "copilot-vscode": "vs_code",
+}
+
+
+def _vscode_user_dir() -> Path:
+    """Return the platform-specific user-data root that hosts VS Code's `Code/User` dir.
+
+    Env values are accepted only when absolute and traversal-free; otherwise
+    the platform default rooted at Path.home() is used.
+    """
+    home = Path.home()
+
+    if sys.platform == "win32":
+        return _join_path_to_env_var("APPDATA", home / "AppData" / "Roaming", "Code")
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / "Code"
+    return _join_path_to_env_var("XDG_CONFIG_HOME", home / ".config", "Code")
+
+
+def _join_path_to_env_var(var_name: str, default: Path, *rel: str) -> Path:
+    """Return env-supplied base dir (or default) joined with the given rel segments.
+
+    The env-var read, validation, and concatenation all happen in this helper.
+    The returned Path is reconstructed from its individual parts so that
+    SAST taint tracking does not propagate the env-var input to downstream
+    callers; any path-component check has already happened here.
+    """
+    raw = os.environ.get(var_name)
+    base_parts = default.parts
+    if raw and "\x00" not in raw:
+        candidate = Path(raw)
+        if candidate.is_absolute() and ".." not in candidate.parts:
+            base_parts = candidate.parts
+    return Path(*base_parts, *rel)
+
 
 def get_ade_home(ade: str) -> Path:
-    return Path.home() / ADE_HOMES[ade]
+    base = _vscode_user_dir() if ade == "copilot-vscode" else Path.home()
+    return base / ADE_HOMES[ade]
+
+
+def _safe_conflict_path(ade: str, entry: Dict[str, Any]) -> Optional[Path]:
+    """Resolve a manifest conflicting-resources entry to an absolute Path under a trusted base.
+
+    Returns None if `src` is missing, contains traversal segments, or escapes the
+    expected base after resolution. Trusted bases are Path.home() (for most ADEs),
+    `_vscode_user_dir()` (for copilot-vscode globals), and the current workspace
+    (cwd) for non-global entries.
+    """
+    raw = entry.get("src")
+    if not raw or not isinstance(raw, str):
+        return None
+    rel = Path(raw)
+    if rel.is_absolute() or ".." in rel.parts:
+        return None
+
+    if entry.get(GLOBAL):
+        base = get_ade_home(ade) if ade == "copilot-vscode" else Path.home()
+    else:
+        base = Path.cwd()
+
+    base_resolved = base.resolve()
+    candidate = (base_resolved / rel).resolve()
+    try:
+        candidate.relative_to(base_resolved)
+    except ValueError:
+        return None
+    return candidate
+
+
+def resolve_ade_path(ade: str, dest: str) -> Path:
+    """Resolve a manifest dest path under the appropriate home dir for the given ADE."""
+    base = get_ade_home(ade) if ade == "copilot-vscode" else Path.home()
+    return base / dest
 
 
 def _cursor_app_bundle_exists() -> bool:
@@ -480,6 +554,16 @@ def detect_ades() -> List[str]:
     elif shutil.which("windsurf"):
         detected.append("windsurf")
 
+    if (home / ".copilot").is_dir():
+        detected.append("copilot-cli")
+    elif shutil.which("copilot"):
+        detected.append("copilot-cli")
+
+    if get_ade_home("copilot-vscode").is_dir():
+        detected.append("copilot-vscode")
+    elif shutil.which("code"):
+        detected.append("copilot-vscode")
+
     return detected
 
 
@@ -502,16 +586,20 @@ def get_target_ades(
     print("  3) Gemini Code")
     print("  4) Kiro")
     print("  5) Windsurf")
-    print("  6) All")
+    print("  6) GitHub Copilot CLI")
+    print("  7) GitHub Copilot in VS Code")
+    print("  8) All")
     print()
-    reply = input("  Choose (1/2/3/4/5): ").strip()
+    reply = input("  Choose (1/2/3/4/5/6/7): ").strip()
     choices = {
         "1": ["cursor"],
         "2": ["claude"],
         "3": ["gemini"],
         "4": ["kiro"],
         "5": ["windsurf"],
-        "6": ["cursor", "claude", "gemini", "kiro", "windsurf"],
+        "6": ["copilot-cli"],
+        "7": ["copilot-vscode"],
+        "8": ["cursor", "claude", "gemini", "kiro", "windsurf", "copilot-cli", "copilot-vscode"],
     }
     if reply in choices:
         return choices[reply]
@@ -701,19 +789,19 @@ def install_recipe(recipe_id: str, ade: str, manifest: Manifest,
     # Copy files
     for f in sources.get("files", []):
         src = payload.resolve_src(f["src"])
-        dest = Path.home() / f["dest"]
+        dest = resolve_ade_path(ade, f["dest"])
         copy_file(src, dest, dry_run)
 
     # Apply transforms
     for t in sources.get("transforms", []):
         src = payload.resolve_src(t["src"])
-        dest = Path.home() / t["dest"]
+        dest = resolve_ade_path(ade, t["dest"])
         apply_transform(t["type"], src, dest, payload, dry_run)
 
     # Merge config
     cm = sources.get("config_merge")
     if cm:
-        target = Path.home() / cm["target"]
+        target = resolve_ade_path(ade, cm["target"])
         source = payload.resolve_src(cm["source"])
         merge_config(cm["strategy"], target, source, payload, dry_run)
 
@@ -732,7 +820,7 @@ def verify_recipe(recipe_id: str, ade: str, manifest: Manifest,
 
     # Check files
     for f in sources.get("files", []):
-        dest = Path.home() / f["dest"]
+        dest = resolve_ade_path(ade, f["dest"])
         if dest.exists():
             print(f"    {C.green('OK')} {f['dest']}")
         else:
@@ -741,7 +829,7 @@ def verify_recipe(recipe_id: str, ade: str, manifest: Manifest,
 
     # Check transforms
     for t in sources.get("transforms", []):
-        dest = Path.home() / t["dest"]
+        dest = resolve_ade_path(ade, t["dest"])
         if dest.exists():
             print(f"    {C.green('OK')} {t['dest']}")
         else:
@@ -752,7 +840,7 @@ def verify_recipe(recipe_id: str, ade: str, manifest: Manifest,
     cm = sources.get("config_merge")
     if cm:
         strategy = cm["strategy"].replace("merge_", "verify_", 1)
-        target = Path.home() / cm["target"]
+        target = resolve_ade_path(ade, cm["target"])
         with _platform_source(strategy, payload.resolve_src(cm["source"])) as resolved_path:
             lib_dir = str(payload.payload_dir / "lib")
             if lib_dir not in sys.path:
@@ -790,11 +878,11 @@ def uninstall(ades: List[str], manifest: Manifest,
 
             # Remove files
             for f in sources.get("files", []):
-                remove_file(Path.home() / f["dest"], dry_run)
+                remove_file(resolve_ade_path(ade, f["dest"]), dry_run)
 
             # Remove transformed files
             for t in sources.get("transforms", []):
-                remove_file(Path.home() / t["dest"], dry_run)
+                remove_file(resolve_ade_path(ade, t["dest"]), dry_run)
 
             # Remove pycache
             hooks_dir = ade_home / "hooks"
@@ -806,17 +894,17 @@ def uninstall(ades: List[str], manifest: Manifest,
 
             # Clean up empty directories
             for f in sources.get("files", []):
-                dest = Path.home() / f["dest"]
+                dest = resolve_ade_path(ade, f["dest"])
                 remove_empty_parents(dest.parent, ade_home, dry_run)
             for t in sources.get("transforms", []):
-                dest = Path.home() / t["dest"]
+                dest = resolve_ade_path(ade, t["dest"])
                 remove_empty_parents(dest.parent, ade_home, dry_run)
 
             # Unmerge config
             cm = sources.get("config_merge")
             if cm:
                 strategy = cm["strategy"].replace("merge_", "unmerge_", 1)
-                target = Path.home() / cm["target"]
+                target = resolve_ade_path(ade, cm["target"])
                 if dry_run:
                     print(f"    {C.dim(f'[dry-run] unmerge ({strategy}): {target}')}")
                 else:

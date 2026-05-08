@@ -311,6 +311,48 @@ def merge_mcp_servers(target_path, source_path):
     _write_json(target_path, target)
 
 
+def merge_copilot_cli_mcp(target_path, source_path):
+    """Merge Snyk MCP server config into Copilot CLI's mcp-config.json.
+
+    Copilot CLI uses `mcpServers` with each entry requiring `type: local` for
+    stdio command-based servers.
+    """
+    _backup(target_path)
+    target = _load_json(target_path)
+    source = _load_json(source_path)
+
+    if "mcpServers" not in target:
+        target["mcpServers"] = {}
+
+    for name, config in source.get("mcpServers", {}).items():
+        entry = dict(config)
+        entry["type"] = "local"
+        target["mcpServers"][name] = entry
+
+    _write_json(target_path, target)
+
+
+def merge_vscode_mcp(target_path, source_path):
+    """Merge Snyk MCP server config into VS Code Copilot's mcp.json.
+
+    VS Code uses the `servers` key (not `mcpServers`) with each entry requiring
+    `type: stdio` for stdio command-based servers.
+    """
+    _backup(target_path)
+    target = _load_json(target_path)
+    source = _load_json(source_path)
+
+    if "servers" not in target:
+        target["servers"] = {}
+
+    for name, config in source.get("mcpServers", {}).items():
+        entry = dict(config)
+        entry["type"] = "stdio"
+        target["servers"][name] = entry
+
+    _write_json(target_path, target)
+
+
 def unmerge_cursor_hooks(target_path, source_path):
     """Remove Snyk hooks from Cursor's hooks.json.
 
@@ -422,6 +464,36 @@ def unmerge_mcp_servers(target_path, source_path):
     _write_json(target_path, target)
 
 
+def unmerge_copilot_cli_mcp(target_path, source_path):
+    """Remove Snyk MCP server entries from Copilot CLI mcp-config.json."""
+    target = _load_json(target_path)
+    source = _load_json(source_path)
+
+    source_servers = source.get("mcpServers", {})
+    if not source_servers or "mcpServers" not in target:
+        return
+
+    _backup(target_path)
+    for name in source_servers:
+        target["mcpServers"].pop(name, None)
+    _write_json(target_path, target)
+
+
+def unmerge_vscode_mcp(target_path, source_path):
+    """Remove Snyk MCP server entries from VS Code mcp.json (servers key)."""
+    target = _load_json(target_path)
+    source = _load_json(source_path)
+
+    source_servers = source.get("mcpServers", {})
+    if not source_servers or "servers" not in target:
+        return
+
+    _backup(target_path)
+    for name in source_servers:
+        target["servers"].pop(name, None)
+    _write_json(target_path, target)
+
+
 def verify_cursor_hooks(target_path, source_path):
     """Verify that all Snyk hooks from source exist in Cursor's hooks.json.
 
@@ -529,19 +601,59 @@ def verify_mcp_servers(target_path, source_path):
         sys.exit(1)
 
 
+def verify_copilot_cli_mcp(target_path, source_path):
+    """Verify all Snyk MCP servers from source exist in Copilot CLI mcp-config.json."""
+    target = _load_json(target_path)
+    source = _load_json(source_path)
+
+    missing = []
+    target_servers = target.get("mcpServers", {})
+    for name in source.get("mcpServers", {}):
+        if name not in target_servers:
+            missing.append(f"  MCP server '{name}' missing from {target_path}")
+
+    if missing:
+        for m in missing:
+            print(m, file=sys.stderr)
+        sys.exit(1)
+
+
+def verify_vscode_mcp(target_path, source_path):
+    """Verify all Snyk MCP servers from source exist in VS Code mcp.json (servers key)."""
+    target = _load_json(target_path)
+    source = _load_json(source_path)
+
+    missing = []
+    target_servers = target.get("servers", {})
+    for name in source.get("mcpServers", {}):
+        if name not in target_servers:
+            missing.append(f"  MCP server '{name}' missing from {target_path}")
+
+    if missing:
+        for m in missing:
+            print(m, file=sys.stderr)
+        sys.exit(1)
+
+
 STRATEGIES = {
     "merge_cursor_hooks": merge_cursor_hooks,
     "merge_claude_settings": merge_claude_settings,
     "merge_gemini_settings": merge_gemini_settings,
     "merge_mcp_servers": merge_mcp_servers,
+    "merge_copilot_cli_mcp": merge_copilot_cli_mcp,
+    "merge_vscode_mcp": merge_vscode_mcp,
     "unmerge_cursor_hooks": unmerge_cursor_hooks,
     "unmerge_claude_settings": unmerge_claude_settings,
     "unmerge_gemini_settings": unmerge_gemini_settings,
     "unmerge_mcp_servers": unmerge_mcp_servers,
+    "unmerge_copilot_cli_mcp": unmerge_copilot_cli_mcp,
+    "unmerge_vscode_mcp": unmerge_vscode_mcp,
     "verify_cursor_hooks": verify_cursor_hooks,
     "verify_claude_settings": verify_claude_settings,
     "verify_gemini_settings": verify_gemini_settings,
     "verify_mcp_servers": verify_mcp_servers,
+    "verify_copilot_cli_mcp": verify_copilot_cli_mcp,
+    "verify_vscode_mcp": verify_vscode_mcp,
 }
 
 

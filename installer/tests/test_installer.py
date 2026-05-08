@@ -159,6 +159,10 @@ class TestParseArgs:
         args = installer.parse_args(["--ade", "gemini"])
         assert args.ade == "gemini"
 
+    def test_kiro_ade_accepted(self):
+        args = installer.parse_args(["--ade", "kiro"])
+        assert args.ade == "kiro"
+
 
 # ===========================================================================
 # TestColor
@@ -209,8 +213,24 @@ class TestDetectAdes:
         result = installer.detect_ades()
         assert "gemini" in result
 
+    def test_detects_kiro_from_directory(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        (tmp_path / ".kiro").mkdir()
+        result = installer.detect_ades()
+        assert "kiro" in result
+
+    def test_detects_kiro_from_cli(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr("shutil.which", lambda cmd: "/usr/bin/kiro" if cmd == "kiro" else None)
+        result = installer.detect_ades()
+        assert "kiro" in result
+
     def test_detects_both(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr("shutil.which", lambda cmd: None)
+        monkeypatch.setattr(installer, "_cursor_app_bundle_exists", lambda: False)
+        monkeypatch.setattr(installer, "_cursor_process_running", lambda: False)
+        
         (tmp_path / ".cursor").mkdir()
         (tmp_path / ".claude").mkdir()
         (tmp_path / ".gemini").mkdir()
@@ -339,10 +359,22 @@ class TestManifest:
         assert sources["config_merge"]["strategy"] == "merge_gemini_settings"
         assert sources["config_merge"]["target"] == ".gemini/settings.json"
 
+    def test_get_sources_kiro(self, manifest):
+        sources = manifest.get_sources("mcp-config", "kiro")
+        assert sources["config_merge"]["strategy"] == "merge_mcp_servers"
+        assert sources["config_merge"]["target"] == ".kiro/settings/mcp.json"
+
     def test_gemini_sources_for_all_default_recipes(self, manifest):
         for recipe_id in manifest.resolve_recipes("default"):
             sources = manifest.get_sources(recipe_id, "gemini")
             assert sources, f"missing gemini sources for {recipe_id}"
+
+    def test_kiro_sources_for_all_default_recipes_except_hooks(self, manifest):
+        for recipe_id in manifest.resolve_recipes("default"):
+            if recipe_id == "sai-hooks-async":
+                continue
+            sources = manifest.get_sources(recipe_id, "kiro")
+            assert sources, f"missing kiro sources for {recipe_id}"
 
     def test_get_sources_missing_ade(self, manifest):
         sources = manifest.get_sources("sai-hooks-async", "vscode")
@@ -660,6 +692,37 @@ class TestLifecycle:
             "unmerge_gemini_settings should remove Snyk hooks from settings.json"
         assert "Snyk" not in settings_after_uninstall.get("mcpServers", {}), \
             "unmerge_mcp_servers should remove the Snyk MCP server from settings.json"
+
+    def test_install_verify_uninstall_kiro(self, fake_home, payload, manifest):
+        ades = ["kiro"]
+        recipes = manifest.resolve_recipes("default")
+
+        for ade in ades:
+            for recipe_id in recipes:
+                installer.install_recipe(recipe_id, ade, manifest, payload, dry_run=False)
+
+        kiro_mcp_settings = fake_home / ".kiro" / "settings" / "mcp.json"
+        assert (fake_home / ".kiro" / "steering" / "snyk-fix.md").exists()
+        assert (fake_home / ".kiro" / "steering" / "snyk-batch-fix.md").exists()
+        assert (fake_home / ".kiro" / "skills" / "secure-dependency-health-check" / "SKILL.md").exists()
+        assert kiro_mcp_settings.exists()
+
+        settings_after_install = json.loads(kiro_mcp_settings.read_text())
+        assert settings_after_install.get("mcpServers", {}).get("Snyk"), \
+            "expected MCP server merged into .kiro/settings/mcp.json"
+
+        for ade in ades:
+            for recipe_id in recipes:
+                # verify_recipe will return True for sai-hooks-async because it has no sources for kiro
+                assert installer.verify_recipe(recipe_id, ade, manifest, payload)
+
+        installer.uninstall(ades, manifest, payload, dry_run=False)
+
+        assert not (fake_home / ".kiro" / "steering" / "snyk-fix.md").exists()
+
+        settings_after_uninstall = json.loads(kiro_mcp_settings.read_text())
+        assert "Snyk" not in settings_after_uninstall.get("mcpServers", {}), \
+            "unmerge_mcp_servers should remove the Snyk MCP server from .kiro/settings/mcp.json"
 
     def test_dry_run_makes_no_changes(self, fake_home, payload, manifest):
         recipes = manifest.resolve_recipes("default")

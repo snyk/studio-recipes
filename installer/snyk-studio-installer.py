@@ -11,14 +11,14 @@ Usage:
     python snyk-studio-installer.py [options]
 
 Options:
-    --profile <name>      Installation profile (default, minimal)
-    --ade <cursor|claude|gemini>  Target specific ADE (auto-detect if omitted)
-    --dry-run             Show what would be installed without making changes
-    --uninstall           Remove Snyk recipes from detected ADEs
-    --verify              Verify installed files and merged configs match manifest
-    --list                List available recipes and profiles
-    -y, --yes             Skip confirmation prompts
-    -h, --help            Show this help message
+    --profile <name>                           Installation profile (default, minimal)
+    --ade <cursor|claude|gemini|windsurf|kiro> Target specific ADE (auto-detect if omitted)
+    --dry-run                                  Show what would be installed without making changes
+    --uninstall                                Remove Snyk recipes from detected ADEs
+    --verify                                   Verify installed files and merged configs match manifest
+    --list                                     List available recipes and profiles
+    -y, --yes                                  Skip confirmation prompts
+    -h, --help                                 Show this help message
 """
 
 import argparse
@@ -95,7 +95,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--profile", default="default",
                         help="Installation profile (default: 'default')")
-    parser.add_argument("--ade", choices=["cursor", "claude", "gemini", "windsurf"], default=None,
+    parser.add_argument("--ade", choices=["cursor", "claude", "gemini", "kiro", "windsurf"], default=None,
                         help="Target specific ADE (auto-detect if omitted)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be installed without making changes")
@@ -414,11 +414,11 @@ def check_prerequisites(auto_yes: bool) -> None:
 # ADE DETECTION
 # =============================================================================
 
-ADE_HOMES = {"cursor": ".cursor", "claude": ".claude", "gemini": ".gemini", "windsurf": ".codeium/windsurf"}
+
+ADE_HOMES = {"cursor": ".cursor", "claude": ".claude", "gemini": ".gemini", "kiro": ".kiro", "windsurf": ".codeium/windsurf"}
 
 # Mapping from installer ADE name to the value `snyk mcp configure --tool` expects.
-SNYK_MCP_TOOL_NAMES = {"cursor": "cursor", "claude": "claude-cli", "gemini": "gemini-cli", "windsurf": "windsurf"}
-
+SNYK_MCP_TOOL_NAMES = {"cursor": "cursor", "claude": "claude-cli", "gemini": "gemini-cli", "kiro": "kiro-cli", "windsurf": "windsurf"}
 
 def get_ade_home(ade: str) -> Path:
     return Path.home() / ADE_HOMES[ade]
@@ -468,6 +468,11 @@ def detect_ades() -> List[str]:
     elif shutil.which("gemini"):
         detected.append("gemini")
 
+    if (home / ".kiro").is_dir():
+        detected.append("kiro")
+    elif shutil.which("kiro"):
+        detected.append("kiro")
+
     if (home / ".codeium" / "windsurf").is_dir():
         detected.append("windsurf")
     elif (home / ".windsurf").is_dir():
@@ -495,16 +500,18 @@ def get_target_ades(
     print("  1) Cursor")
     print("  2) Claude Code")
     print("  3) Gemini Code")
-    print("  4) Windsurf")
-    print("  5) All")
+    print("  4) Kiro")
+    print("  5) Windsurf")
+    print("  6) All")
     print()
     reply = input("  Choose (1/2/3/4/5): ").strip()
     choices = {
         "1": ["cursor"],
         "2": ["claude"],
         "3": ["gemini"],
-        "4": ["windsurf"],
-        "5": ["cursor", "claude", "gemini", "windsurf"],
+        "4": ["kiro"],
+        "5": ["windsurf"],
+        "6": ["cursor", "claude", "gemini", "kiro", "windsurf"],
     }
     if reply in choices:
         return choices[reply]
@@ -516,7 +523,7 @@ def get_target_ades(
 # PLATFORM-AWARE HOOK COMMAND REWRITING
 # =============================================================================
 
-_WIN32_REWRITE_STRATEGIES: frozenset[str] = frozenset({"cursor_hooks", "claude_settings", "gemini_settings"})
+_WIN32_REWRITE_STRATEGIES: frozenset[str] = frozenset({"cursor_hooks", "claude_settings", "gemini_settings", "kiro_settings"})
 
 
 @contextlib.contextmanager

@@ -72,6 +72,11 @@
             { "src": "command_directives/synchronous_remediation/command/single_all_in_one_command/snyk-fix.md", "dest": ".gemini/commands/snyk-fix.md" }
           ]
         },
+        "kiro": {
+          "files": [
+            { "src": "command_directives/synchronous_remediation/command/single_all_in_one_command/snyk-fix.md", "dest": ".kiro/steering/snyk-fix.md" }
+          ]
+        },
         "windsurf": {
           "files": [
             { "src": "command_directives/synchronous_remediation/command/single_all_in_one_command/snyk-fix.md", "dest": ".codeium/windsurf/global_workflows/snyk-fix.md" }
@@ -97,6 +102,11 @@
         "gemini": {
           "files": [
             { "src": "command_directives/synchronous_remediation/command/snyk-batch-fix.md", "dest": ".gemini/commands/snyk-batch-fix.md" }
+          ]
+        },
+        "kiro": {
+          "files": [
+            { "src": "command_directives/synchronous_remediation/command/snyk-batch-fix.md", "dest": ".kiro/steering/snyk-batch-fix.md" }
           ]
         },
         "windsurf": {
@@ -128,6 +138,13 @@
         "gemini": {
           "config_merge": {
             "target": ".gemini/settings.json",
+            "source": "mcp/.mcp.json",
+            "strategy": "merge_mcp_servers"
+          }
+        },
+        "kiro": {
+          "config_merge": {
+            "target": ".kiro/settings/mcp.json",
             "source": "mcp/.mcp.json",
             "strategy": "merge_mcp_servers"
           }
@@ -166,6 +183,11 @@
           ],
           "transforms": [
             { "type": "skill_to_command", "src": "command_directives/synchronous_remediation/skills/secure-dependency-health-check/SKILL.md", "dest": ".gemini/commands/secure-dependency-health-check.md" }
+          ]
+        },
+        "kiro": {
+          "files": [
+            { "src": "command_directives/synchronous_remediation/skills/secure-dependency-health-check/SKILL.md", "dest": ".kiro/skills/secure-dependency-health-check/SKILL.md" }
           ]
         },
         "windsurf": {

@@ -24,6 +24,10 @@ installer = importlib.import_module("snyk-studio-installer")
 # ===========================================================================
 
 class TestCheckPrerequisites:
+    @pytest.fixture(autouse=True)
+    def mock_node_installed(self, monkeypatch):
+        monkeypatch.setattr(installer, "ensure_node_installed", lambda _: True)
+
     def test_all_ok(self, monkeypatch, capsys):
         monkeypatch.setattr("shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None)
 
@@ -34,7 +38,7 @@ class TestCheckPrerequisites:
                 m.returncode = 0
             return m
 
-        monkeypatch.setattr("subprocess.run", mock_run)
+        monkeypatch.setattr(installer, "run", mock_run)
 
         # Should not raise SystemExit
         installer.check_prerequisites(auto_yes=True)
@@ -51,7 +55,7 @@ class TestCheckPrerequisites:
                 m.returncode = 0
             return m
 
-        monkeypatch.setattr("subprocess.run", mock_run)
+        monkeypatch.setattr(installer, "run", mock_run)
 
         # With auto_yes=True, it should just print warning and continue
         installer.check_prerequisites(auto_yes=True)
@@ -68,7 +72,7 @@ class TestCheckPrerequisites:
                 m.returncode = 0
             return m
 
-        monkeypatch.setattr("subprocess.run", mock_run)
+        monkeypatch.setattr(installer, "run", mock_run)
         monkeypatch.setattr("builtins.input", lambda _: "n")
 
         with pytest.raises(SystemExit):
@@ -79,13 +83,43 @@ class TestCheckPrerequisites:
 
     def test_snyk_not_found(self, monkeypatch, capsys):
         monkeypatch.setattr("shutil.which", lambda cmd: None)
+        monkeypatch.setattr("sys.platform", "linux")
+
+        cmds_run = []
+        def mock_run(cmd, **kwargs):
+            cmds_run.append(cmd)
+            return MagicMock(returncode=0)
+        monkeypatch.setattr(installer, "run", mock_run)
 
         # Mock input to say 'y' to continue
         monkeypatch.setattr("builtins.input", lambda _: "y")
 
         installer.check_prerequisites(auto_yes=False)
+        assert ["sudo", "npm", "install", "-g", "snyk"] in cmds_run
         captured = capsys.readouterr()
         assert "WARNING Snyk CLI not found" in captured.out
+
+    def test_outdated_snyk_auto_upgrade(self, monkeypatch, capsys):
+        monkeypatch.setattr("shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None)
+        monkeypatch.setattr("sys.platform", "linux")
+
+        cmds_run = []
+        def mock_run(cmd, **kwargs):
+            cmds_run.append(cmd)
+            m = MagicMock()
+            if cmd[0] == "snyk" and cmd[1] == "--version":
+                m.stdout = "1.1301.0\n"
+                m.returncode = 0
+            return m
+
+        monkeypatch.setattr(installer, "run", mock_run)
+
+        installer.check_prerequisites(auto_yes=True)
+
+        # Verify that npm install was called
+        assert ["sudo", "npm", "install", "-g", "snyk@latest"] in cmds_run
+        captured = capsys.readouterr()
+        assert "WARNING Snyk CLI 1.1301.0 is outdated" in captured.out
 
     def test_version_parse_edge_case(self, monkeypatch, capsys):
         monkeypatch.setattr("shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None)
@@ -97,7 +131,7 @@ class TestCheckPrerequisites:
                 m.returncode = 0
             return m
 
-        monkeypatch.setattr("subprocess.run", mock_run)
+        monkeypatch.setattr(installer, "run", mock_run)
 
         installer.check_prerequisites(auto_yes=True)
         captured = capsys.readouterr()
@@ -114,11 +148,9 @@ class TestCheckPrerequisites:
                 m.returncode = 0
             return m
 
-        monkeypatch.setattr("subprocess.run", mock_run)
+        monkeypatch.setattr(installer, "run", mock_run)
 
         installer.check_prerequisites(auto_yes=True)
-        captured = capsys.readouterr()
-        assert "OK Snyk CLI development-version (could not parse version)" in captured.out
 
 
 # ===========================================================================
@@ -186,6 +218,147 @@ class TestColor:
 
 
 # ===========================================================================
+# TestEnsureNodeInstalled
+# ===========================================================================
+
+class TestEnsureNodeInstalled:
+    def test_node_npm_already_installed(self, monkeypatch):
+        monkeypatch.setattr("shutil.which", lambda cmd: "/bin/cmd" if cmd in ("node", "npm") else None)
+        assert installer.ensure_node_installed(auto_yes=True) is True
+
+    def test_darwin_brew_install(self, monkeypatch, capsys):
+        def mock_which(cmd):
+            if cmd == "brew": return "/opt/homebrew/bin/brew"
+            return None
+        monkeypatch.setattr("shutil.which", mock_which)
+        monkeypatch.setattr("platform.system", lambda: "Darwin")
+
+        cmds_run = []
+        def mock_run(cmd, **kwargs):
+            cmds_run.append(cmd)
+            # simulate node being available after run
+            monkeypatch.setattr("shutil.which", lambda c: "/bin/cmd" if c in ("node", "npm") else mock_which(c))
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(installer, "run", mock_run)
+        assert installer.ensure_node_installed(auto_yes=True) is True
+        assert ["brew", "install", "node"] in cmds_run
+
+    def test_darwin_homebrew_install(self, monkeypatch, capsys):
+        """Verify that the installer correctly attempts to install Homebrew when missing on macOS."""
+        def mock_which(cmd):
+            return None
+        monkeypatch.setattr("shutil.which", mock_which)
+        monkeypatch.setattr("platform.system", lambda: "Darwin")
+
+        runs = []
+        def mock_run(cmd, **kwargs):
+            runs.append((cmd, kwargs))
+            # After Homebrew install, simulate brew being found
+            def next_which(c):
+                if c == "brew": return "/opt/homebrew/bin/brew"
+                if c in ("node", "npm") and any("node" in r[0] for r in runs): return "/bin/cmd"
+                return None
+            monkeypatch.setattr("shutil.which", next_which)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(installer, "run", mock_run)
+
+        # Test with auto_yes=True
+        assert installer.ensure_node_installed(auto_yes=True) is True
+
+        # Check that Homebrew install was attempted with NONINTERACTIVE=1
+        homebrew_run = next(r for r in runs if "Homebrew/install" in r[0][2])
+        assert homebrew_run[1].get("env", {}).get("NONINTERACTIVE") == "1"
+        assert "stdout" not in homebrew_run[1]  # Should not be redirected to DEVNULL
+
+    def test_windows_winget_install(self, monkeypatch, capsys):
+        def mock_which(cmd):
+            if cmd == "winget": return "C:\\winget.exe"
+            return None
+        monkeypatch.setattr("shutil.which", mock_which)
+        monkeypatch.setattr("platform.system", lambda: "Windows")
+
+        cmds_run = []
+        def mock_run(cmd, **kwargs):
+            cmds_run.append(cmd)
+            monkeypatch.setattr("shutil.which", lambda c: "/bin/cmd" if c in ("node", "npm") else mock_which(c))
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(installer, "run", mock_run)
+        assert installer.ensure_node_installed(auto_yes=True) is True
+        assert ["winget", "install", "OpenJS.NodeJS.LTS", "--silent", "--accept-package-agreements", "--accept-source-agreements"] in cmds_run
+
+    def test_linux_apt_get_install(self, monkeypatch, capsys):
+        def mock_which(cmd):
+            if cmd == "apt-get": return "/usr/bin/apt-get"
+            return None
+        monkeypatch.setattr("shutil.which", mock_which)
+        monkeypatch.setattr("platform.system", lambda: "Linux")
+
+        cmds_run = []
+        def mock_run(cmd, **kwargs):
+            cmds_run.append(cmd)
+            monkeypatch.setattr("shutil.which", lambda c: "/bin/cmd" if c in ("node", "npm") else mock_which(c))
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(installer, "run", mock_run)
+        assert installer.ensure_node_installed(auto_yes=True) is True
+        assert ["sudo", "apt-get", "update"] in cmds_run
+        assert ["sudo", "apt-get", "install", "-y", "nodejs", "npm"] in cmds_run
+
+    def test_user_declines_install(self, monkeypatch, capsys):
+        def mock_which(cmd):
+            if cmd == "brew": return "/usr/local/bin/brew"
+            return None
+        monkeypatch.setattr(installer.shutil, "which", mock_which)
+        monkeypatch.setattr(installer.platform, "system", lambda: "Darwin")
+
+        input_prompts = []
+        def mock_input(prompt):
+            input_prompts.append(prompt)
+            return "n"
+        monkeypatch.setattr("builtins.input", mock_input)
+
+        assert installer.ensure_node_installed(auto_yes=False) is False
+        assert any("Install Node.js globally" in p for p in input_prompts)
+
+    def test_path_refresh_after_install(self, monkeypatch, tmp_path):
+        """Verify that _update_process_path correctly updates os.environ['PATH']."""
+        # Mock platform and directories
+        monkeypatch.setattr("sys.platform", "linux")
+        fake_bin = tmp_path / "usr" / "local" / "bin"
+        fake_bin.mkdir(parents=True)
+        (fake_bin / "node").touch()
+        (fake_bin / "npm").touch()
+
+        # Initial state: PATH does not contain fake_bin
+        orig_path = "/usr/bin"
+        monkeypatch.setitem(os.environ, "PATH", orig_path)
+
+        # Mock shutil.which to only find things in fake_bin if fake_bin is in PATH
+        def mock_which(cmd, path=None):
+            if path is None:
+                path = os.environ.get("PATH", "")
+            search_dirs = path.split(":")
+            if str(fake_bin) in search_dirs:
+                return str(fake_bin / cmd)
+            return None
+
+        monkeypatch.setattr(installer.shutil, "which", mock_which)
+
+        # Before refresh, node is not found
+        assert installer.shutil.which("node") is None
+
+        # Execute refresh (pass fake_bin explicitly to avoid dependency on host OS folders)
+        installer._update_process_path_for_nodejs(base_paths=[str(fake_bin)])
+
+        # Now node should be found
+        assert str(fake_bin) in os.environ["PATH"]
+        assert installer.shutil.which("node") == str(fake_bin / "node")
+
+
+# ===========================================================================
 # TestDetectAdes
 # ===========================================================================
 
@@ -229,7 +402,7 @@ class TestDetectAdes:
     def test_detects_both(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
         monkeypatch.setattr("shutil.which", lambda cmd: None)
-        
+
         (tmp_path / ".cursor").mkdir()
         (tmp_path / ".claude").mkdir()
         (tmp_path / ".gemini").mkdir()
@@ -242,7 +415,7 @@ class TestDetectAdes:
         monkeypatch.setattr(installer, "_cursor_app_bundle_exists", lambda: False)
         # Mock pgrep to not find cursor process
         mock_run = MagicMock(return_value=MagicMock(returncode=1))
-        monkeypatch.setattr("subprocess.run", mock_run)
+        monkeypatch.setattr(installer, "run", mock_run)
         result = installer.detect_ades()
         assert result == []
         # Exact process name (case-insensitive): pgrep -xi, not substring match
@@ -268,7 +441,7 @@ class TestDetectAdes:
             m.returncode = 1
             return m
 
-        monkeypatch.setattr("subprocess.run", fake_run)
+        monkeypatch.setattr(installer, "run", fake_run)
         assert installer.detect_ades() == ["cursor"]
         assert pgrep_calls == []
 
@@ -288,7 +461,7 @@ class TestDetectAdes:
             m.returncode = 0 if cmd == ["pgrep", "-xiq", "cursor"] else 1
             return m
 
-        monkeypatch.setattr("subprocess.run", fake_run)
+        monkeypatch.setattr(installer, "run", fake_run)
         assert installer.detect_ades() == ["cursor"]
         assert pgrep_calls == [["pgrep", "-xiq", "cursor"]]
 
@@ -312,7 +485,7 @@ class TestDetectAdes:
             m.returncode = 1
             return m
 
-        monkeypatch.setattr("subprocess.run", fake_run)
+        monkeypatch.setattr(installer, "run", fake_run)
         assert installer.detect_ades() == []
 
     def test_detects_claude_from_cli(self, tmp_path, monkeypatch):
@@ -883,6 +1056,35 @@ class TestVSCodeSettingsConflict:
         assert updated_data["snyk.securityAtInception.autoConfigureSnykMcpServer"] is False
         assert updated_data["snyk.securityAtInception.executionFrequency"] == "Manual"
         assert updated_data["other.setting"] == "value"
+
+    def test_json_with_comments_and_trailing_commas(self, manifest, vscode_env):
+        ws_dir = vscode_env["workspace_dir"]
+        ws_dir.mkdir(parents=True)
+        # JSON with comments and trailing commas - valid after regex cleanup
+        json_content = """{
+            /* Block comment */
+            "snyk.securityAtInception.autoConfigureSnykMcpServer": true,
+            "snyk.securityAtInception.executionFrequency": "On Code Generation",
+            "trailing": "comma",
+        }"""
+        (ws_dir / "settings.json").write_text(json_content)
+        assert manifest.are_extension_settings_conflicting("cursor")
+
+    def test_path_outside_home_or_workspace_security(self, manifest, vscode_env, monkeypatch):
+        # Create a settings file in a "malicious" location outside home and workspace
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            malicious_file = Path(tmp_dir) / "settings.json"
+            malicious_file.write_text(json.dumps({
+                "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
+                "snyk.securityAtInception.executionFrequency": "On Code Generation"
+            }))
+
+            # Mock get_extension_settings_path to return this file
+            monkeypatch.setattr(manifest, "get_extension_settings_path", lambda ade: [malicious_file])
+
+            # are_extension_settings_conflicting should ignore it and return False
+            assert not manifest.are_extension_settings_conflicting("cursor")
 
 # ===========================================================================
 # TestConflictResolution

@@ -26,13 +26,15 @@ import contextlib
 import filecmp
 import json
 import os
+import platform
 import re
 import shutil
-import subprocess
+from subprocess import PIPE, run
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
+from webbrowser import get
 
 # When set (by generated install.sh / install.ps1 / install.py), manifest and recipe sources
 # live under this directory (flat layout from the release zip).
@@ -365,44 +367,219 @@ class Manifest:
 # PREREQUISITES
 # =============================================================================
 
+def _get_node_install_cmd_darwin(auto_yes: bool) -> Optional[List[str]]:
+    """Return the appropriate Node.js installation command for macOS."""
+    if not shutil.which("brew"):
+        print(f"  {C.yellow('WARNING')} Homebrew not found.")
+        if not auto_yes:
+            reply = input("  Install Homebrew? (y/n) ").strip().lower()
+            if reply not in ("y", "yes"):
+                return None
+        print(f"  {C.cyan('INFO')} Installing Homebrew...")
+        try:
+            # Set NONINTERACTIVE=1 to skip the "Press RETURN to continue" prompt.
+            # We don't redirect stdout/stderr to DEVNULL so the user can see progress and any sudo prompts.
+            env = os.environ.copy()
+            if auto_yes:
+                env["NONINTERACTIVE"] = "1"
+
+            run(["/bin/bash", "-c", "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"], env=env, check=True)
+        except Exception as e:
+            print(f"  {C.red('ERROR')} Failed to install Homebrew: {e}")
+            return None
+
+    return ["brew", "install", "node"]
+
+
+def _get_node_install_cmd_windows(auto_yes: bool) -> Optional[List[str]]:
+    """Return the appropriate Node.js installation command for Windows."""
+    if shutil.which("winget"):
+        return ["winget", "install", "OpenJS.NodeJS.LTS", "--silent", "--accept-package-agreements", "--accept-source-agreements"]
+    if shutil.which("choco"):
+        return ["choco", "install", "nodejs-lts", "-y"]
+
+    print(f"  {C.yellow('WARNING')} Neither winget nor chocolatey found.")
+    if not auto_yes:
+        reply = input("  Install Chocolatey? (y/n) ").strip().lower()
+        if reply not in ("y", "yes"):
+            return None
+
+    print(f"  {C.cyan('INFO')} Installing Chocolatey...")
+    try:
+        choco_install_cmd = "Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))"
+        run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", choco_install_cmd], check=True)
+        return ["choco", "install", "nodejs-lts", "-y"]
+    except Exception as e:
+        print(f"  {C.red('ERROR')} Failed to install Chocolatey: {e}")
+        return None
+
+
+def _get_node_install_cmds_linux() -> List[List[str]]:
+    """Return the appropriate Node.js installation command for the detected Linux package manager."""
+
+    if shutil.which("apt-get"):
+        print(f"  {C.dim('Note: This may prompt for your sudo password.')}")
+        return [
+            ["sudo", "apt-get", "update"],
+            ["sudo", "apt-get", "install", "-y", "nodejs", "npm"]
+        ]
+    if shutil.which("yum"):
+        print(f"  {C.dim('Note: This may prompt for your sudo password.')}")
+        return [["sudo", "yum", "install", "-y", "nodejs", "npm"]]
+    if shutil.which("dnf"):
+        print(f"  {C.dim('Note: This may prompt for your sudo password.')}")
+        return [["sudo", "dnf", "install", "-y", "nodejs", "npm"]]
+    if shutil.which("pacman"):
+        print(f"  {C.dim('Note: This may prompt for your sudo password.')}")
+        return [["sudo", "pacman", "-Sy", "--noconfirm", "nodejs", "npm"]]
+    if shutil.which("apk"):
+        print(f"  {C.dim('Note: This may prompt for your sudo password.')}")
+        return [["sudo", "apk", "add", "nodejs", "npm"]]
+
+    print(f"  {C.red('ERROR')} Supported Linux package manager not found. Please install Node.js manually.")
+    return []
+
+
+def _update_process_path_for_nodejs(base_paths: Optional[List[str]] = None) -> None:
+    """Add standard Node.js and npm installation paths to the current process's PATH.
+
+    This enables the installer to use node/npm immediately after installation
+    without requiring a shell restart.
+    """
+    new_paths = []
+
+    if base_paths:
+        new_paths.extend(base_paths)
+    else:
+        if sys.platform == "darwin":
+            new_paths.extend(["brew --prefix"])
+        elif sys.platform == "win32":
+            new_paths.append("C:\\Program Files\\nodejs")
+            appdata = os.environ.get("APPDATA")
+            if appdata:
+                new_paths.append(os.path.join(appdata, "npm"))
+        else:  # Linux
+            new_paths.extend(["/usr/local/bin", "/usr/bin"])
+
+    current_path = os.environ.get("PATH", "")
+    path_sep = ";" if sys.platform == "win32" else ":"
+    existing_paths = set(current_path.split(path_sep))
+
+    added = []
+    for p in new_paths:
+        if p and p not in existing_paths and os.path.isdir(p):
+            added.append(p)
+
+    if added:
+        os.environ["PATH"] = path_sep.join(added) + path_sep + current_path
+
+
+def ensure_node_installed(auto_yes: bool) -> bool:
+    """Confirm that Node.js and npm are installed and configured."""
+    if shutil.which("node") and shutil.which("npm"):
+        return True
+
+    print(f"  {C.yellow('WARNING')} Node.js and/or npm not found on system PATH.")
+
+    sys_os = platform.system().lower()
+    cmds: List[List[str]] = []
+
+    if sys_os == "darwin":
+        cmd = _get_node_install_cmd_darwin(auto_yes)
+        if cmd:
+            cmds.append(cmd)
+    elif sys_os == "windows":
+        cmd = _get_node_install_cmd_windows(auto_yes)
+        if cmd:
+            cmds.append(cmd)
+    else:  # Linux
+        cmds = _get_node_install_cmds_linux()
+
+    if not cmds:
+        return False
+
+    if not auto_yes:
+        display_cmd = " && ".join([" ".join(c) for c in cmds])
+        reply = input(f"  Install Node.js globally via '{display_cmd}'? (y/n) ").strip().lower()
+        if reply not in ("y", "yes"):
+            return False
+
+    print(f"  {C.cyan('INFO')} Installing Node.js...")
+    try:
+        for cmd in cmds:
+            run(cmd, check=True)
+
+        # Attempt to refresh PATH for the current process
+        _update_process_path_for_nodejs()
+
+        if shutil.which("node") and shutil.which("npm"):
+            print(f"  {C.green('OK')} Node.js installed and available in current process.")
+            return True
+
+        # Re-check PATH or assume success if run() didn't fail
+        print(f"  {C.yellow('WARNING')} Node.js installed but not found on PATH yet. You may need to restart your terminal.")
+        return True
+    except Exception as e:
+        print(f"  {C.red('ERROR')} Installation failed: {e}")
+        return False
+
+def run_command(cmd: list[str], warn: str) -> int:
+    """Run the given command and return the exit code (increments warning count in check_prerequisites)."""
+    try:
+        run(cmd, check=True)
+        return 0
+    except Exception:
+        print(warn)
+        return 1
+
+
 def check_prerequisites(auto_yes: bool) -> None:
+    """Check that the required prerequisites are installed and configured. If not, attempt to install them."""
+
     warnings = 0
+    is_windows = sys.platform == "win32"
+
+    def get_npm_install_cmd(pkg: str) -> List[str]:
+        cmd = ["npm", "install", "-g", pkg]
+        return ["sudo"] + cmd if not is_windows else cmd
 
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
     print(f"  {C.green('OK')} Python {py_ver}")
 
-    snyk_path = shutil.which("snyk")
+    def get_snyk_path():
+        return shutil.which("snyk")
+
+    if not ensure_node_installed(auto_yes) and get_snyk_path():
+        print(f"  {C.red('ERROR')} Node.js is required to install Snyk CLI.")
+        warnings += 1
 
     def parse_version(x):
         return tuple(map(int, x.split('.')))
 
     minimum_snyk_version = parse_version(SNYK_MINIMUM_VERSION)
 
-    if snyk_path:
-        try:
-            r = subprocess.run(["snyk", "--version"], capture_output=True, text=True, timeout=10)
-            ver_str = r.stdout.strip().splitlines()[0] if r.stdout else "unknown"
-
-            try:
-                # Snyk version can be "1.1302.0" or "1.1302.0 (standalone)"
-                match = re.match(r"(\d+\.\d+\.\d+)", ver_str)
-                if match:
-                    current_version = parse_version(match.group(1))
-                    if current_version < minimum_snyk_version:
-                        print(f"  {C.yellow('WARNING')} Snyk CLI {ver_str} is outdated (min: {SNYK_MINIMUM_VERSION})")
-                        warnings += 1
-                    else:
-                        print(f"  {C.green('OK')} Snyk CLI {ver_str}")
-                else:
-                    print(f"  {C.green('OK')} Snyk CLI {ver_str} (could not parse version)")
-            except Exception:
+    if get_snyk_path():
+        r = run(["snyk", "--version"], capture_output=True, text=True, timeout=10)
+        ver_str = r.stdout.strip().splitlines()[0] if r.stdout else "unknown"
+        match = re.match(r"(\d+\.\d+\.\d+)", ver_str)
+        if match:
+            current_version = parse_version(match.group(1))
+            if current_version < minimum_snyk_version:
+                print(f"  {C.yellow('WARNING')} Snyk CLI {ver_str} is outdated (min: {SNYK_MINIMUM_VERSION}). Upgrade snyk?")
+                if not auto_yes:
+                    reply = input("  (y/n) ").strip().lower()
+                    if reply not in ("y", "yes"):
+                        sys.exit(1)
+                warnings += run_command(get_npm_install_cmd("snyk@latest"), f"  {C.yellow('WARNING')} Failed to upgrade Snyk CLI to latest via npm")
+            else:
                 print(f"  {C.green('OK')} Snyk CLI {ver_str}")
-        except Exception:
-            print(f"  {C.green('OK')} Snyk CLI (version check failed)")
     else:
-        print(f"  {C.yellow('WARNING')} Snyk CLI not found")
-        print("    Install with: npm install -g snyk")
-        warnings += 1
+        print(f"  {C.yellow('WARNING')} Snyk CLI not found, install latest version?")
+        if not auto_yes:
+            reply = input("  (y/n) ").strip().lower()
+            if reply not in ("y", "yes"):
+                sys.exit(1)
+        warnings += run_command(get_npm_install_cmd("snyk"), f"  {C.yellow('WARNING')} Failed to install Snyk CLI via npm")
 
     if warnings > 0 and not auto_yes:
         reply = input("\n  Continue with warnings? (y/n) ").strip().lower()
@@ -513,7 +690,7 @@ def _cursor_app_bundle_exists() -> bool:
 def _cursor_process_running() -> bool:
     """True only if a process is named exactly Cursor (any case) — -x, not substring."""
     try:
-        r = subprocess.run(
+        r = run(
             ["pgrep", "-xiq", "cursor"],
             capture_output=True,
             timeout=5,
@@ -1005,7 +1182,7 @@ def main() -> None:
     def remove_legacy_SAI_directives(ade: str, scope: str) -> None:
         mcp_tool_name = SNYK_MCP_TOOL_NAMES[ade]
         print(f"    Cleaning up {scope} skills for {ade}...")
-        subprocess.run(["snyk", "mcp", "configure",
+        run(["snyk", "mcp", "configure",
             "--tool", mcp_tool_name, "--rm", "--rules-scope",
             scope, "--rule-type", "always-apply",
             "--workspace", ".", "--configure-mcp=false",

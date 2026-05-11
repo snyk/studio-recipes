@@ -126,6 +126,9 @@ def collect_bundle_info(
     add_or_mark_missing("manifest.json", manifest_path)
     add_or_mark_missing("snyk-studio-installer.py", installer_src)
 
+    # Optional platform-specific overrides not in manifest
+    add_or_mark_missing("mcp/.mcp.mac.json", repo_root / "mcp" / ".mcp.mac.json")
+
     lib_dir = script_dir / "lib"
     if lib_dir.is_dir():
         for lib_path in sorted(

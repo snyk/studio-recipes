@@ -33,7 +33,7 @@ These are generic examples, not rigid templates. Every team's security requireme
 
 You can adopt recipes in two ways:
 
-1. **Installer (recommended for Cursor / Claude Code)** — Build with `python3 build_installer.py` in [`installer/`](installer/), then run **`dist/snyk-studio-install.sh`** or **`dist/snyk-studio-install.ps1`** (self-extracting scripts that unpack and run the Python installer). See [`installer/README.md`](installer/README.md) for profiles (`default`, `minimal`) and flags like `--dry-run` and `--uninstall`.
+1. **Installer (recommended for Cursor / Claude Code / Gemini Code / Windsurf / GitHub Copilot CLI / GitHub Copilot in VS Code)** — Build with `python3 build_installer.py` in [`installer/`](installer/), then run **`dist/snyk-studio-install.sh`** or **`dist/snyk-studio-install.ps1`** (self-extracting scripts that unpack and run the Python installer). See [`installer/README.md`](installer/README.md) for profiles (`default`, `minimal`) and flags like `--dry-run` and `--uninstall`.
 
 2. **Manual / copy from repo** — Pick files under `guardrail_directives/`, `command_directives/`, `mcp/`, etc., and wire them into your assistant yourself (useful for customization or IDEs not covered by the installer).
 

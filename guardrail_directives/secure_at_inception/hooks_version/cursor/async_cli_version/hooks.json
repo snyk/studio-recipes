@@ -3,17 +3,17 @@
   "hooks": {
     "sessionStart": [
       {
-        "command": "python3 \"$HOME/.cursor/hooks/snyk_secure_at_inception.py\""
+        "command": "uv run \"$HOME/.cursor/hooks/snyk_secure_at_inception.py\""
       }
     ],
     "afterFileEdit": [
       {
-        "command": "python3 \"$HOME/.cursor/hooks/snyk_secure_at_inception.py\""
+        "command": "uv run \"$HOME/.cursor/hooks/snyk_secure_at_inception.py\""
       }
     ],
     "stop": [
       {
-        "command": "python3 \"$HOME/.cursor/hooks/snyk_secure_at_inception.py\""
+        "command": "uv run \"$HOME/.cursor/hooks/snyk_secure_at_inception.py\""
       }
     ]
   }

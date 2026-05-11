@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "Snyk": {
+      "command": "sh",
+      "args": ["-l", "-c","npx -y snyk@latest mcp -t stdio"]
+    }
+  }
+}

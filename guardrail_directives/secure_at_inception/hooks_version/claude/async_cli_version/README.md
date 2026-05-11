@@ -44,7 +44,7 @@ chmod +x .claude/hooks/snyk_secure_at_inception.py
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/snyk_secure_at_inception.py",
+            "command": "uv run \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/snyk_secure_at_inception.py",
             "statusMessage": "Initializing Snyk security scanning..."
           }
         ]
@@ -56,7 +56,7 @@ chmod +x .claude/hooks/snyk_secure_at_inception.py
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/snyk_secure_at_inception.py",
+            "command": "uv run \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/snyk_secure_at_inception.py",
             "statusMessage": "Tracking code changes for security scan..."
           }
         ]
@@ -67,7 +67,7 @@ chmod +x .claude/hooks/snyk_secure_at_inception.py
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/snyk_secure_at_inception.py",
+            "command": "uv run \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/snyk_secure_at_inception.py",
             "statusMessage": "Evaluating security scan results..."
           }
         ]
@@ -156,9 +156,9 @@ Note: `chmod +x` is not needed on Windows -- executability is determined by file
 
 ### Hook command in `settings.json`
 
-The Unix hook command uses `python3` and `$HOME`, which may not work on Windows. Use one of these alternatives depending on your Python installation:
+Hook commands use `uv run` with `$HOME` on Unix (install [uv](https://docs.astral.sh/uv/getting-started/installation/) and ensure it is on your PATH). On Windows, use `%USERPROFILE%` and backslashes as in the example below.
 
-**Option A -- Using `py` launcher (recommended, ships with Python for Windows):**
+**Option A -- `uv run` on Windows (matches installer output):**
 
 ```json
 {
@@ -168,7 +168,7 @@ The Unix hook command uses `python3` and `$HOME`, which may not work on Windows.
         "hooks": [
           {
             "type": "command",
-            "command": "py -3 \"%USERPROFILE%\\.claude\\hooks\\snyk_secure_at_inception.py\""
+            "command": "uv run \"%USERPROFILE%\\.claude\\hooks\\snyk_secure_at_inception.py\""
           }
         ]
       }
@@ -179,7 +179,7 @@ The Unix hook command uses `python3` and `$HOME`, which may not work on Windows.
         "hooks": [
           {
             "type": "command",
-            "command": "py -3 \"%USERPROFILE%\\.claude\\hooks\\snyk_secure_at_inception.py\""
+            "command": "uv run \"%USERPROFILE%\\.claude\\hooks\\snyk_secure_at_inception.py\""
           }
         ]
       }
@@ -189,7 +189,7 @@ The Unix hook command uses `python3` and `$HOME`, which may not work on Windows.
         "hooks": [
           {
             "type": "command",
-            "command": "py -3 \"%USERPROFILE%\\.claude\\hooks\\snyk_secure_at_inception.py\""
+            "command": "uv run \"%USERPROFILE%\\.claude\\hooks\\snyk_secure_at_inception.py\""
           }
         ]
       }
@@ -198,9 +198,7 @@ The Unix hook command uses `python3` and `$HOME`, which may not work on Windows.
 }
 ```
 
-**Option B -- Using `python` directly (if `python` points to Python 3 on your PATH):**
-
-Replace `py -3` with `python` in the commands above.
+**Option B -- Using `py -3` instead of `uv run`:** replace the `uv run` prefix with `py -3` if you are not using uv.
 
 
 ### Snyk CLI on Windows

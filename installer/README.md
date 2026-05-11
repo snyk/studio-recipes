@@ -1,6 +1,6 @@
 # Snyk Studio Recipes — Installer
 
-Cross-platform installer that copies recipes from this repo into **your user home** so **Cursor** and/or **Claude Code** can use them globally (hooks, commands, skills, MCP merge)
+Cross-platform installer that copies recipes from this repo into **your user home** so **Cursor**, **Claude Code**, **Gemini Code**, **Kiro**, **Windsurf**, **GitHub Copilot CLI**, and/or **GitHub Copilot in VS Code** can use them globally (hooks, commands, skills, MCP merge). Kiro, Windsurf, and Copilot install commands, skills, and MCP only — no SAI hooks. Copilot CLI does not yet support custom slash commands so only skills + MCP are installed there.
 
 
 | File | Platform | Role |
@@ -12,14 +12,14 @@ Cross-platform installer that copies recipes from this repo into **your user hom
 
 ## What it installs
 
-Paths are resolved under `$HOME` (e.g. `~/.cursor/...`, `~/.claude/...`, `~/.mcp.json`). The installer **detects** which ADEs you use or you can target one with `--ade`.
+Paths are resolved under `$HOME` for most ADEs (e.g. `~/.cursor/...`, `~/.claude/...`, `~/.gemini/...`, `~/.kiro/...`, `~/.codeium/windsurf/...`, `~/.copilot/...`). VS Code Copilot resolves under the platform-specific user dir: `~/Library/Application Support/Code/User/` (macOS), `~/.config/Code/User/` (Linux), `%APPDATA%\Code\User\` (Windows). The installer **detects** which ADEs you use or you can target one with `--ade`.
 
 | Recipe type (in manifest) | Typical outcome |
 |-----------------------------|-----------------|
-| **hooks** | Hook scripts + JSON merge into Cursor `hooks.json` or Claude `settings.json` |
-| **command** | Slash commands under `.cursor/commands/` or `.claude/commands/` |
-| **skill** | Cursor: skills under `.cursor/skills/snyk/...`; Claude: often transformed into a command `.md` |
-| **mcp** | Merge of Snyk MCP server entries into `~/.mcp.json` (source: `mcp/.mcp.json` in the repo) |
+| **hooks** | Hook scripts + JSON merge into Cursor `hooks.json`, Claude `settings.json`, or Gemini `settings.json` (Kiro, Windsurf, and Copilot are not configured for hooks) |
+| **command** | Slash commands under `.cursor/commands/`, `.claude/commands/`, `.gemini/commands/`, `.kiro/steering/`, Windsurf global workflows under `.codeium/windsurf/global_workflows/`, or VS Code Copilot prompts under `<vscode-user>/prompts/<name>.prompt.md` (Copilot CLI does not support custom slash commands) |
+| **skill** | Cursor: skills under `.cursor/skills/snyk/...`; Kiro: skills under `.kiro/skills/...`; Windsurf: skills under `~/.agents/skills/<skill>/SKILL.md`; Copilot CLI: `~/.copilot/skills/<skill>/SKILL.md`; VS Code Copilot: `<vscode-user>/skills/<skill>/SKILL.md`; Claude / Gemini: transformed into a command `.md` |
+| **mcp** | Merge of Snyk MCP server entries into `~/.cursor/.mcp.json`, `~/.claude/.mcp.json`, `~/.gemini/settings.json`, `~/.kiro/settings/mcp.json`, `~/.codeium/windsurf/mcp_config.json`, `~/.copilot/mcp-config.json` (key `mcpServers`, `type: local`), or `<vscode-user>/mcp.json` (key `servers`, `type: stdio`). Source: `mcp/.mcp.json` in the repo. |
 
 ## Prerequisites
 
@@ -61,7 +61,7 @@ python3 snyk-studio-installer.py [options]
 | Option | Description |
 |--------|-------------|
 | `--profile <name>` | `default` or `minimal` |
-| `--ade <cursor\|claude>` | Install only for one ADE (otherwise auto-detect / prompt) |
+| `--ade <cursor\|claude\|gemini\|kiro\|windsurf\|copilot-cli\|copilot-vscode>` | Install only for one ADE (otherwise auto-detect / prompt) |
 | `--dry-run` | Show what would be installed without making changes |
 | `--uninstall` | Remove installed Snyk recipe artifacts from detected ADEs |
 | `--verify` | Check that installed files and merged configs match the manifest (read-only) |
@@ -77,7 +77,7 @@ python3 snyk-studio-installer.py [options]
 bash ./dist/snyk-studio-install.sh --verify
 ```
 
-Implementation: `lib/merge_json.py` (`verify_cursor_hooks`, `verify_claude_settings`, `verify_mcp_servers`).
+Implementation: `lib/merge_json.py` (`verify_cursor_hooks`, `verify_claude_settings`, `verify_gemini_settings`, `verify_mcp_servers`, `verify_copilot_cli_mcp`, `verify_vscode_mcp`).
 
 ### Profiles (current manifest)
 
@@ -100,7 +100,7 @@ Run `python3 snyk-studio-installer.py` from this directory (payload is read from
 | `templates/install.sh.template` | Template for the macOS / Linux installer |
 | `templates/install.ps1.template` | Template for the Windows installer |
 | `templates/install.py.template` | Python installer kept for backwards compatibility |
-| `lib/merge_json.py` | JSON merge strategies (hooks, MCP, Claude settings) |
+| `lib/merge_json.py` | JSON merge strategies (hooks, MCP, Claude / Gemini settings) |
 | `lib/transform.py` | e.g. skill → command, `.mdc` → `.md` |
 | `dist/` | Generated installers (not hand-edited); safe to delete and recreate with `build_installer.py` |
 | `tests/` | pytest suite (`pytest.ini` at repo root of this folder configures discovery) |

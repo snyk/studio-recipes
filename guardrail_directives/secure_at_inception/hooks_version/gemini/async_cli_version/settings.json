@@ -1,0 +1,44 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "name": "snyk_secure_at_inception_session_start",
+            "type": "command",
+            "command": "python3 \"$HOME/.gemini/hooks/snyk_secure_at_inception.py\"",
+            "description": "Run initial Snyk security scan on session start"
+          }
+        ]
+      }
+    ],
+    "AfterTool": [
+      {
+        "matcher": "write_file|replace",
+        "hooks": [
+          {
+            "name": "snyk_secure_at_inception_after_tool_edit",
+            "type": "command",
+            "command": "python3 \"$HOME/.gemini/hooks/snyk_secure_at_inception.py\"",
+            "description": "Scans code changes for vulnerabilities using Snyk"
+          }
+        ]
+      }
+    ],
+    "AfterAgent": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "name": "snyk_secure_at_inception_after_agent",
+            "type": "command",
+            "command": "python3 \"$HOME/.gemini/hooks/snyk_secure_at_inception.py\"",
+            "description": "Evaluate Snyk scan results before agent completes",
+            "timeout": 300000
+          }
+        ]
+      }
+    ]
+  }
+}

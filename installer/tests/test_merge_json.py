@@ -6,19 +6,25 @@ import os
 import pytest
 
 from merge_json import (
+    STRATEGIES,
     _backup,
+    _command_launcher,
+    _command_script_key,
     _is_snyk_command,
     _load_json,
     _write_json,
     main,
     merge_claude_settings,
     merge_cursor_hooks,
+    merge_gemini_settings,
     merge_mcp_servers,
     unmerge_claude_settings,
     unmerge_cursor_hooks,
+    unmerge_gemini_settings,
     unmerge_mcp_servers,
     verify_claude_settings,
     verify_cursor_hooks,
+    verify_gemini_settings,
     verify_mcp_servers,
 )
 
@@ -101,6 +107,61 @@ class TestIsSnykCommand:
         assert _is_snyk_command("") is False
 
 
+class TestCommandScriptKeyAndLauncher:
+    """Redirect-aware script identity (options 1 + 2 in merge_json)."""
+
+    def test_script_key_ignores_trailing_redirect_and_log(self):
+        cmd = (
+            "uv run $GEMINI_PROJECT_DIR/.gemini/hooks/snyk_secure_at_inception.py "
+            ">> $GEMINI_PROJECT_DIR/.gemini/hooks/snyk_secure_at_inception.log"
+        )
+        key = _command_script_key(cmd)
+        assert key is not None
+        assert key.endswith("snyk_secure_at_inception.py")
+        assert "snyk_secure_at_inception.log" not in key
+
+    def test_launcher_excludes_script_not_log_with_redirect(self):
+        cmd = (
+            'uv run "/proj/.gemini/hooks/snyk_secure_at_inception.py" '
+            '>> "/proj/.gemini/hooks/out.log"'
+        )
+        assert _command_launcher(cmd) == "uv run"
+
+    def test_legacy_launcher_python3_with_redirect(self):
+        cmd = (
+            'python3 "$HOME/.cursor/hooks/snyk_secure_at_inception.py" '
+            '>> "$HOME/.cursor/hooks/scan.log"'
+        )
+        assert _command_launcher(cmd) == "python3"
+        assert _command_script_key(cmd).endswith("snyk_secure_at_inception.py")
+
+    def test_merge_replaces_legacy_when_target_has_redirect(
+        self, write_json, snyk_cursor_source
+    ):
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "afterFileEdit": [
+                        {
+                            "command": (
+                                'python3 "$HOME/.cursor/hooks/snyk_secure_at_inception.py" '
+                                '>> "$HOME/.cursor/hooks/snyk_secure_at_inception.log"'
+                            )
+                        }
+                    ]
+                },
+            },
+        )
+        merge_cursor_hooks(target, snyk_cursor_source)
+        after_edit = read_json(target)["hooks"]["afterFileEdit"]
+        assert len(after_edit) == 1
+        assert after_edit[0]["command"] == (
+            'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
+        )
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # merge_cursor_hooks
 # ═══════════════════════════════════════════════════════════════════════════
@@ -165,7 +226,7 @@ class TestMergeCursorHooks:
                 "hooks": {
                     "afterFileEdit": [
                         {
-                            "command": 'python3 "$HOME/.cursor/hooks/snyk_secure_at_inception.py"',
+                            "command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"',
                             "extra_field": "different",
                         }
                     ]
@@ -174,6 +235,74 @@ class TestMergeCursorHooks:
         )
         merge_cursor_hooks(target, snyk_cursor_source)
         assert len(read_json(target)["hooks"]["afterFileEdit"]) == 1
+
+    def test_merge_replaces_legacy_launcher(
+        self, write_json, snyk_cursor_source
+    ):
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "afterFileEdit": [
+                        {
+                            "command": 'python "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
+                        }
+                    ]
+                },
+            },
+        )
+        merge_cursor_hooks(target, snyk_cursor_source)
+        after_edit = read_json(target)["hooks"]["afterFileEdit"]
+        assert len(after_edit) == 1
+        assert after_edit[0]["command"] == (
+            'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
+        )
+
+    def test_merge_replaces_legacy_python3_launcher(
+        self, write_json, snyk_cursor_source
+    ):
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "afterFileEdit": [
+                        {
+                            "command": 'python3 "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
+                        }
+                    ]
+                },
+            },
+        )
+        merge_cursor_hooks(target, snyk_cursor_source)
+        after_edit = read_json(target)["hooks"]["afterFileEdit"]
+        assert len(after_edit) == 1
+        assert after_edit[0]["command"] == (
+            'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
+        )
+
+    def test_merge_does_not_replace_non_legacy_launcher(
+        self, write_json, snyk_cursor_source
+    ):
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "afterFileEdit": [
+                        {
+                            "command": 'cat "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
+                        }
+                    ]
+                },
+            },
+        )
+        merge_cursor_hooks(target, snyk_cursor_source)
+        after_edit = read_json(target)["hooks"]["afterFileEdit"]
+        commands = [e["command"] for e in after_edit]
+        assert 'cat "$HOME/.cursor/hooks/snyk_secure_at_inception.py"' in commands
+        assert 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"' in commands
 
     def test_merge_no_backup_for_new_target(self, empty_target, snyk_cursor_source):
         merge_cursor_hooks(empty_target, snyk_cursor_source)
@@ -262,6 +391,67 @@ class TestMergeClaudeSettings:
         merge_claude_settings(existing_claude_target, snyk_claude_source)
         assert os.path.isfile(existing_claude_target + ".bak")
 
+    def test_merge_replaces_matching_script_hook_launcher(
+        self, write_json, snyk_claude_source
+    ):
+        target = write_json(
+            "target.json",
+            {
+                "hooks": {
+                    "PostToolUse": [
+                        {
+                            "matcher": "Edit|Write",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": 'python "$HOME/.claude/hooks/snyk_secure_at_inception.py"',
+                                    "statusMessage": "old",
+                                }
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+        merge_claude_settings(target, snyk_claude_source)
+        hooks = (
+            read_json(target)["hooks"]["PostToolUse"][0]["hooks"]
+        )
+        assert len(hooks) == 1
+        assert hooks[0]["command"] == (
+            'uv run "$HOME/.claude/hooks/snyk_secure_at_inception.py"'
+        )
+        assert hooks[0]["statusMessage"] == "Tracking code changes for security scan..."
+
+    def test_merge_replaces_legacy_python3_hook_launcher(
+        self, write_json, snyk_claude_source
+    ):
+        target = write_json(
+            "target.json",
+            {
+                "hooks": {
+                    "PostToolUse": [
+                        {
+                            "matcher": "Edit|Write",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": 'python3 "$HOME/.claude/hooks/snyk_secure_at_inception.py"',
+                                    "statusMessage": "old",
+                                }
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+        merge_claude_settings(target, snyk_claude_source)
+        hooks = read_json(target)["hooks"]["PostToolUse"][0]["hooks"]
+        assert len(hooks) == 1
+        assert hooks[0]["command"] == (
+            'uv run "$HOME/.claude/hooks/snyk_secure_at_inception.py"'
+        )
+        
     def test_merge_fails_on_invalid_json(self, tmp_path, snyk_claude_source):
         target = tmp_path / "target.json"
         target.write_text("{ invalid }")
@@ -358,12 +548,12 @@ class TestUnmergeCursorHooks:
                     "afterFileEdit": [
                         {"command": "eslint --fix"},
                         {
-                            "command": 'python3 "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
+                            "command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
                         },
                     ],
                     "stop": [
                         {
-                            "command": 'python3 "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
+                            "command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
                         },
                     ],
                 },
@@ -382,7 +572,7 @@ class TestUnmergeCursorHooks:
                 "hooks": {
                     "stop": [
                         {
-                            "command": 'python3 "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
+                            "command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
                         },
                     ],
                 },
@@ -429,7 +619,7 @@ class TestUnmergeCursorHooks:
                 "hooks": {
                     "afterFileEdit": [
                         {
-                            "command": 'python3 "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
+                            "command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
                         },
                     ],
                     "beforeCommand": [{"command": "echo hi"}],
@@ -462,7 +652,7 @@ class TestUnmergeClaudeSettings:
                                 {"type": "command", "command": "prettier --write"},
                                 {
                                     "type": "command",
-                                    "command": 'python3 "$HOME/.claude/hooks/snyk_secure_at_inception.py"',
+                                    "command": 'uv run "$HOME/.claude/hooks/snyk_secure_at_inception.py"',
                                 },
                             ],
                         }
@@ -472,7 +662,7 @@ class TestUnmergeClaudeSettings:
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": 'python3 "$HOME/.claude/hooks/snyk_secure_at_inception.py"',
+                                    "command": 'uv run "$HOME/.claude/hooks/snyk_secure_at_inception.py"',
                                 }
                             ]
                         }
@@ -501,7 +691,7 @@ class TestUnmergeClaudeSettings:
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": 'python3 "$HOME/.claude/hooks/snyk_secure_at_inception.py"',
+                                    "command": 'uv run "$HOME/.claude/hooks/snyk_secure_at_inception.py"',
                                 }
                             ],
                         }
@@ -524,7 +714,7 @@ class TestUnmergeClaudeSettings:
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": 'python3 "$HOME/.claude/hooks/snyk_secure_at_inception.py"',
+                                    "command": 'uv run "$HOME/.claude/hooks/snyk_secure_at_inception.py"',
                                 }
                             ]
                         }
@@ -580,7 +770,7 @@ class TestUnmergeClaudeSettings:
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": 'python3 "$HOME/.claude/hooks/snyk_secure_at_inception.py"',
+                                    "command": 'uv run "$HOME/.claude/hooks/snyk_secure_at_inception.py"',
                                 },
                                 {"type": "command", "command": "echo done"},
                             ]
@@ -680,6 +870,94 @@ class TestUnmergeMcpServers:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# merge_gemini_settings / unmerge / verify
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+SNYK_GEMINI_SETTINGS = {
+    "hooks": {
+        "AfterTool": [
+            {
+                "matcher": "write_file|replace",
+                "hooks": [
+                    {
+                        "name": "snyk_secure_at_inception_after_tool_edit",
+                        "type": "command",
+                        "command": 'python3 "$HOME/.gemini/hooks/snyk_secure_at_inception.py"',
+                        "description": "Scans code changes for vulnerabilities using Snyk",
+                    }
+                ],
+            }
+        ],
+        "AfterAgent": [
+            {
+                "matcher": "*",
+                "hooks": [
+                    {
+                        "name": "snyk_secure_at_inception_after_agent",
+                        "type": "command",
+                        "command": 'python3 "$HOME/.gemini/hooks/snyk_secure_at_inception.py"',
+                        "description": "Evaluate Snyk scan results before agent completes",
+                    }
+                ],
+            }
+        ],
+    }
+}
+
+
+class TestGeminiSettingsStrategies:
+    @pytest.fixture
+    def snyk_gemini_source(self, write_json):
+        return write_json("source/gemini_settings.json", SNYK_GEMINI_SETTINGS)
+
+    def test_merge_into_empty_target(self, empty_target, snyk_gemini_source):
+        merge_gemini_settings(empty_target, snyk_gemini_source)
+        result = read_json(empty_target)
+        assert "AfterTool" in result["hooks"]
+        assert "AfterAgent" in result["hooks"]
+
+    def test_merge_preserves_unrelated_top_level_keys(
+        self, write_json, snyk_gemini_source
+    ):
+        target = write_json("target.json", {"theme": "dark", "hooks": {}})
+        merge_gemini_settings(target, snyk_gemini_source)
+        result = read_json(target)
+        assert result["theme"] == "dark"
+        assert "AfterTool" in result["hooks"]
+
+    def test_merge_is_idempotent(self, empty_target, snyk_gemini_source):
+        merge_gemini_settings(empty_target, snyk_gemini_source)
+        merge_gemini_settings(empty_target, snyk_gemini_source)
+        result = read_json(empty_target)
+        for groups in result["hooks"].values():
+            for group in groups:
+                commands = [h["command"] for h in group["hooks"]]
+                assert len(commands) == len(set(commands))
+
+    def test_unmerge_removes_snyk_hooks(self, empty_target, snyk_gemini_source):
+        merge_gemini_settings(empty_target, snyk_gemini_source)
+        unmerge_gemini_settings(empty_target, snyk_gemini_source)
+        result = read_json(empty_target)
+        assert "AfterTool" not in result.get("hooks", {})
+        assert "AfterAgent" not in result.get("hooks", {})
+
+    def test_verify_passes_after_merge(self, empty_target, snyk_gemini_source):
+        merge_gemini_settings(empty_target, snyk_gemini_source)
+        # Should not raise
+        verify_gemini_settings(empty_target, snyk_gemini_source)
+
+    def test_verify_fails_when_missing(self, empty_target, snyk_gemini_source):
+        with pytest.raises(SystemExit):
+            verify_gemini_settings(empty_target, snyk_gemini_source)
+
+    def test_strategies_registered(self):
+        assert "merge_gemini_settings" in STRATEGIES
+        assert "unmerge_gemini_settings" in STRATEGIES
+        assert "verify_gemini_settings" in STRATEGIES
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # main() CLI dispatch
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -744,7 +1022,7 @@ class TestVerifyClaudeSettings:
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": 'python3 "$HOME/.claude/hooks/snyk_secure_at_inception.py"',
+                                    "command": 'uv run "$HOME/.claude/hooks/snyk_secure_at_inception.py"',
                                 }
                             ],
                         }

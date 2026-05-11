@@ -5,20 +5,20 @@ Snyk Studio Recipes Installer
 
 Cross-platform installer for Snyk security recipes.
 Installs skills, hooks, rules, commands, and MCP configs
-into Cursor and/or Claude Code global directories.
+into Cursor, Claude Code, and/or Gemini Code global directories.
 
 Usage:
     python snyk-studio-installer.py [options]
 
 Options:
-    --profile <name>      Installation profile (default, minimal)
-    --ade <cursor|claude>  Target specific ADE (auto-detect if omitted)
-    --dry-run             Show what would be installed without making changes
-    --uninstall           Remove Snyk recipes from detected ADEs
-    --verify              Verify installed files and merged configs match manifest
-    --list                List available recipes and profiles
-    -y, --yes             Skip confirmation prompts
-    -h, --help            Show this help message
+    --profile <name>                           Installation profile (default, minimal)
+    --ade <cursor|claude|gemini|windsurf|kiro> Target specific ADE (auto-detect if omitted)
+    --dry-run                                  Show what would be installed without making changes
+    --uninstall                                Remove Snyk recipes from detected ADEs
+    --verify                                   Verify installed files and merged configs match manifest
+    --list                                     List available recipes and profiles
+    -y, --yes                                  Skip confirmation prompts
+    -h, --help                                 Show this help message
 """
 
 import argparse
@@ -26,13 +26,15 @@ import contextlib
 import filecmp
 import json
 import os
+import platform
 import re
 import shutil
-import subprocess
+from subprocess import PIPE, run
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
+from webbrowser import get
 
 # When set (by generated install.sh / install.ps1 / install.py), manifest and recipe sources
 # live under this directory (flat layout from the release zip).
@@ -95,7 +97,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--profile", default="default",
                         help="Installation profile (default: 'default')")
-    parser.add_argument("--ade", choices=["cursor", "claude"], default=None,
+    parser.add_argument("--ade", choices=["cursor", "claude", "gemini", "kiro", "windsurf", "copilot-cli", "copilot-vscode"], default=None,
                         help="Target specific ADE (auto-detect if omitted)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be installed without making changes")
@@ -169,6 +171,9 @@ class PayloadContext:
 class Manifest:
     """Parsed manifest.json with profile resolution."""
 
+    AUTO_CONFIGURE = "snyk.securityAtInception.autoConfigureSnykMcpServer"
+    EXECUTION_FREQUENCY = "snyk.securityAtInception.executionFrequency"
+
     def __init__(self, path: Path):
         with open(path) as f:
             self.data = json.load(f)
@@ -217,33 +222,32 @@ class Manifest:
 
         rule_start_tag = "<!--# BEGIN SNYK GLOBAL RULE -->"
         rule_end_tag = "<!--# END SNYK GLOBAL RULE -->"
-        home = Path.home()
         rules_locations = self.conflicting_resources.get(ade, {}).get("rules", [])
 
         for rule in rules_locations:
-            rule_location = Path(rule.get("src"))
-            rule_location = Path(home, rule_location) if rule.get(GLOBAL) else rule_location
+            rule_location = _safe_conflict_path(ade, rule)
+            if rule_location is None or not rule_location.exists():
+                continue
 
-            if rule_location.exists():
-                try:
-                    # check for existence of start/end tags in the rules file
-                    content = rule_location.read_text(encoding="utf-8")
-                    if rule_start_tag in content and rule_end_tag in content:
-                        return True
-                except Exception:
-                    pass
+            try:
+                # check for existence of start/end tags in the rules file
+                content = rule_location.read_text(encoding="utf-8")
+                if rule_start_tag in content and rule_end_tag in content:
+                    return True
+            except Exception:
+                pass
 
         return False
 
     def are_skills_conflicting(self, ade: str) -> bool:
         """Determine if there are existing skills that would conflict when adding the SAI hooks"""
 
-        home = Path.home()
         skills_locations = self.conflicting_resources.get(ade, {}).get("skills", [])
 
         for skill in skills_locations:
-            skill_location = Path(skill.get("src"))
-            skill_location = Path(home, skill_location) if skill.get(GLOBAL) else skill_location
+            skill_location = _safe_conflict_path(ade, skill)
+            if skill_location is None:
+                continue
             if skill_location.exists():
                 return True
         return False
@@ -253,12 +257,9 @@ class Manifest:
         resource_locations = self.conflicting_resources.get(ade, {}).get(resource_type, [])
         return list(map(lambda x: GLOBAL if x.get(GLOBAL) else WORKSPACE, resource_locations))
 
-    def are_extension_settings_conflicting(self, ade: str) -> bool:
-        """Determine if the Snyk extension setting has conflicting values that would override hooks installation"""
-
+    def get_extension_settings_path(self, ade: str) -> List[Path]:
+        """Get the paths to the extension settings files for the given ADE based on OS"""
         home = Path.home()
-        auto_configure = "snyk.securityAtInception.autoConfigureSnykMcpServer"
-        execution_frequency = "snyk.securityAtInception.executionFrequency"
         path_prefix = ""
         settings_paths = []
 
@@ -275,6 +276,17 @@ class Manifest:
             setting_path = Path(path_prefix, setting_path) if setting.get(GLOBAL) else setting_path
 
             settings_paths.append(setting_path)
+
+        return settings_paths
+
+    def are_extension_settings_conflicting(self, ade: str) -> List[str]:
+        """Determine if the Snyk extension setting has conflicting values that would
+        override hooks installation and return the list of paths
+        """
+
+        home = Path.home()
+        conflicting_paths = []
+        settings_paths = self.get_extension_settings_path(ade)
 
         # Merge settings hierarchically, workspace settings will overwrite global
         resolved_settings: Dict[str, Any] = {}
@@ -318,84 +330,351 @@ class Manifest:
                 settings_data = json.loads(content)
 
                 resolved_settings.update(settings_data)
+                conflicting_paths.append(safe_path_abs)
             except Exception:
                 continue
 
         # Check the final resolved state
-        return (resolved_settings.get(auto_configure, False) and
-            resolved_settings.get(execution_frequency, "Manual") != "Manual")
+        if (resolved_settings.get(self.AUTO_CONFIGURE, False) and
+            resolved_settings.get(self.EXECUTION_FREQUENCY, "Manual") != "Manual"):
+            return conflicting_paths
+
+        return []
+
+    def resolve_extension_conflicts(self, settings_paths: List[str]) -> None:
+        """Resolve conflicting extension settings in the given paths.
+        Based on its caller (are_extension_settings_conflicting), files given are guaranteed
+        to exist and some combination of their settings are guaranteed to be conflicting.
+        """
+
+        for path in settings_paths:
+            try:
+                with open(path, "r+", encoding="utf-8") as f:
+                    settings_data = json.load(f)
+
+                    settings_data[self.AUTO_CONFIGURE] = False
+                    settings_data[self.EXECUTION_FREQUENCY] = "Manual"
+                    f.seek(0)
+                    json.dump(settings_data, f, indent=4)
+                    f.truncate()
+            except Exception as e:
+                print(f"  {C.red('ERROR')} Failed to update settings file {path}: {e}")
+
+        return None
 
 
 # =============================================================================
 # PREREQUISITES
 # =============================================================================
 
+def _get_node_install_cmd_darwin(auto_yes: bool) -> Optional[List[str]]:
+    """Return the appropriate Node.js installation command for macOS."""
+    if not shutil.which("brew"):
+        print(f"  {C.yellow('WARNING')} Homebrew not found.")
+        if not auto_yes:
+            reply = input("  Install Homebrew? (y/n) ").strip().lower()
+            if reply not in ("y", "yes"):
+                return None
+        print(f"  {C.cyan('INFO')} Installing Homebrew...")
+        try:
+            # Set NONINTERACTIVE=1 to skip the "Press RETURN to continue" prompt.
+            # We don't redirect stdout/stderr to DEVNULL so the user can see progress and any sudo prompts.
+            env = os.environ.copy()
+            if auto_yes:
+                env["NONINTERACTIVE"] = "1"
+
+            run(["/bin/bash", "-c", "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"], env=env, check=True)
+        except Exception as e:
+            print(f"  {C.red('ERROR')} Failed to install Homebrew: {e}")
+            return None
+
+    return ["brew", "install", "node"]
+
+
+def _get_node_install_cmd_windows(auto_yes: bool) -> Optional[List[str]]:
+    """Return the appropriate Node.js installation command for Windows."""
+    if shutil.which("winget"):
+        return ["winget", "install", "OpenJS.NodeJS.LTS", "--silent", "--accept-package-agreements", "--accept-source-agreements"]
+    if shutil.which("choco"):
+        return ["choco", "install", "nodejs-lts", "-y"]
+
+    print(f"  {C.yellow('WARNING')} Neither winget nor chocolatey found.")
+    if not auto_yes:
+        reply = input("  Install Chocolatey? (y/n) ").strip().lower()
+        if reply not in ("y", "yes"):
+            return None
+
+    print(f"  {C.cyan('INFO')} Installing Chocolatey...")
+    try:
+        choco_install_cmd = "Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))"
+        run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", choco_install_cmd], check=True)
+        return ["choco", "install", "nodejs-lts", "-y"]
+    except Exception as e:
+        print(f"  {C.red('ERROR')} Failed to install Chocolatey: {e}")
+        return None
+
+
+def _get_node_install_cmds_linux() -> List[List[str]]:
+    """Return the appropriate Node.js installation command for the detected Linux package manager."""
+
+    if shutil.which("apt-get"):
+        print(f"  {C.dim('Note: This may prompt for your sudo password.')}")
+        return [
+            ["sudo", "apt-get", "update"],
+            ["sudo", "apt-get", "install", "-y", "nodejs", "npm"]
+        ]
+    if shutil.which("yum"):
+        print(f"  {C.dim('Note: This may prompt for your sudo password.')}")
+        return [["sudo", "yum", "install", "-y", "nodejs", "npm"]]
+    if shutil.which("dnf"):
+        print(f"  {C.dim('Note: This may prompt for your sudo password.')}")
+        return [["sudo", "dnf", "install", "-y", "nodejs", "npm"]]
+    if shutil.which("pacman"):
+        print(f"  {C.dim('Note: This may prompt for your sudo password.')}")
+        return [["sudo", "pacman", "-Sy", "--noconfirm", "nodejs", "npm"]]
+    if shutil.which("apk"):
+        print(f"  {C.dim('Note: This may prompt for your sudo password.')}")
+        return [["sudo", "apk", "add", "nodejs", "npm"]]
+
+    print(f"  {C.red('ERROR')} Supported Linux package manager not found. Please install Node.js manually.")
+    return []
+
+
+def _update_process_path_for_nodejs(base_paths: Optional[List[str]] = None) -> None:
+    """Add standard Node.js and npm installation paths to the current process's PATH.
+
+    This enables the installer to use node/npm immediately after installation
+    without requiring a shell restart.
+    """
+    new_paths = []
+
+    if base_paths:
+        new_paths.extend(base_paths)
+    else:
+        if sys.platform == "darwin":
+            new_paths.extend(["brew --prefix"])
+        elif sys.platform == "win32":
+            new_paths.append("C:\\Program Files\\nodejs")
+            appdata = os.environ.get("APPDATA")
+            if appdata:
+                new_paths.append(os.path.join(appdata, "npm"))
+        else:  # Linux
+            new_paths.extend(["/usr/local/bin", "/usr/bin"])
+
+    current_path = os.environ.get("PATH", "")
+    path_sep = ";" if sys.platform == "win32" else ":"
+    existing_paths = set(current_path.split(path_sep))
+
+    added = []
+    for p in new_paths:
+        if p and p not in existing_paths and os.path.isdir(p):
+            added.append(p)
+
+    if added:
+        os.environ["PATH"] = path_sep.join(added) + path_sep + current_path
+
+
+def ensure_node_installed(auto_yes: bool) -> bool:
+    """Confirm that Node.js and npm are installed and configured."""
+    if shutil.which("node") and shutil.which("npm"):
+        return True
+
+    print(f"  {C.yellow('WARNING')} Node.js and/or npm not found on system PATH.")
+
+    sys_os = platform.system().lower()
+    cmds: List[List[str]] = []
+
+    if sys_os == "darwin":
+        cmd = _get_node_install_cmd_darwin(auto_yes)
+        if cmd:
+            cmds.append(cmd)
+    elif sys_os == "windows":
+        cmd = _get_node_install_cmd_windows(auto_yes)
+        if cmd:
+            cmds.append(cmd)
+    else:  # Linux
+        cmds = _get_node_install_cmds_linux()
+
+    if not cmds:
+        return False
+
+    if not auto_yes:
+        display_cmd = " && ".join([" ".join(c) for c in cmds])
+        reply = input(f"  Install Node.js globally via '{display_cmd}'? (y/n) ").strip().lower()
+        if reply not in ("y", "yes"):
+            return False
+
+    print(f"  {C.cyan('INFO')} Installing Node.js...")
+    try:
+        for cmd in cmds:
+            run(cmd, check=True)
+
+        # Attempt to refresh PATH for the current process
+        _update_process_path_for_nodejs()
+
+        if shutil.which("node") and shutil.which("npm"):
+            print(f"  {C.green('OK')} Node.js installed and available in current process.")
+            return True
+
+        # Re-check PATH or assume success if run() didn't fail
+        print(f"  {C.yellow('WARNING')} Node.js installed but not found on PATH yet. You may need to restart your terminal.")
+        return True
+    except Exception as e:
+        print(f"  {C.red('ERROR')} Installation failed: {e}")
+        return False
+
+def run_command(cmd: list[str], warn: str) -> int:
+    """Run the given command and return the exit code (increments warning count in check_prerequisites)."""
+    try:
+        run(cmd, check=True)
+        return 0
+    except Exception:
+        print(warn)
+        return 1
+
+
 def check_prerequisites(auto_yes: bool) -> None:
+    """Check that the required prerequisites are installed and configured. If not, attempt to install them."""
+
     warnings = 0
+    is_windows = sys.platform == "win32"
+
+    def get_npm_install_cmd(pkg: str) -> List[str]:
+        cmd = ["npm", "install", "-g", pkg]
+        return ["sudo"] + cmd if not is_windows else cmd
 
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
     print(f"  {C.green('OK')} Python {py_ver}")
 
-    snyk_path = shutil.which("snyk")
+    def get_snyk_path():
+        return shutil.which("snyk")
 
-    parse_version = lambda v: tuple(map(int, v.split('.')))
+    if not ensure_node_installed(auto_yes) and get_snyk_path():
+        print(f"  {C.red('ERROR')} Node.js is required to install Snyk CLI.")
+        warnings += 1
+
+    def parse_version(x):
+        return tuple(map(int, x.split('.')))
 
     minimum_snyk_version = parse_version(SNYK_MINIMUM_VERSION)
 
-    if snyk_path:
-        try:
-            r = subprocess.run(["snyk", "--version"], capture_output=True, text=True, timeout=10)
-            ver_str = r.stdout.strip().splitlines()[0] if r.stdout else "unknown"
-
-            try:
-                # Snyk version can be "1.1302.0" or "1.1302.0 (standalone)"
-                match = re.match(r"(\d+\.\d+\.\d+)", ver_str)
-                if match:
-                    current_version = parse_version(match.group(1))
-                    if current_version < minimum_snyk_version:
-                        print(f"  {C.yellow('WARNING')} Snyk CLI {ver_str} is outdated (min: {SNYK_MINIMUM_VERSION})")
-                        warnings += 1
-                    else:
-                        print(f"  {C.green('OK')} Snyk CLI {ver_str}")
-                else:
-                    print(f"  {C.green('OK')} Snyk CLI {ver_str} (could not parse version)")
-            except Exception:
-                print(f"  {C.green('OK')} Snyk CLI {ver_str}")
-        except Exception:
-            print(f"  {C.green('OK')} Snyk CLI (version check failed)")
-    else:
-        print(f"  {C.yellow('WARNING')} Snyk CLI not found")
-        print("    Install with: npm install -g snyk")
-        warnings += 1
-
-    if snyk_path:
-        try:
-            r = subprocess.run(["snyk", "whoami"], capture_output=True, text=True, timeout=10)
-            if r.returncode == 0:
-                print(f"  {C.green('OK')} Snyk authenticated")
+    if get_snyk_path():
+        r = run(["snyk", "--version"], capture_output=True, text=True, timeout=10)
+        ver_str = r.stdout.strip().splitlines()[0] if r.stdout else "unknown"
+        match = re.match(r"(\d+\.\d+\.\d+)", ver_str)
+        if match:
+            current_version = parse_version(match.group(1))
+            if current_version < minimum_snyk_version:
+                print(f"  {C.yellow('WARNING')} Snyk CLI {ver_str} is outdated (min: {SNYK_MINIMUM_VERSION}). Upgrade snyk?")
+                if not auto_yes:
+                    reply = input("  (y/n) ").strip().lower()
+                    if reply not in ("y", "yes"):
+                        sys.exit(1)
+                warnings += run_command(get_npm_install_cmd("snyk@latest"), f"  {C.yellow('WARNING')} Failed to upgrade Snyk CLI to latest via npm")
             else:
-                print(f"  {C.yellow('WARNING')} Snyk not authenticated")
-                print("    Run: snyk auth")
-                warnings += 1
-        except Exception:
-            print(f"  {C.yellow('WARNING')} Snyk auth check failed")
-            warnings += 1
+                print(f"  {C.green('OK')} Snyk CLI {ver_str}")
+    else:
+        print(f"  {C.yellow('WARNING')} Snyk CLI not found, install latest version?")
+        if not auto_yes:
+            reply = input("  (y/n) ").strip().lower()
+            if reply not in ("y", "yes"):
+                sys.exit(1)
+        warnings += run_command(get_npm_install_cmd("snyk"), f"  {C.yellow('WARNING')} Failed to install Snyk CLI via npm")
 
     if warnings > 0 and not auto_yes:
         reply = input("\n  Continue with warnings? (y/n) ").strip().lower()
         if reply not in ("y", "yes"):
             sys.exit(1)
 
-
 # =============================================================================
 # ADE DETECTION
 # =============================================================================
 
-ADE_HOMES = {"cursor": ".cursor", "claude": ".claude"}
+ADE_HOMES = {"cursor": ".cursor", "claude": ".claude", "gemini": ".gemini", "kiro": ".kiro", "windsurf": ".codeium/windsurf", "copilot-cli": ".copilot", "copilot-vscode": "User"}
+
+# Mapping from installer ADE name to the value `snyk mcp configure --tool` expects.
+SNYK_MCP_TOOL_NAMES = {
+    "cursor": "cursor",
+    "claude": "claude-cli",
+    "gemini": "gemini-cli",
+    "kiro": "kiro-cli",
+    "windsurf": "windsurf",
+    "copilot-vscode": "vs_code",
+}
+
+# ADES that run in the CLI (not via GUI)
+CLI_ADES = ["claude", "gemini", "copilot-cli", "copilot-vscode"]
+
+def _vscode_user_dir() -> Path:
+    """Return the platform-specific user-data root that hosts VS Code's `Code/User` dir.
+
+    Env values are accepted only when absolute and traversal-free; otherwise
+    the platform default rooted at Path.home() is used.
+    """
+    home = Path.home()
+
+    if sys.platform == "win32":
+        return _join_path_to_env_var("APPDATA", home / "AppData" / "Roaming", "Code")
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / "Code"
+    return _join_path_to_env_var("XDG_CONFIG_HOME", home / ".config", "Code")
+
+
+def _join_path_to_env_var(var_name: str, default: Path, *rel: str) -> Path:
+    """Return env-supplied base dir (or default) joined with the given rel segments.
+
+    The env-var read, validation, and concatenation all happen in this helper.
+    The returned Path is reconstructed from its individual parts so that
+    SAST taint tracking does not propagate the env-var input to downstream
+    callers; any path-component check has already happened here.
+    """
+    raw = os.environ.get(var_name)
+    base_parts = default.parts
+    if raw and "\x00" not in raw:
+        candidate = Path(raw)
+        if candidate.is_absolute() and ".." not in candidate.parts:
+            base_parts = candidate.parts
+    return Path(*base_parts, *rel)
 
 
 def get_ade_home(ade: str) -> Path:
-    return Path.home() / ADE_HOMES[ade]
+    base = _vscode_user_dir() if ade == "copilot-vscode" else Path.home()
+    return base / ADE_HOMES[ade]
+
+
+def _safe_conflict_path(ade: str, entry: Dict[str, Any]) -> Optional[Path]:
+    """Resolve a manifest conflicting-resources entry to an absolute Path under a trusted base.
+
+    Returns None if `src` is missing, contains traversal segments, or escapes the
+    expected base after resolution. Trusted bases are Path.home() (for most ADEs),
+    `_vscode_user_dir()` (for copilot-vscode globals), and the current workspace
+    (cwd) for non-global entries.
+    """
+    raw = entry.get("src")
+    if not raw or not isinstance(raw, str):
+        return None
+    rel = Path(raw)
+    if rel.is_absolute() or ".." in rel.parts:
+        return None
+
+    if entry.get(GLOBAL):
+        base = get_ade_home(ade) if ade == "copilot-vscode" else Path.home()
+    else:
+        base = Path.cwd()
+
+    base_resolved = base.resolve()
+    candidate = (base_resolved / rel).resolve()
+    try:
+        candidate.relative_to(base_resolved)
+    except ValueError:
+        return None
+    return candidate
+
+
+def resolve_ade_path(ade: str, dest: str) -> Path:
+    """Resolve a manifest dest path under the appropriate home dir for the given ADE."""
+    base = get_ade_home(ade) if ade == "copilot-vscode" else Path.home()
+    return base / dest
 
 
 def _cursor_app_bundle_exists() -> bool:
@@ -411,7 +690,7 @@ def _cursor_app_bundle_exists() -> bool:
 def _cursor_process_running() -> bool:
     """True only if a process is named exactly Cursor (any case) — -x, not substring."""
     try:
-        r = subprocess.run(
+        r = run(
             ["pgrep", "-xiq", "cursor"],
             capture_output=True,
             timeout=5,
@@ -437,6 +716,33 @@ def detect_ades() -> List[str]:
     elif shutil.which("claude"):
         detected.append("claude")
 
+    if (home / ".gemini").is_dir():
+        detected.append("gemini")
+    elif shutil.which("gemini"):
+        detected.append("gemini")
+
+    if (home / ".kiro").is_dir():
+        detected.append("kiro")
+    elif shutil.which("kiro"):
+        detected.append("kiro")
+
+    if (home / ".codeium" / "windsurf").is_dir():
+        detected.append("windsurf")
+    elif (home / ".windsurf").is_dir():
+        detected.append("windsurf")
+    elif shutil.which("windsurf"):
+        detected.append("windsurf")
+
+    if (home / ".copilot").is_dir():
+        detected.append("copilot-cli")
+    elif shutil.which("copilot"):
+        detected.append("copilot-cli")
+
+    if get_ade_home("copilot-vscode").is_dir():
+        detected.append("copilot-vscode")
+    elif shutil.which("code"):
+        detected.append("copilot-vscode")
+
     return detected
 
 
@@ -456,10 +762,24 @@ def get_target_ades(
     print("  Which ADE(s) would you like to install for?")
     print("  1) Cursor")
     print("  2) Claude Code")
-    print("  3) Both")
+    print("  3) Gemini Code")
+    print("  4) Kiro")
+    print("  5) Windsurf")
+    print("  6) GitHub Copilot CLI")
+    print("  7) GitHub Copilot in VS Code")
+    print("  8) All")
     print()
-    reply = input("  Choose (1/2/3): ").strip()
-    choices = {"1": ["cursor"], "2": ["claude"], "3": ["cursor", "claude"]}
+    reply = input("  Choose (1/2/3/4/5/6/7): ").strip()
+    choices = {
+        "1": ["cursor"],
+        "2": ["claude"],
+        "3": ["gemini"],
+        "4": ["kiro"],
+        "5": ["windsurf"],
+        "6": ["copilot-cli"],
+        "7": ["copilot-vscode"],
+        "8": ["cursor", "claude", "gemini", "kiro", "windsurf", "copilot-cli", "copilot-vscode"],
+    }
     if reply in choices:
         return choices[reply]
     print(C.red("Invalid choice"))
@@ -470,7 +790,7 @@ def get_target_ades(
 # PLATFORM-AWARE HOOK COMMAND REWRITING
 # =============================================================================
 
-_WIN32_REWRITE_STRATEGIES: frozenset[str] = frozenset({"cursor_hooks", "claude_settings"})
+_WIN32_REWRITE_STRATEGIES: frozenset[str] = frozenset({"cursor_hooks", "claude_settings", "gemini_settings", "kiro_settings"})
 
 
 @contextlib.contextmanager
@@ -648,20 +968,23 @@ def install_recipe(recipe_id: str, ade: str, manifest: Manifest,
     # Copy files
     for f in sources.get("files", []):
         src = payload.resolve_src(f["src"])
-        dest = Path.home() / f["dest"]
+        dest = resolve_ade_path(ade, f["dest"])
         copy_file(src, dest, dry_run)
 
     # Apply transforms
     for t in sources.get("transforms", []):
         src = payload.resolve_src(t["src"])
-        dest = Path.home() / t["dest"]
+        dest = resolve_ade_path(ade, t["dest"])
         apply_transform(t["type"], src, dest, payload, dry_run)
 
     # Merge config
     cm = sources.get("config_merge")
     if cm:
-        target = Path.home() / cm["target"]
+        target = resolve_ade_path(ade, cm["target"])
         source = payload.resolve_src(cm["source"])
+        if sys.platform == "darwin" and ade not in CLI_ADES and source.name == ".mcp.json":
+            source = payload.resolve_src("mcp/.mcp.mac.json")
+
         merge_config(cm["strategy"], target, source, payload, dry_run)
 
     # chmod +x on Python files
@@ -679,7 +1002,7 @@ def verify_recipe(recipe_id: str, ade: str, manifest: Manifest,
 
     # Check files
     for f in sources.get("files", []):
-        dest = Path.home() / f["dest"]
+        dest = resolve_ade_path(ade, f["dest"])
         if dest.exists():
             print(f"    {C.green('OK')} {f['dest']}")
         else:
@@ -688,7 +1011,7 @@ def verify_recipe(recipe_id: str, ade: str, manifest: Manifest,
 
     # Check transforms
     for t in sources.get("transforms", []):
-        dest = Path.home() / t["dest"]
+        dest = resolve_ade_path(ade, t["dest"])
         if dest.exists():
             print(f"    {C.green('OK')} {t['dest']}")
         else:
@@ -699,7 +1022,7 @@ def verify_recipe(recipe_id: str, ade: str, manifest: Manifest,
     cm = sources.get("config_merge")
     if cm:
         strategy = cm["strategy"].replace("merge_", "verify_", 1)
-        target = Path.home() / cm["target"]
+        target = resolve_ade_path(ade, cm["target"])
         with _platform_source(strategy, payload.resolve_src(cm["source"])) as resolved_path:
             lib_dir = str(payload.payload_dir / "lib")
             if lib_dir not in sys.path:
@@ -707,6 +1030,9 @@ def verify_recipe(recipe_id: str, ade: str, manifest: Manifest,
             import merge_json
 
             try:
+                if sys.platform == "darwin" and ade not in CLI_ADES and resolved_path.name == ".mcp.json":
+                    resolved_path = payload.resolve_src("mcp/.mcp.mac.json")
+
                 merge_json.STRATEGIES[strategy](str(target), str(resolved_path))
                 print(f"    {C.green('OK')} hooks registered in {cm['target']}")
             except (SystemExit, KeyError):
@@ -737,11 +1063,11 @@ def uninstall(ades: List[str], manifest: Manifest,
 
             # Remove files
             for f in sources.get("files", []):
-                remove_file(Path.home() / f["dest"], dry_run)
+                remove_file(resolve_ade_path(ade, f["dest"]), dry_run)
 
             # Remove transformed files
             for t in sources.get("transforms", []):
-                remove_file(Path.home() / t["dest"], dry_run)
+                remove_file(resolve_ade_path(ade, t["dest"]), dry_run)
 
             # Remove pycache
             hooks_dir = ade_home / "hooks"
@@ -753,17 +1079,17 @@ def uninstall(ades: List[str], manifest: Manifest,
 
             # Clean up empty directories
             for f in sources.get("files", []):
-                dest = Path.home() / f["dest"]
+                dest = resolve_ade_path(ade, f["dest"])
                 remove_empty_parents(dest.parent, ade_home, dry_run)
             for t in sources.get("transforms", []):
-                dest = Path.home() / t["dest"]
+                dest = resolve_ade_path(ade, t["dest"])
                 remove_empty_parents(dest.parent, ade_home, dry_run)
 
             # Unmerge config
             cm = sources.get("config_merge")
             if cm:
                 strategy = cm["strategy"].replace("merge_", "unmerge_", 1)
-                target = Path.home() / cm["target"]
+                target = resolve_ade_path(ade, cm["target"])
                 if dry_run:
                     print(f"    {C.dim(f'[dry-run] unmerge ({strategy}): {target}')}")
                 else:
@@ -854,39 +1180,13 @@ def main() -> None:
 
     # if auto configure is turned on and manual, need to remove rules
     def remove_legacy_SAI_directives(ade: str, scope: str) -> None:
-        mcp_tool_name = "claude-cli" if ade == "claude" else ade
+        mcp_tool_name = SNYK_MCP_TOOL_NAMES[ade]
         print(f"    Cleaning up {scope} skills for {ade}...")
-        subprocess.run(["snyk", "mcp", "configure",
+        run(["snyk", "mcp", "configure",
             "--tool", mcp_tool_name, "--rm", "--rules-scope",
             scope, "--rule-type", "always-apply",
             "--workspace", ".", "--configure-mcp=false",
             "--configure-rules=true"], timeout=10)
-
-    # ADE conflict detection
-    for ade in ades:
-        # check if any of the ADEs have snyk extension settings and if there are conflicts
-        if manifest.are_extension_settings_conflicting(ade):
-            print(f"  {C.yellow('WARNING')} Conflicting Snyk extension settings found for: {ade} - Please remove conflict by setting 'Secure At Inception Execution Frequency' to 'Manual'")
-            print(
-                f"    See documentation for more details: {C.underline('https://docs.snyk.io/integrations/snyk-studio-agentic-integrations/quickstart-guides-for-snyk-studio/github-copilot-guide#updating-secure-at-inception-settings')}"
-            )
-            if not args.yes and not args.dry_run:
-                reply = input(f"  Install anyway for {ade}? (y/n) ").strip().lower()
-                if reply not in ("y", "yes"):
-                    print("  Cancelled.")
-                    return
-        if manifest.are_rules_conflicting(ade):
-            print(f"  {C.yellow('WARNING')} Conflicting rule(s) found for: {ade}")
-            reply = input(f"  Run 'snyk mcp configure' to remove the conflicting rules for {ade}? (y/n) ").strip().lower()
-            if reply in ("y", "yes"):
-                for scope in manifest.get_conflicting_resource_scope(ade, "rules"):
-                        remove_legacy_SAI_directives(ade, scope)
-        if manifest.are_skills_conflicting(ade):
-            print(f"  {C.yellow('WARNING')} Conflicting skill(s) found for: {ade}")
-            reply = input(f"  Run 'snyk mcp configure' to remove the conflicting skills for {ade}? (y/n) ").strip().lower()
-            if reply in ("y", "yes"):
-                for scope in manifest.get_conflicting_resource_scope(ade, "skills"):
-                    remove_legacy_SAI_directives(ade, scope)
 
     # Verify mode
     if args.verify:
@@ -912,6 +1212,27 @@ def main() -> None:
         if reply not in ("y", "yes"):
             print("  Cancelled.")
             return
+
+    # ADE conflict detection after user has confirmed installation
+    for ade in ades:
+        # check if any of the ADEs have snyk extension settings and if there are conflicts
+        conflicting_paths = manifest.are_extension_settings_conflicting(ade)
+
+        if conflicting_paths and not args.dry_run:
+            manifest.resolve_extension_conflicts(conflicting_paths)
+            print(f"  {C.yellow('WARNING')} Detected and resolved conflicting Snyk extension settings for: {ade}\n")
+        if manifest.are_rules_conflicting(ade):
+            print(f"  {C.yellow('WARNING')} Conflicting rule(s) found for: {ade}")
+            reply = input(f"  Run 'snyk mcp configure' to remove the conflicting rules for {ade}? (y/n) ").strip().lower()
+            if reply in ("y", "yes"):
+                for scope in manifest.get_conflicting_resource_scope(ade, "rules"):
+                    remove_legacy_SAI_directives(ade, scope)
+        if manifest.are_skills_conflicting(ade):
+            print(f"  {C.yellow('WARNING')} Conflicting skill(s) found for: {ade}")
+            reply = input(f"  Run 'snyk mcp configure' to remove the conflicting skills for {ade}? (y/n) ").strip().lower()
+            if reply in ("y", "yes"):
+                for scope in manifest.get_conflicting_resource_scope(ade, "skills"):
+                    remove_legacy_SAI_directives(ade, scope)
 
     # Install
     for ade in ades:

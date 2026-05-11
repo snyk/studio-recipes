@@ -9,6 +9,7 @@ import sys
 import tarfile
 import tempfile
 from pathlib import Path
+from typing import List
 
 
 # Embedded gzip-tar bundle (base64, line-wrapped). Filled in by build_installer.py.
@@ -17,6 +18,9 @@ __B64_BODY__
 """
 
 def main() -> int:
+    _ensure_uv_on_path()
+    ensure_uv(sys.argv[1:])
+
     workdir = Path(tempfile.mkdtemp(prefix="snyk-studio-install."))
     # Env key is a build-time placeholder; build_installer rewrites it to SNYK_STUDIO_BUNDLE_ROOT.
     os.environ["__BUNDLE_ENV__"] = str(workdir)
@@ -32,13 +36,120 @@ def main() -> int:
         if not installer.is_file():
             print(f"Error: missing {installer.name} in bundle.", file=sys.stderr)
             return 1
+        uv_exe = shutil.which("uv")
+        if not uv_exe:
+            print("Error: uv not found on PATH.", file=sys.stderr)
+            return 1
         proc = subprocess.run(
-            [sys.executable, str(installer), *sys.argv[1:]],
+            [uv_exe, "run", str(installer), *sys.argv[1:]],
             check=False,
         )
         return int(proc.returncode)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _ensure_uv_on_path() -> None:
+    """Prepend ~/.local/bin so a user-installed uv is visible (astral.sh default)."""
+    try:
+        home = Path.home()
+    except RuntimeError:
+        return
+    if not str(home):
+        return
+    local_bin = home / ".local" / "bin"
+    os.environ["PATH"] = f"{local_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+
+
+def _uv_version_line() -> str:
+    try:
+        r = subprocess.run(
+            ["uv", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if r.returncode == 0 and r.stdout:
+            return r.stdout.strip().splitlines()[0]
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return "present"
+
+
+def _bootstrap_uv_install() -> None:
+    if sys.platform == "win32":
+        ps = shutil.which("powershell") or shutil.which("pwsh")
+        if not ps:
+            print("  Error: need PowerShell to install uv on Windows.", file=sys.stderr)
+            sys.exit(1)
+        subprocess.run(
+            [
+                ps,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "Invoke-Expression (Invoke-RestMethod -Uri 'https://astral.sh/uv/install.ps1')",
+            ],
+            check=True,
+        )
+        return
+    if shutil.which("curl"):
+        subprocess.run(
+            ["sh", "-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"],
+            check=True,
+        )
+    elif shutil.which("wget"):
+        subprocess.run(
+            ["sh", "-c", "wget -qO- https://astral.sh/uv/install.sh | sh"],
+            check=True,
+        )
+    else:
+        print("  Error: need curl or wget to install uv.", file=sys.stderr)
+        sys.exit(1)
+
+
+def ensure_uv(argv: List[str]) -> None:
+    """Probe for uv; optionally install via official script (mirrors install.sh / install.ps1)."""
+    auto_yes = "-y" in argv or "--yes" in argv
+
+    if shutil.which("uv"):
+        print(f"  OK uv {_uv_version_line()}")
+        return
+
+    print("  WARNING uv not found", file=sys.stderr)
+    if sys.platform == "win32":
+        print("    Install with: irm https://astral.sh/uv/install.ps1 | iex", file=sys.stderr)
+    else:
+        print("    Install with: curl -LsSf https://astral.sh/uv/install.sh | sh", file=sys.stderr)
+
+    if not auto_yes:
+        try:
+            reply = (
+                input("\n  Install uv now? (y/n) ")
+                .strip()
+                .lower()
+                .replace(" ", "")
+            )
+        except EOFError:
+            reply = ""
+        if reply not in ("y", "yes"):
+            print("  Cancelled: uv is required to run this installer.", file=sys.stderr)
+            sys.exit(1)
+
+    try:
+        _bootstrap_uv_install()
+    except subprocess.CalledProcessError as e:
+        print(f"  Error: uv install failed (exit {e.returncode}).", file=sys.stderr)
+        sys.exit(1)
+
+    _ensure_uv_on_path()
+    if not shutil.which("uv"):
+        print(
+            "  Error: uv was installed but is not on PATH. Add ~/.local/bin to PATH and retry.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def _payload_b64_string() -> str:

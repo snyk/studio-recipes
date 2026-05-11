@@ -35,21 +35,21 @@ chmod +x .github/hooks/snyk_secure_at_inception.py
     "postToolUse": [
       {
         "type": "command",
-        "bash": "python3 .github/hooks/snyk_secure_at_inception.py",
+        "bash": "uv run .github/hooks/snyk_secure_at_inception.py",
         "timeoutSec": 10
       }
     ],
     "preToolUse": [
       {
         "type": "command",
-        "bash": "python3 .github/hooks/snyk_secure_at_inception.py",
+        "bash": "uv run .github/hooks/snyk_secure_at_inception.py",
         "timeoutSec": 30
       }
     ],
     "agentStop": [
       {
         "type": "command",
-        "bash": "python3 .github/hooks/snyk_secure_at_inception.py",
+        "bash": "uv run .github/hooks/snyk_secure_at_inception.py",
         "timeoutSec": 5
       }
     ]

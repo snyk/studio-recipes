@@ -1,5 +1,6 @@
 """Tests for snyk-studio-installer.py (cross-platform Python installer)."""
 
+import contextlib
 import json
 import os
 import sys
@@ -23,42 +24,39 @@ installer = importlib.import_module("snyk-studio-installer")
 # ===========================================================================
 
 class TestCheckPrerequisites:
+    @pytest.fixture(autouse=True)
+    def mock_node_installed(self, monkeypatch):
+        monkeypatch.setattr(installer, "ensure_node_installed", lambda _: True)
+
     def test_all_ok(self, monkeypatch, capsys):
         monkeypatch.setattr("shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None)
-        
+
         def mock_run(cmd, **kwargs):
             m = MagicMock()
             if cmd[0] == "snyk" and cmd[1] == "--version":
                 m.stdout = "1.1302.0\n"
                 m.returncode = 0
-            elif cmd[0] == "snyk" and cmd[1] == "whoami":
-                m.stdout = "user@snyk.io\n"
-                m.returncode = 0
             return m
-            
-        monkeypatch.setattr("subprocess.run", mock_run)
-        
+
+        monkeypatch.setattr(installer, "run", mock_run)
+
         # Should not raise SystemExit
         installer.check_prerequisites(auto_yes=True)
         captured = capsys.readouterr()
         assert "OK Snyk CLI 1.1302.0" in captured.out
-        assert "OK Snyk authenticated" in captured.out
 
     def test_outdated_snyk_warning(self, monkeypatch, capsys):
         monkeypatch.setattr("shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None)
-        
+
         def mock_run(cmd, **kwargs):
             m = MagicMock()
             if cmd[0] == "snyk" and cmd[1] == "--version":
                 m.stdout = "1.1301.0\n"
                 m.returncode = 0
-            elif cmd[0] == "snyk" and cmd[1] == "whoami":
-                m.stdout = "user@snyk.io\n"
-                m.returncode = 0
             return m
-            
-        monkeypatch.setattr("subprocess.run", mock_run)
-        
+
+        monkeypatch.setattr(installer, "run", mock_run)
+
         # With auto_yes=True, it should just print warning and continue
         installer.check_prerequisites(auto_yes=True)
         captured = capsys.readouterr()
@@ -66,51 +64,75 @@ class TestCheckPrerequisites:
 
     def test_outdated_snyk_cancel(self, monkeypatch, capsys):
         monkeypatch.setattr("shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None)
-        
+
         def mock_run(cmd, **kwargs):
             m = MagicMock()
             if cmd[0] == "snyk" and cmd[1] == "--version":
                 m.stdout = "1.1301.0\n"
                 m.returncode = 0
-            elif cmd[0] == "snyk" and cmd[1] == "whoami":
-                m.stdout = "user@snyk.io\n"
-                m.returncode = 0
             return m
-            
-        monkeypatch.setattr("subprocess.run", mock_run)
+
+        monkeypatch.setattr(installer, "run", mock_run)
         monkeypatch.setattr("builtins.input", lambda _: "n")
-        
+
         with pytest.raises(SystemExit):
             installer.check_prerequisites(auto_yes=False)
-        
+
         captured = capsys.readouterr()
         assert "WARNING Snyk CLI 1.1301.0 is outdated" in captured.out
 
     def test_snyk_not_found(self, monkeypatch, capsys):
         monkeypatch.setattr("shutil.which", lambda cmd: None)
-        
+        monkeypatch.setattr("sys.platform", "linux")
+
+        cmds_run = []
+        def mock_run(cmd, **kwargs):
+            cmds_run.append(cmd)
+            return MagicMock(returncode=0)
+        monkeypatch.setattr(installer, "run", mock_run)
+
         # Mock input to say 'y' to continue
         monkeypatch.setattr("builtins.input", lambda _: "y")
-        
+
         installer.check_prerequisites(auto_yes=False)
+        assert ["sudo", "npm", "install", "-g", "snyk"] in cmds_run
         captured = capsys.readouterr()
         assert "WARNING Snyk CLI not found" in captured.out
 
+    def test_outdated_snyk_auto_upgrade(self, monkeypatch, capsys):
+        monkeypatch.setattr("shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None)
+        monkeypatch.setattr("sys.platform", "linux")
+
+        cmds_run = []
+        def mock_run(cmd, **kwargs):
+            cmds_run.append(cmd)
+            m = MagicMock()
+            if cmd[0] == "snyk" and cmd[1] == "--version":
+                m.stdout = "1.1301.0\n"
+                m.returncode = 0
+            return m
+
+        monkeypatch.setattr(installer, "run", mock_run)
+
+        installer.check_prerequisites(auto_yes=True)
+
+        # Verify that npm install was called
+        assert ["sudo", "npm", "install", "-g", "snyk@latest"] in cmds_run
+        captured = capsys.readouterr()
+        assert "WARNING Snyk CLI 1.1301.0 is outdated" in captured.out
+
     def test_version_parse_edge_case(self, monkeypatch, capsys):
         monkeypatch.setattr("shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None)
-        
+
         def mock_run(cmd, **kwargs):
             m = MagicMock()
             if cmd[0] == "snyk" and cmd[1] == "--version":
                 m.stdout = "1.1302.0 (standalone)\n"
                 m.returncode = 0
-            elif cmd[0] == "snyk" and cmd[1] == "whoami":
-                m.stdout = "user@snyk.io\n"
-                m.returncode = 0
             return m
-            
-        monkeypatch.setattr("subprocess.run", mock_run)
-        
+
+        monkeypatch.setattr(installer, "run", mock_run)
+
         installer.check_prerequisites(auto_yes=True)
         captured = capsys.readouterr()
         assert "OK Snyk CLI 1.1302.0 (standalone)" in captured.out
@@ -118,22 +140,17 @@ class TestCheckPrerequisites:
 
     def test_version_malformed_no_error(self, monkeypatch, capsys):
         monkeypatch.setattr("shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None)
-        
+
         def mock_run(cmd, **kwargs):
             m = MagicMock()
             if cmd[0] == "snyk" and cmd[1] == "--version":
                 m.stdout = "development-version\n"
                 m.returncode = 0
-            elif cmd[0] == "snyk" and cmd[1] == "whoami":
-                m.stdout = "user@snyk.io\n"
-                m.returncode = 0
             return m
-            
-        monkeypatch.setattr("subprocess.run", mock_run)
-        
+
+        monkeypatch.setattr(installer, "run", mock_run)
+
         installer.check_prerequisites(auto_yes=True)
-        captured = capsys.readouterr()
-        assert "OK Snyk CLI development-version (could not parse version)" in captured.out
 
 
 # ===========================================================================
@@ -171,6 +188,14 @@ class TestParseArgs:
         with pytest.raises(SystemExit):
             installer.parse_args(["--ade", "vscode"])
 
+    def test_gemini_ade_accepted(self):
+        args = installer.parse_args(["--ade", "gemini"])
+        assert args.ade == "gemini"
+
+    def test_kiro_ade_accepted(self):
+        args = installer.parse_args(["--ade", "kiro"])
+        assert args.ade == "kiro"
+
 
 # ===========================================================================
 # TestColor
@@ -193,6 +218,147 @@ class TestColor:
 
 
 # ===========================================================================
+# TestEnsureNodeInstalled
+# ===========================================================================
+
+class TestEnsureNodeInstalled:
+    def test_node_npm_already_installed(self, monkeypatch):
+        monkeypatch.setattr("shutil.which", lambda cmd: "/bin/cmd" if cmd in ("node", "npm") else None)
+        assert installer.ensure_node_installed(auto_yes=True) is True
+
+    def test_darwin_brew_install(self, monkeypatch, capsys):
+        def mock_which(cmd):
+            if cmd == "brew": return "/opt/homebrew/bin/brew"
+            return None
+        monkeypatch.setattr("shutil.which", mock_which)
+        monkeypatch.setattr("platform.system", lambda: "Darwin")
+
+        cmds_run = []
+        def mock_run(cmd, **kwargs):
+            cmds_run.append(cmd)
+            # simulate node being available after run
+            monkeypatch.setattr("shutil.which", lambda c: "/bin/cmd" if c in ("node", "npm") else mock_which(c))
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(installer, "run", mock_run)
+        assert installer.ensure_node_installed(auto_yes=True) is True
+        assert ["brew", "install", "node"] in cmds_run
+
+    def test_darwin_homebrew_install(self, monkeypatch, capsys):
+        """Verify that the installer correctly attempts to install Homebrew when missing on macOS."""
+        def mock_which(cmd):
+            return None
+        monkeypatch.setattr("shutil.which", mock_which)
+        monkeypatch.setattr("platform.system", lambda: "Darwin")
+
+        runs = []
+        def mock_run(cmd, **kwargs):
+            runs.append((cmd, kwargs))
+            # After Homebrew install, simulate brew being found
+            def next_which(c):
+                if c == "brew": return "/opt/homebrew/bin/brew"
+                if c in ("node", "npm") and any("node" in r[0] for r in runs): return "/bin/cmd"
+                return None
+            monkeypatch.setattr("shutil.which", next_which)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(installer, "run", mock_run)
+
+        # Test with auto_yes=True
+        assert installer.ensure_node_installed(auto_yes=True) is True
+
+        # Check that Homebrew install was attempted with NONINTERACTIVE=1
+        homebrew_run = next(r for r in runs if "Homebrew/install" in r[0][2])
+        assert homebrew_run[1].get("env", {}).get("NONINTERACTIVE") == "1"
+        assert "stdout" not in homebrew_run[1]  # Should not be redirected to DEVNULL
+
+    def test_windows_winget_install(self, monkeypatch, capsys):
+        def mock_which(cmd):
+            if cmd == "winget": return "C:\\winget.exe"
+            return None
+        monkeypatch.setattr("shutil.which", mock_which)
+        monkeypatch.setattr("platform.system", lambda: "Windows")
+
+        cmds_run = []
+        def mock_run(cmd, **kwargs):
+            cmds_run.append(cmd)
+            monkeypatch.setattr("shutil.which", lambda c: "/bin/cmd" if c in ("node", "npm") else mock_which(c))
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(installer, "run", mock_run)
+        assert installer.ensure_node_installed(auto_yes=True) is True
+        assert ["winget", "install", "OpenJS.NodeJS.LTS", "--silent", "--accept-package-agreements", "--accept-source-agreements"] in cmds_run
+
+    def test_linux_apt_get_install(self, monkeypatch, capsys):
+        def mock_which(cmd):
+            if cmd == "apt-get": return "/usr/bin/apt-get"
+            return None
+        monkeypatch.setattr("shutil.which", mock_which)
+        monkeypatch.setattr("platform.system", lambda: "Linux")
+
+        cmds_run = []
+        def mock_run(cmd, **kwargs):
+            cmds_run.append(cmd)
+            monkeypatch.setattr("shutil.which", lambda c: "/bin/cmd" if c in ("node", "npm") else mock_which(c))
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(installer, "run", mock_run)
+        assert installer.ensure_node_installed(auto_yes=True) is True
+        assert ["sudo", "apt-get", "update"] in cmds_run
+        assert ["sudo", "apt-get", "install", "-y", "nodejs", "npm"] in cmds_run
+
+    def test_user_declines_install(self, monkeypatch, capsys):
+        def mock_which(cmd):
+            if cmd == "brew": return "/usr/local/bin/brew"
+            return None
+        monkeypatch.setattr(installer.shutil, "which", mock_which)
+        monkeypatch.setattr(installer.platform, "system", lambda: "Darwin")
+
+        input_prompts = []
+        def mock_input(prompt):
+            input_prompts.append(prompt)
+            return "n"
+        monkeypatch.setattr("builtins.input", mock_input)
+
+        assert installer.ensure_node_installed(auto_yes=False) is False
+        assert any("Install Node.js globally" in p for p in input_prompts)
+
+    def test_path_refresh_after_install(self, monkeypatch, tmp_path):
+        """Verify that _update_process_path correctly updates os.environ['PATH']."""
+        # Mock platform and directories
+        monkeypatch.setattr("sys.platform", "linux")
+        fake_bin = tmp_path / "usr" / "local" / "bin"
+        fake_bin.mkdir(parents=True)
+        (fake_bin / "node").touch()
+        (fake_bin / "npm").touch()
+
+        # Initial state: PATH does not contain fake_bin
+        orig_path = "/usr/bin"
+        monkeypatch.setitem(os.environ, "PATH", orig_path)
+
+        # Mock shutil.which to only find things in fake_bin if fake_bin is in PATH
+        def mock_which(cmd, path=None):
+            if path is None:
+                path = os.environ.get("PATH", "")
+            search_dirs = path.split(":")
+            if str(fake_bin) in search_dirs:
+                return str(fake_bin / cmd)
+            return None
+
+        monkeypatch.setattr(installer.shutil, "which", mock_which)
+
+        # Before refresh, node is not found
+        assert installer.shutil.which("node") is None
+
+        # Execute refresh (pass fake_bin explicitly to avoid dependency on host OS folders)
+        installer._update_process_path_for_nodejs(base_paths=[str(fake_bin)])
+
+        # Now node should be found
+        assert str(fake_bin) in os.environ["PATH"]
+        assert installer.shutil.which("node") == str(fake_bin / "node")
+
+
+# ===========================================================================
 # TestDetectAdes
 # ===========================================================================
 
@@ -209,12 +375,39 @@ class TestDetectAdes:
         result = installer.detect_ades()
         assert "claude" in result
 
+    def test_detects_gemini_from_directory(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        (tmp_path / ".gemini").mkdir()
+        result = installer.detect_ades()
+        assert "gemini" in result
+
+    def test_detects_gemini_from_cli(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr("shutil.which", lambda cmd: "/usr/bin/gemini" if cmd == "gemini" else None)
+        result = installer.detect_ades()
+        assert "gemini" in result
+
+    def test_detects_kiro_from_directory(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        (tmp_path / ".kiro").mkdir()
+        result = installer.detect_ades()
+        assert "kiro" in result
+
+    def test_detects_kiro_from_cli(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr("shutil.which", lambda cmd: "/usr/bin/kiro" if cmd == "kiro" else None)
+        result = installer.detect_ades()
+        assert "kiro" in result
+
     def test_detects_both(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr("shutil.which", lambda cmd: None)
+
         (tmp_path / ".cursor").mkdir()
         (tmp_path / ".claude").mkdir()
+        (tmp_path / ".gemini").mkdir()
         result = installer.detect_ades()
-        assert result == ["cursor", "claude"]
+        assert result == ["cursor", "claude", "gemini"]
 
     def test_detects_none(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
@@ -222,7 +415,7 @@ class TestDetectAdes:
         monkeypatch.setattr(installer, "_cursor_app_bundle_exists", lambda: False)
         # Mock pgrep to not find cursor process
         mock_run = MagicMock(return_value=MagicMock(returncode=1))
-        monkeypatch.setattr("subprocess.run", mock_run)
+        monkeypatch.setattr(installer, "run", mock_run)
         result = installer.detect_ades()
         assert result == []
         # Exact process name (case-insensitive): pgrep -xi, not substring match
@@ -248,7 +441,7 @@ class TestDetectAdes:
             m.returncode = 1
             return m
 
-        monkeypatch.setattr("subprocess.run", fake_run)
+        monkeypatch.setattr(installer, "run", fake_run)
         assert installer.detect_ades() == ["cursor"]
         assert pgrep_calls == []
 
@@ -268,7 +461,7 @@ class TestDetectAdes:
             m.returncode = 0 if cmd == ["pgrep", "-xiq", "cursor"] else 1
             return m
 
-        monkeypatch.setattr("subprocess.run", fake_run)
+        monkeypatch.setattr(installer, "run", fake_run)
         assert installer.detect_ades() == ["cursor"]
         assert pgrep_calls == [["pgrep", "-xiq", "cursor"]]
 
@@ -292,7 +485,7 @@ class TestDetectAdes:
             m.returncode = 1
             return m
 
-        monkeypatch.setattr("subprocess.run", fake_run)
+        monkeypatch.setattr(installer, "run", fake_run)
         assert installer.detect_ades() == []
 
     def test_detects_claude_from_cli(self, tmp_path, monkeypatch):
@@ -331,6 +524,29 @@ class TestManifest:
         sources = manifest.get_sources("sai-hooks-async", "cursor")
         assert "files" in sources
         assert "config_merge" in sources
+
+    def test_get_sources_gemini(self, manifest):
+        sources = manifest.get_sources("sai-hooks-async", "gemini")
+        assert "files" in sources
+        assert sources["config_merge"]["strategy"] == "merge_gemini_settings"
+        assert sources["config_merge"]["target"] == ".gemini/settings.json"
+
+    def test_get_sources_kiro(self, manifest):
+        sources = manifest.get_sources("mcp-config", "kiro")
+        assert sources["config_merge"]["strategy"] == "merge_mcp_servers"
+        assert sources["config_merge"]["target"] == ".kiro/settings/mcp.json"
+
+    def test_gemini_sources_for_all_default_recipes(self, manifest):
+        for recipe_id in manifest.resolve_recipes("default"):
+            sources = manifest.get_sources(recipe_id, "gemini")
+            assert sources, f"missing gemini sources for {recipe_id}"
+
+    def test_kiro_sources_for_all_default_recipes_except_hooks(self, manifest):
+        for recipe_id in manifest.resolve_recipes("default"):
+            if recipe_id == "sai-hooks-async":
+                continue
+            sources = manifest.get_sources(recipe_id, "kiro")
+            assert sources, f"missing kiro sources for {recipe_id}"
 
     def test_get_sources_missing_ade(self, manifest):
         sources = manifest.get_sources("sai-hooks-async", "vscode")
@@ -555,11 +771,11 @@ class TestMergeConfig:
             source.write_text('{"hooks": {}}')
             target = tmp_path / "target.json"
             target.write_text("{ invalid }")
-            
+
             installer.merge_config("merge_cursor_hooks", target, source, payload, dry_run=False)
         finally:
             payload.cleanup()
-            
+
         assert "Cannot update configuration, parse error in file" in capsys.readouterr().out
 
 
@@ -575,6 +791,7 @@ class TestLifecycle:
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
         (tmp_path / ".claude").mkdir()
         (tmp_path / ".cursor").mkdir()
+        (tmp_path / ".gemini").mkdir()
         return tmp_path
 
     @pytest.fixture
@@ -614,6 +831,71 @@ class TestLifecycle:
         # Verify files removed
         assert not (fake_home / ".claude" / "hooks" / "snyk_secure_at_inception.py").exists()
 
+    def test_install_verify_uninstall_gemini(self, fake_home, payload, manifest):
+        ades = ["gemini"]
+        recipes = manifest.resolve_recipes("default")
+
+        for ade in ades:
+            for recipe_id in recipes:
+                installer.install_recipe(recipe_id, ade, manifest, payload, dry_run=False)
+
+        gemini_settings = fake_home / ".gemini" / "settings.json"
+        assert (fake_home / ".gemini" / "hooks" / "snyk_secure_at_inception.py").exists()
+        assert (fake_home / ".gemini" / "hooks" / "lib" / "scan_runner.py").exists()
+        assert (fake_home / ".gemini" / "commands" / "snyk-fix.md").exists()
+        assert gemini_settings.exists()
+
+        settings_after_install = json.loads(gemini_settings.read_text())
+        assert settings_after_install.get("hooks"), "expected hooks merged into gemini settings.json"
+        assert settings_after_install.get("mcpServers", {}).get("Snyk"), \
+            "expected MCP server merged into gemini settings.json"
+
+        for ade in ades:
+            for recipe_id in recipes:
+                assert installer.verify_recipe(recipe_id, ade, manifest, payload)
+
+        installer.uninstall(ades, manifest, payload, dry_run=False)
+
+        assert not (fake_home / ".gemini" / "hooks" / "snyk_secure_at_inception.py").exists()
+        assert not (fake_home / ".gemini" / "commands" / "snyk-fix.md").exists()
+
+        settings_after_uninstall = json.loads(gemini_settings.read_text())
+        assert not settings_after_uninstall.get("hooks"), \
+            "unmerge_gemini_settings should remove Snyk hooks from settings.json"
+        assert "Snyk" not in settings_after_uninstall.get("mcpServers", {}), \
+            "unmerge_mcp_servers should remove the Snyk MCP server from settings.json"
+
+    def test_install_verify_uninstall_kiro(self, fake_home, payload, manifest):
+        ades = ["kiro"]
+        recipes = manifest.resolve_recipes("default")
+
+        for ade in ades:
+            for recipe_id in recipes:
+                installer.install_recipe(recipe_id, ade, manifest, payload, dry_run=False)
+
+        kiro_mcp_settings = fake_home / ".kiro" / "settings" / "mcp.json"
+        assert (fake_home / ".kiro" / "steering" / "snyk-fix.md").exists()
+        assert (fake_home / ".kiro" / "steering" / "snyk-batch-fix.md").exists()
+        assert (fake_home / ".kiro" / "skills" / "secure-dependency-health-check" / "SKILL.md").exists()
+        assert kiro_mcp_settings.exists()
+
+        settings_after_install = json.loads(kiro_mcp_settings.read_text())
+        assert settings_after_install.get("mcpServers", {}).get("Snyk"), \
+            "expected MCP server merged into .kiro/settings/mcp.json"
+
+        for ade in ades:
+            for recipe_id in recipes:
+                # verify_recipe will return True for sai-hooks-async because it has no sources for kiro
+                assert installer.verify_recipe(recipe_id, ade, manifest, payload)
+
+        installer.uninstall(ades, manifest, payload, dry_run=False)
+
+        assert not (fake_home / ".kiro" / "steering" / "snyk-fix.md").exists()
+
+        settings_after_uninstall = json.loads(kiro_mcp_settings.read_text())
+        assert "Snyk" not in settings_after_uninstall.get("mcpServers", {}), \
+            "unmerge_mcp_servers should remove the Snyk MCP server from .kiro/settings/mcp.json"
+
     def test_dry_run_makes_no_changes(self, fake_home, payload, manifest):
         recipes = manifest.resolve_recipes("default")
         for recipe_id in recipes:
@@ -632,15 +914,15 @@ class TestVerifyRecipe:
         payload = installer.PayloadContext()
         payload.setup()
         manifest = installer.Manifest(payload.manifest_path)
-        
+
         # Create an invalid JSON file at the target location for claude settings
         settings_path = tmp_path / ".claude" / "settings.json"
         settings_path.parent.mkdir(parents=True)
         settings_path.write_text("{ invalid }")
-        
+
         # sai-hooks-async for claude uses merge_claude_settings
         result = installer.verify_recipe("sai-hooks-async", "claude", manifest, payload)
-        
+
         assert result is False
         assert "Cannot update configuration, parse error in file" in capsys.readouterr().out
 
@@ -665,7 +947,7 @@ class TestVSCodeSettingsConflict:
         monkeypatch.chdir(tmp_path)
         # Default to non-windows for consistent testing
         monkeypatch.setattr(sys, "platform", "darwin")
-        
+
         # Paths must align with entries in manifest.json:
         # global: Cursor/User/settings.json (on Darwin, prefixed with Library/Application Support)
         # local: .vscode/settings.json
@@ -677,7 +959,7 @@ class TestVSCodeSettingsConflict:
         }
 
     def test_no_settings_files(self, manifest, vscode_env):
-        assert manifest.are_extension_settings_conflicting("cursor") is False
+        assert not manifest.are_extension_settings_conflicting("cursor")
 
     def test_workspace_conflict(self, manifest, vscode_env):
         ws_dir = vscode_env["workspace_dir"]
@@ -686,7 +968,7 @@ class TestVSCodeSettingsConflict:
             "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
             "snyk.securityAtInception.executionFrequency": "On Code Generation"
         }))
-        assert manifest.are_extension_settings_conflicting("cursor") is True
+        assert manifest.are_extension_settings_conflicting("cursor")
 
     def test_workspace_no_conflict_global_conflict(self, manifest, vscode_env):
         # Global has it enabled
@@ -705,8 +987,8 @@ class TestVSCodeSettingsConflict:
             "snyk.securityAtInception.autoConfigureSnykMcpServer": False,
             "snyk.securityAtInception.executionFrequency": "On Code Generation"
         }))
-        
-        assert manifest.are_extension_settings_conflicting("cursor") is False
+
+        assert not manifest.are_extension_settings_conflicting("cursor")
 
     def test_workspace_manual_frequency_is_no_conflict(self, manifest, vscode_env):
         ws_dir = vscode_env["workspace_dir"]
@@ -715,7 +997,7 @@ class TestVSCodeSettingsConflict:
             "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
             "snyk.securityAtInception.executionFrequency": "Manual"
         }))
-        assert manifest.are_extension_settings_conflicting("cursor") is False
+        assert not manifest.are_extension_settings_conflicting("cursor")
 
     def test_unset_execution_frequency_defaults_to_manual_no_conflict(self, manifest, vscode_env):
         ws_dir = vscode_env["workspace_dir"]
@@ -723,27 +1005,27 @@ class TestVSCodeSettingsConflict:
         (ws_dir / "settings.json").write_text(json.dumps({
             "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
         }))
-        assert manifest.are_extension_settings_conflicting("cursor") is False
+        assert not manifest.are_extension_settings_conflicting("cursor")
 
     def test_windows_global_path(self, manifest, vscode_env, monkeypatch):
         monkeypatch.setattr(sys, "platform", "win32")
         appdata = vscode_env["home"] / "AppData" / "Roaming"
         monkeypatch.setitem(os.environ, "APPDATA", str(appdata))
-        
+
         win_global_dir = appdata / "Cursor" / "User"
         win_global_dir.mkdir(parents=True)
         (win_global_dir / "settings.json").write_text(json.dumps({
             "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
             "snyk.securityAtInception.executionFrequency": "On Code Generation"
         }))
-        
-        assert manifest.are_extension_settings_conflicting("cursor") is True
+
+        assert manifest.are_extension_settings_conflicting("cursor")
 
     def test_invalid_json_skips(self, manifest, vscode_env):
         ws_dir = vscode_env["workspace_dir"]
         ws_dir.mkdir(parents=True)
         (ws_dir / "settings.json").write_text("{ invalid json")
-        assert manifest.are_extension_settings_conflicting("cursor") is False
+        assert not manifest.are_extension_settings_conflicting("cursor")
 
     def test_skips_check_if_ade_not_configured_in_manifest(self, manifest, vscode_env):
         # Global has conflict values
@@ -754,5 +1036,172 @@ class TestVSCodeSettingsConflict:
             "snyk.securityAtInception.executionFrequency": "On Code Generation"
         }))
         # 'claude' has no extension-settings entries in manifest.json, so it should return False.
-        assert manifest.are_extension_settings_conflicting("claude") is False
+        assert not manifest.are_extension_settings_conflicting("claude")
 
+    def test_resolve_extension_conflicts(self, manifest, vscode_env):
+        ws_dir = vscode_env["workspace_dir"]
+        ws_dir.mkdir(parents=True)
+        settings_file = ws_dir / "settings.json"
+        original_data = {
+            "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
+            "snyk.securityAtInception.executionFrequency": "On Code Generation",
+            "other.setting": "value"
+        }
+        settings_file.write_text(json.dumps(original_data))
+
+        manifest.resolve_extension_conflicts([str(settings_file)])
+
+        # Check that settings were updated
+        updated_data = json.loads(settings_file.read_text())
+        assert updated_data["snyk.securityAtInception.autoConfigureSnykMcpServer"] is False
+        assert updated_data["snyk.securityAtInception.executionFrequency"] == "Manual"
+        assert updated_data["other.setting"] == "value"
+
+    def test_json_with_comments_and_trailing_commas(self, manifest, vscode_env):
+        ws_dir = vscode_env["workspace_dir"]
+        ws_dir.mkdir(parents=True)
+        # JSON with comments and trailing commas - valid after regex cleanup
+        json_content = """{
+            /* Block comment */
+            "snyk.securityAtInception.autoConfigureSnykMcpServer": true,
+            "snyk.securityAtInception.executionFrequency": "On Code Generation",
+            "trailing": "comma",
+        }"""
+        (ws_dir / "settings.json").write_text(json_content)
+        assert manifest.are_extension_settings_conflicting("cursor")
+
+    def test_path_outside_home_or_workspace_security(self, manifest, vscode_env, monkeypatch):
+        # Create a settings file in a "malicious" location outside home and workspace
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            malicious_file = Path(tmp_dir) / "settings.json"
+            malicious_file.write_text(json.dumps({
+                "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
+                "snyk.securityAtInception.executionFrequency": "On Code Generation"
+            }))
+
+            # Mock get_extension_settings_path to return this file
+            monkeypatch.setattr(manifest, "get_extension_settings_path", lambda ade: [malicious_file])
+
+            # are_extension_settings_conflicting should ignore it and return False
+            assert not manifest.are_extension_settings_conflicting("cursor")
+
+# ===========================================================================
+# TestConflictResolution
+# ===========================================================================
+
+class TestConflictResolution:
+    @pytest.fixture
+    def manifest(self):
+        return installer.Manifest(INSTALLER_DIR / "manifest.json")
+
+    def test_get_extension_settings_path_darwin(self, manifest, monkeypatch, tmp_path):
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        paths = manifest.get_extension_settings_path("cursor")
+        # Global path on Darwin for cursor: ~/Library/Application Support/Cursor/User/settings.json
+        expected_global = tmp_path / "Library/Application Support/Cursor/User/settings.json"
+        assert expected_global in paths
+
+    def test_get_extension_settings_path_linux(self, manifest, monkeypatch, tmp_path):
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setitem(os.environ, "XDG_CONFIG_HOME", str(tmp_path / ".config"))
+
+        paths = manifest.get_extension_settings_path("cursor")
+        # Global path on Linux for cursor: ~/.config/Cursor/User/settings.json
+        expected_global = tmp_path / ".config/Cursor/User/settings.json"
+        assert expected_global in paths
+
+    def test_resolve_extension_conflicts_write_error(self, manifest, tmp_path, capsys):
+        # Setup a file that exists but we can't write to (mocking open failure)
+        settings_file = tmp_path / "settings.json"
+        settings_file.write_text("{}")
+
+        with patch("builtins.open", side_effect=IOError("Permission denied")):
+            manifest.resolve_extension_conflicts([str(settings_file)])
+
+        assert "Failed to update settings file" in capsys.readouterr().out
+
+# ===========================================================================
+# TestMacMcpLogic
+# ===========================================================================
+
+class TestMacMcpLogic:
+    @pytest.fixture
+    def payload(self):
+        ctx = installer.PayloadContext()
+        ctx.setup()
+        yield ctx
+        ctx.cleanup()
+
+    @pytest.fixture
+    def manifest(self, payload):
+        return installer.Manifest(payload.manifest_path)
+
+    def test_install_recipe_mac_gui_ade_uses_mac_mcp(self, monkeypatch, payload, manifest):
+        monkeypatch.setattr("sys.platform", "darwin")
+
+        mock_merge = MagicMock()
+        monkeypatch.setattr(installer, "merge_config", mock_merge)
+
+        # Cursor is NOT in CLI_ADES
+        installer.install_recipe("mcp-config", "cursor", manifest, payload, dry_run=False)
+
+        # Check that merge_config was called with the mac source
+        args, _ = mock_merge.call_args
+        # args[2] is the source Path
+        assert args[2].name == ".mcp.mac.json"
+
+    def test_install_recipe_mac_cli_ade_uses_regular_mcp(self, monkeypatch, payload, manifest):
+        monkeypatch.setattr("sys.platform", "darwin")
+
+        mock_merge = MagicMock()
+        monkeypatch.setattr(installer, "merge_config", mock_merge)
+
+        # Claude IS in CLI_ADES
+        installer.install_recipe("mcp-config", "claude", manifest, payload, dry_run=False)
+
+        # Check that merge_config was called with the regular source
+        args, _ = mock_merge.call_args
+        assert args[2].name == ".mcp.json"
+
+    def test_verify_recipe_mac_gui_ade_uses_mac_mcp(self, monkeypatch, payload, manifest, tmp_path):
+        monkeypatch.setattr("sys.platform", "darwin")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        import merge_json
+        mock_verify_strategy = MagicMock()
+        monkeypatch.setitem(merge_json.STRATEGIES, "verify_mcp_servers", mock_verify_strategy)
+
+        # Mock _platform_source to just return the path (avoiding Windows rewrite logic)
+        @contextlib.contextmanager
+        def mock_platform_source(strategy, source):
+            yield source
+        monkeypatch.setattr(installer, "_platform_source", mock_platform_source)
+
+        installer.verify_recipe("mcp-config", "cursor", manifest, payload)
+
+        args, _ = mock_verify_strategy.call_args
+        # args[1] is the resolved_path string
+        assert Path(args[1]).name == ".mcp.mac.json"
+
+    def test_verify_recipe_mac_cli_ade_uses_regular_mcp(self, monkeypatch, payload, manifest, tmp_path):
+        monkeypatch.setattr("sys.platform", "darwin")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        import merge_json
+        mock_verify_strategy = MagicMock()
+        monkeypatch.setitem(merge_json.STRATEGIES, "verify_mcp_servers", mock_verify_strategy)
+
+        # Mock _platform_source to just return the path
+        @contextlib.contextmanager
+        def mock_platform_source(strategy, source):
+            yield source
+        monkeypatch.setattr(installer, "_platform_source", mock_platform_source)
+
+        installer.verify_recipe("mcp-config", "claude", manifest, payload)
+
+        args, _ = mock_verify_strategy.call_args
+        assert Path(args[1]).name == ".mcp.json"

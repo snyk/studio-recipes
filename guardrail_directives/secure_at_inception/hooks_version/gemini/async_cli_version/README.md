@@ -46,7 +46,7 @@ chmod +x .gemini/hooks/snyk_secure_at_inception.py
           {
             "name": "snyk_secure_at_inception_session_start",
             "type": "command",
-            "command": "python3 $GEMINI_PROJECT_DIR/.gemini/hooks/snyk_secure_at_inception.py >> $GEMINI_PROJECT_DIR/.gemini/hooks/snyk_secure_at_inception.log",
+            "command": "uv run $GEMINI_PROJECT_DIR/.gemini/hooks/snyk_secure_at_inception.py >> $GEMINI_PROJECT_DIR/.gemini/hooks/snyk_secure_at_inception.log",
             "description": "Run initial scan on session start"
           }
         ]
@@ -59,7 +59,7 @@ chmod +x .gemini/hooks/snyk_secure_at_inception.py
           {
             "name": "snyk_secure_at_inception_after_tool_edit",
             "type": "command",
-            "command": "python3 $GEMINI_PROJECT_DIR/.gemini/hooks/snyk_secure_at_inception.py >> $GEMINI_PROJECT_DIR/.gemini/hooks/snyk_secure_at_inception.log",
+            "command": "uv run $GEMINI_PROJECT_DIR/.gemini/hooks/snyk_secure_at_inception.py >> $GEMINI_PROJECT_DIR/.gemini/hooks/snyk_secure_at_inception.log",
             "description": "Scans code changes for vulnerabilities using Snyk"
           }
         ]
@@ -72,7 +72,7 @@ chmod +x .gemini/hooks/snyk_secure_at_inception.py
           {
             "name": "snyk_secure_at_inception_after_agent",
             "type": "command",
-            "command": "python3 $GEMINI_PROJECT_DIR/.gemini/hooks/snyk_secure_at_inception.py >> $GEMINI_PROJECT_DIR/.gemini/hooks/snyk_secure_at_inception.log",
+            "command": "uv run $GEMINI_PROJECT_DIR/.gemini/hooks/snyk_secure_at_inception.py >> $GEMINI_PROJECT_DIR/.gemini/hooks/snyk_secure_at_inception.log",
             "description": "Scans code changes for vulnerabilities using Snyk",
             "timeout": 300000
           }
@@ -146,7 +146,7 @@ python3 -c "import hashlib,os,tempfile; h=hashlib.sha256(os.getcwd().encode()).h
 
 ## Windows Installation / Compatibility
 
-The hook scripts use a cross-platform `lib/platform_utils.py` module that handles OS differences automatically. The Python code works on Windows without modification. However, the **hook command** in `settings.json` and the **installation steps** need adjusting.
+The hook scripts use a cross-platform `lib/platform_utils.py` module that handles OS differences automatically. The Python code works on Windows without modification. However, the **hook commands** in `.gemini/settings.json` and the **installation steps** need adjusting for path style and `uv` on `PATH`.
 
 ### Installation on Windows
 
@@ -158,13 +158,13 @@ copy path\to\async_cli_version\snyk_secure_at_inception.py .gemini\hooks\
 copy path\to\async_cli_version\lib\*.py .gemini\hooks\lib\
 ```
 
-Note: `chmod +x` is not needed on Windows -- executability is determined by file extension.
+Note: `chmod +x` is not needed on Windows — executability is determined by file association.
 
-### Hook command in `settings.json`
+### Hook commands in `.gemini/settings.json`
 
-The Unix hook command uses `python3` and `$HOME`, which may not work on Windows. Use one of these alternatives depending on your Python installation:
+On Unix, examples use `uv run` with `$GEMINI_PROJECT_DIR` (install [uv](https://docs.astral.sh/uv/getting-started/installation/) and ensure it is on your `PATH`). On Windows, use `%GEMINI_PROJECT_DIR%` and backslashes for paths inside the command string, as below.
 
-**Option A -- Using `py` launcher (recommended, ships with Python for Windows):**
+**`uv run` on Windows (aligned with Snyk Studio installer output when paths are normalized):**
 
 ```json
 {
@@ -176,35 +176,7 @@ The Unix hook command uses `python3` and `$HOME`, which may not work on Windows.
           {
             "name": "snyk_secure_at_inception_session_start",
             "type": "command",
-            "command": "python3 $GEMINI_PROJECT_DIR/.gemini/hooks/snyk_secure_at_inception.py >> $GEMINI_PROJECT_DIR/.gemini/hooks/snyk_secure_at_inception.log",
-            "description": "Run initial scan on session start"
-          }
-        ]
-      }
-    ],
-    "AfterTool": [
-      {
-        "matcher": "write_file|replace",
-        "hooks": [
-          {
-            "name": "snyk_secure_at_inception_after_tool_edit",
-            "type": "command",
-            "command": "python3 $GEMINI_PROJECT_DIR/.gemini/hooks/snyk_secure_at_inception.py >> $GEMINI_PROJECT_DIR/.gemini/hooks/snyk_secure_at_inception.log",
-            "description": "Scans code changes for vulnerabilities using Snyk"
-          }
-        ]
-      }
-    ],
-    "AfterAgent": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "name": "snyk_secure_at_inception_after_agent",
-            "type": "command",
-            "command": "python3 $GEMINI_PROJECT_DIR/.gemini/hooks/snyk_secure_at_inception.py >> $GEMINI_PROJECT_DIR/.gemini/hooks/snyk_secure_at_inception.log",
-            "description": "Scans code changes for vulnerabilities using Snyk",
-            "timeout": 300000
+            "command": "uv run \"%GEMINI_PROJECT_DIR%\\.gemini\\hooks\\snyk_secure_at_inception.py\" >> \"%GEMINI_PROJECT_DIR%\\.gemini\\hooks\\snyk_secure_at_inception.log\""
           }
         ]
       }
@@ -213,10 +185,9 @@ The Unix hook command uses `python3` and `$HOME`, which may not work on Windows.
 }
 ```
 
-**Option B -- Using `python` directly (if `python` points to Python 3 on your PATH):**
+Repeat the same path pattern for **AfterTool** and **AfterAgent** hooks as in the Unix quick start.
 
-Replace `py -3` with `python` in the commands above.
-
+**Using `py -3` instead of `uv run`:** replace the `uv run` prefix with `py -3` if you are not using uv (keep the script path and redirect the same).
 
 ### Snyk CLI on Windows
 
@@ -228,3 +199,4 @@ The Snyk CLI can be installed via any of these methods:
 - **Standalone**: Download from [snyk.io/download](https://snyk.io/download)
 
 After installing, authenticate with `snyk auth`.
+

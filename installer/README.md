@@ -1,113 +1,118 @@
 # Snyk Studio Recipes — Installer
 
-Cross-platform installer that copies recipes from this repo into **your user home** so **Cursor**, **Claude Code**, **Gemini Code**, **Kiro**, **Windsurf**, **GitHub Copilot CLI**, and/or **GitHub Copilot in VS Code** can use them globally (hooks, commands, skills, MCP merge). Kiro, Windsurf, and Copilot install commands, skills, and MCP only — no SAI hooks. Copilot CLI does not yet support custom slash commands so only skills + MCP are installed there.
+One command to embed Snyk's [Secure at Inception](https://snyk.io/product/studio/) recipes into your AI coding assistant. The installer detects which assistants you have, installs any missing dependencies (Snyk CLI, Node.js, Python tooling), and merges hooks, slash commands, skills, and MCP configuration into each assistant's user directory.
 
+**Supported assistants:** Cursor • Claude Code • Gemini • Kiro • Windsurf • GitHub Copilot CLI • GitHub Copilot in VS Code
 
-| File | Platform | Role |
-|------|----------|------|
-| `build_installer.py` | — | Creates installers |
-| `dist/snyk-studio-install.sh` | macOS / Linux | Installs recipes |
-| `dist/snyk-studio-install.ps1` | Windows | Installs recipes |
-| `dist/snyk-studio-install.py` | macOS / Linux / Windows | Installs recipes |
-
-## What it installs
-
-Paths are resolved under `$HOME` for most ADEs (e.g. `~/.cursor/...`, `~/.claude/...`, `~/.gemini/...`, `~/.kiro/...`, `~/.codeium/windsurf/...`, `~/.copilot/...`). VS Code Copilot resolves under the platform-specific user dir: `~/Library/Application Support/Code/User/` (macOS), `~/.config/Code/User/` (Linux), `%APPDATA%\Code\User\` (Windows). The installer **detects** which ADEs you use or you can target one with `--ade`.
-
-| Recipe type (in manifest) | Typical outcome |
-|-----------------------------|-----------------|
-| **hooks** | Hook scripts + JSON merge into Cursor `hooks.json`, Claude `settings.json`, or Gemini `settings.json` (Kiro, Windsurf, and Copilot are not configured for hooks) |
-| **command** | Slash commands under `.cursor/commands/`, `.claude/commands/`, `.gemini/commands/`, `.kiro/steering/`, Windsurf global workflows under `.codeium/windsurf/global_workflows/`, or VS Code Copilot prompts under `<vscode-user>/prompts/<name>.prompt.md` (Copilot CLI does not support custom slash commands) |
-| **skill** | Cursor: skills under `.cursor/skills/snyk/...`; Kiro: skills under `.kiro/skills/...`; Windsurf: skills under `~/.agents/skills/<skill>/SKILL.md`; Copilot CLI: `~/.copilot/skills/<skill>/SKILL.md`; VS Code Copilot: `<vscode-user>/skills/<skill>/SKILL.md`; Claude / Gemini: transformed into a command `.md` |
-| **mcp** | Merge of Snyk MCP server entries into `~/.cursor/.mcp.json`, `~/.claude/.mcp.json`, `~/.gemini/settings.json`, `~/.kiro/settings/mcp.json`, `~/.codeium/windsurf/mcp_config.json`, `~/.copilot/mcp-config.json` (key `mcpServers`, `type: local`), or `<vscode-user>/mcp.json` (key `servers`, `type: stdio`). Source: `mcp/.mcp.json` in the repo. |
+---
 
 ## Prerequisites
 
-- **Python 3.8+** (for running `snyk-studio-installer.py` after the bundle is extracted; not required for the extract step itself)
-- **Snyk CLI** recommended (installer warns if missing; authenticate with `snyk auth` when you run scans)
+- A supported AI coding assistant
+- A [Snyk account](https://app.snyk.io)
 
-## Build the distributables
+The installer bootstraps everything else for you (`uv`, Python, Node.js, npm, the Snyk CLI), prompting before each install step.
 
-```bash
-cd installer
-python3 build_installer.py
-```
+---
 
-
-Rebuild after changing `manifest.json` or any packaged sources.
-
-## Run the installer
+## Install
 
 **macOS / Linux**
 
-```shell
-bash ./dist/snyk-studio-install.sh [options]
+```bash
+curl -fsSL 'https://raw.githubusercontent.com/snyk/studio-recipes/main/installer/dist/snyk-studio-install.sh' -o snyk-studio-install.sh
+bash ./snyk-studio-install.sh
 ```
 
 **Windows**
 
-```shell
-pwsh .\dist\snyk-studio-install.ps1 [options]
+```bat
+powershell -Command "Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/snyk/studio-recipes/main/installer/dist/snyk-studio-install.ps1' -OutFile snyk-studio-install.ps1"
+powershell -ExecutionPolicy Bypass -File .\snyk-studio-install.ps1
 ```
 
-**Develop from a git checkout** (no build)
+After install, the script automatically verifies that files landed correctly and merged config still contains the expected Snyk entries.
 
-```shell
-python3 snyk-studio-installer.py [options]
-```
+## Authenticate
 
-### Options
-
-| Option | Description |
-|--------|-------------|
-| `--profile <name>` | `default` or `minimal` |
-| `--ade <cursor\|claude\|gemini\|kiro\|windsurf\|copilot-cli\|copilot-vscode>` | Install only for one ADE (otherwise auto-detect / prompt) |
-| `--dry-run` | Show what would be installed without making changes |
-| `--uninstall` | Remove installed Snyk recipe artifacts from detected ADEs |
-| `--verify` | Check that installed files and merged configs match the manifest (read-only) |
-| `--list` | List recipes and profiles from the embedded manifest |
-| `-y`, `--yes` | Skip confirmation prompts |
-| `-h`, `--help` | Help |
-
-### Verification
-
-**`--verify`** re-checks the current **profile** and **ADE** selection (same flags as install). Exit code **1** if something is missing or drifted.
+Once installed, authenticate the Snyk CLI so the recipes can scan:
 
 ```bash
-bash ./dist/snyk-studio-install.sh --verify
+snyk auth
 ```
 
-Implementation: `lib/merge_json.py` (`verify_cursor_hooks`, `verify_claude_settings`, `verify_gemini_settings`, `verify_mcp_servers`, `verify_copilot_cli_mcp`, `verify_vscode_mcp`).
+For non-interactive setups (CI, containers, shared workstations), set the `SNYK_TOKEN` environment variable from your [Snyk account](https://app.snyk.io/account).
 
-### Profiles (current manifest)
+---
 
-| Profile | What gets selected |
-|---------|---------------------|
-| **default** | Secure-at-inception hooks, `/snyk-fix` + `/snyk-batch-fix` commands, secure dependency health check skill, MCP config |
-| **minimal** | Hooks + MCP only |
+## Profiles
 
-### Develop from a git checkout
+| Profile | What gets installed |
+|---|---|
+| **default** *(used if `--profile` is omitted)* | Secure at Inception guardrails, on-demand fix commands (`/snyk-fix`, `/snyk-batch-fix`), secure dependency health-check skill, and MCP configuration |
+| **minimal** | Secure at Inception guardrails and MCP configuration only |
 
-Run `python3 snyk-studio-installer.py` from this directory (payload is read from the repo: `manifest.json` and `lib/` beside the script; recipe sources are resolved from `../` relative to this folder’s parent). Run **`python3 build_installer.py`** when you want to refresh **`dist/`** self-extracting scripts.
+Choose with `--profile <name>`.
 
-## Repository layout (this folder)
+---
 
-| Path | Role |
-|------|------|
-| `manifest.json` | Declares recipes, files, merges, transforms, and profiles |
-| `snyk-studio-installer.py` | Core installer logic; copied into the bundle and run with `SNYK_STUDIO_BUNDLE_ROOT` after extraction |
-| `build_installer.py` | Builds `dist/snyk-studio-install.sh`, `dist/snyk-studio-install.ps1`, and `dist/snyk-studio-install.py` from the templates below |
-| `templates/install.sh.template` | Template for the macOS / Linux installer |
-| `templates/install.ps1.template` | Template for the Windows installer |
-| `templates/install.py.template` | Python installer kept for backwards compatibility |
-| `lib/merge_json.py` | JSON merge strategies (hooks, MCP, Claude / Gemini settings) |
-| `lib/transform.py` | e.g. skill → command, `.mdc` → `.md` |
-| `dist/` | Generated installers (not hand-edited); safe to delete and recreate with `build_installer.py` |
-| `tests/` | pytest suite (`pytest.ini` at repo root of this folder configures discovery) |
+## Common operations
 
-## Customization
+| Goal | Flag |
+|---|---|
+| Preview without writing files | `--dry-run` |
+| Install for one assistant only | `--ade <cursor\|claude\|gemini\|kiro\|windsurf\|copilot-cli\|copilot-vscode>` |
+| Skip confirmation prompts | `-y`, `--yes` |
+| Re-verify a previous install | `--verify` |
+| Remove what was installed | `--uninstall` |
+| List available recipes | `--list` |
 
-- Edit **`manifest.json`** to add/remove recipes, change profiles, or point at different sources.
-- Re-run **`python3 build_installer.py`** to refresh `dist/`.
+Examples:
 
-For behavior details (merge strategies, uninstall paths, ADE detection), see `snyk-studio-installer.py` and `lib/`.
+```bash
+# Install for whatever the installer detects, default profile, no prompts
+bash ./snyk-studio-install.sh -y
+
+# Cursor only, minimal profile
+bash ./snyk-studio-install.sh --ade cursor --profile minimal -y
+
+# Preview changes
+bash ./snyk-studio-install.sh --dry-run
+
+# Cleanly remove what was installed
+bash ./snyk-studio-install.sh --uninstall -y
+```
+
+---
+
+## Coverage by assistant
+
+The installer adapts each recipe to the assistant's native mechanism (slash commands, skills, hooks, MCP):
+
+| Assistant | Guardrails | Commands | Skills | MCP |
+|---|---|---|---|---|
+| Cursor | ✓ | ✓ | ✓ | ✓ |
+| Claude Code | ✓ | ✓ | ✓ | ✓ |
+| Gemini | ✓ | ✓ | ✓ | ✓ |
+| Kiro | — | ✓ | ✓ | ✓ |
+| Windsurf | — | ✓ | ✓ | ✓ |
+| GitHub Copilot in VS Code | — | ✓ | ✓ | ✓ |
+| GitHub Copilot CLI | — | — *(not yet supported by Copilot CLI)* | ✓ | ✓ |
+
+---
+
+## Building the installer
+
+Most teams should use the pre-built installer above. Build from source when you need to:
+
+- **Tailor the bundle to your organization** — pin a custom default profile, add internal recipes, or remove ones you don't need.
+- **Audit before deploying** — review the exact installer behavior, then ship the artifact you reviewed.
+- **Run in restricted environments** — produce an installer your team can host internally instead of pulling from `raw.githubusercontent.com`.
+
+See [`BUILDING.md`](BUILDING.md) for build instructions.
+
+---
+
+## Need help?
+
+Reach out to your Snyk account team, or open an issue in this repository.

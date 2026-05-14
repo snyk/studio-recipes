@@ -28,6 +28,7 @@ _IS_WINDOWS = sys.platform == "win32"
 # DETACHED SUBPROCESS CREATION
 # =============================================================================
 
+
 def get_detached_popen_kwargs() -> Dict[str, object]:
     """Return Popen kwargs for launching a detached background process."""
     if _IS_WINDOWS:
@@ -43,6 +44,7 @@ def get_detached_popen_kwargs() -> Dict[str, object]:
 # =============================================================================
 # PROCESS LIVENESS CHECK
 # =============================================================================
+
 
 def is_pid_alive(pid: int) -> bool:
     """Check whether a process with the given PID is still running."""
@@ -78,6 +80,7 @@ def _is_pid_alive_unix(pid: int) -> bool:
 # SNYK BINARY SEARCH PATHS
 # =============================================================================
 
+
 def get_snyk_search_paths(env: Dict[str, str]) -> List[str]:
     """Return candidate directories where the Snyk CLI binary may reside."""
     if _IS_WINDOWS:
@@ -92,9 +95,7 @@ def _get_snyk_search_paths_windows(env: Dict[str, str]) -> List[str]:
     appdata = env.get("APPDATA", os.environ.get("APPDATA", ""))
     if appdata:
         nvm_root = os.path.join(appdata, "nvm")
-        candidates.extend(
-            sorted(glob.glob(os.path.join(nvm_root, "v*")), reverse=True)
-        )
+        candidates.extend(sorted(glob.glob(os.path.join(nvm_root, "v*")), reverse=True))
         # npm global bin
         candidates.append(os.path.join(appdata, "npm"))
 
@@ -145,6 +146,7 @@ def _get_snyk_search_paths_unix(env: Dict[str, str]) -> List[str]:
 # SNYK BINARY NAMES
 # =============================================================================
 
+
 def get_snyk_binary_names() -> List[str]:
     """Return the possible filenames for the Snyk CLI."""
     return ["snyk.cmd", "snyk.exe", "snyk"]
@@ -153,6 +155,7 @@ def get_snyk_binary_names() -> List[str]:
 # =============================================================================
 # FILE LOCKING
 # =============================================================================
+
 
 @contextmanager
 def file_lock(lock_path: str):
@@ -202,6 +205,7 @@ def _file_lock_unix(lock_path: str):
 # =============================================================================
 # PATH NORMALIZATION
 # =============================================================================
+
 
 def normalize_path(path: str) -> str:
     """Normalize a file path for cross-platform comparison.

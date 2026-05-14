@@ -25,7 +25,6 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
@@ -39,6 +38,7 @@ PID_STALENESS_TIMEOUT = 600
 # =============================================================================
 # CACHE DIRECTORY MANAGEMENT
 # =============================================================================
+
 
 def get_cache_dir(workspace: str) -> str:
     workspace_hash = hashlib.sha256(workspace.encode()).hexdigest()[:8]
@@ -54,6 +54,7 @@ def ensure_cache_dirs(workspace: str) -> str:
 # =============================================================================
 # SCAN STATE MANAGEMENT
 # =============================================================================
+
 
 def get_scan_pid_file(workspace: str) -> str:
     return os.path.join(get_cache_dir(workspace), "scan.pid")
@@ -77,7 +78,7 @@ def is_scan_running(workspace: str) -> bool:
         pass
 
     try:
-        with open(pid_file, "r") as f:
+        with open(pid_file) as f:
             pid = int(f.read().strip())
         os.kill(pid, 0)
         return True
@@ -102,6 +103,7 @@ def _cleanup_pid_file(workspace: str) -> None:
 # =============================================================================
 # SARIF PARSING
 # =============================================================================
+
 
 def parse_sarif_results(json_output: str) -> List[Dict[str, Any]]:
     """Parse Snyk Code SARIF JSON output into a list of vulnerability dicts."""
@@ -140,16 +142,18 @@ def parse_sarif_results(json_output: str) -> List[Dict[str, Any]]:
                 artifact = phys_loc.get("artifactLocation", {})
                 region = phys_loc.get("region", {})
 
-                vulnerabilities.append({
-                    "id": rule_id,
-                    "title": rule_id.replace("/", " - ").replace("_", " ").title(),
-                    "severity": severity,
-                    "cwe": cwe,
-                    "file_path": artifact.get("uri", "unknown"),
-                    "start_line": region.get("startLine", 0),
-                    "end_line": region.get("endLine", region.get("startLine", 0)),
-                    "message": message,
-                })
+                vulnerabilities.append(
+                    {
+                        "id": rule_id,
+                        "title": rule_id.replace("/", " - ").replace("_", " ").title(),
+                        "severity": severity,
+                        "cwe": cwe,
+                        "file_path": artifact.get("uri", "unknown"),
+                        "start_line": region.get("startLine", 0),
+                        "end_line": region.get("endLine", region.get("startLine", 0)),
+                        "message": message,
+                    }
+                )
 
     return vulnerabilities
 
@@ -157,6 +161,7 @@ def parse_sarif_results(json_output: str) -> List[Dict[str, Any]]:
 # =============================================================================
 # PATH RESOLUTION
 # =============================================================================
+
 
 def _augment_path_for_snyk(env: Dict[str, str]) -> None:
     """Ensure the snyk binary is discoverable on PATH.
@@ -191,6 +196,7 @@ def _augment_path_for_snyk(env: Dict[str, str]) -> None:
 # AUTH TOKEN RESOLUTION
 # =============================================================================
 
+
 def _ensure_snyk_token(env: Dict[str, str]) -> None:
     """Inject SNYK_TOKEN into env from the Snyk CLI config file if available.
 
@@ -202,23 +208,22 @@ def _ensure_snyk_token(env: Dict[str, str]) -> None:
     if env.get("SNYK_TOKEN"):
         return
 
-    config_dir = os.environ.get(
-        "XDG_CONFIG_HOME", os.path.expanduser("~/.config")
-    )
+    config_dir = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
     config_path = os.path.join(config_dir, "configstore", "snyk.json")
     try:
-        with open(config_path, "r") as f:
+        with open(config_path) as f:
             config = json.load(f)
         api_key = config.get("api")
         if api_key and isinstance(api_key, str):
             env["SNYK_TOKEN"] = api_key
-    except (json.JSONDecodeError, IOError, FileNotFoundError):
+    except (OSError, json.JSONDecodeError, FileNotFoundError):
         pass
 
 
 # =============================================================================
 # BACKGROUND SCAN LAUNCHER
 # =============================================================================
+
 
 def launch_background_scan(workspace: str) -> bool:
     """Launch a background Snyk code scan as a detached subprocess.
@@ -261,13 +266,14 @@ def launch_background_scan(workspace: str) -> bool:
 # SCAN COMPLETION
 # =============================================================================
 
+
 def _read_scan_status(workspace: str) -> Optional[str]:
     done_file = get_scan_done_file(workspace)
     try:
-        with open(done_file, "r") as f:
+        with open(done_file) as f:
             data = json.load(f)
         return data.get("status", "unknown")
-    except (json.JSONDecodeError, IOError, FileNotFoundError):
+    except (OSError, json.JSONDecodeError, FileNotFoundError):
         return None
 
 
@@ -275,19 +281,19 @@ def get_scan_completion_info(workspace: str) -> Optional[Dict[str, Any]]:
     """Read the full scan.done record (status, started_at, vulnerabilities)."""
     done_file = get_scan_done_file(workspace)
     try:
-        with open(done_file, "r") as f:
+        with open(done_file) as f:
             return json.load(f)
-    except (json.JSONDecodeError, IOError, FileNotFoundError):
+    except (OSError, json.JSONDecodeError, FileNotFoundError):
         return None
 
 
-def wait_for_scan(
-    workspace: str, timeout: float = SCAN_WAIT_TIMEOUT, log_fn=None
-) -> Optional[str]:
+def wait_for_scan(workspace: str, timeout: float = SCAN_WAIT_TIMEOUT, log_fn=None) -> Optional[str]:
     """Wait for a background scan to complete. Returns the status string
     or None if the wait timed out."""
     if log_fn is None:
-        log_fn = lambda msg: None
+
+        def log_fn(msg: object) -> None:
+            pass
 
     if is_scan_complete(workspace):
         return _read_scan_status(workspace)

@@ -57,14 +57,13 @@ COMPATIBILITY:
 - Python 3.8+
 """
 
-import sys
+import hashlib
 import json
 import os
-import hashlib
+import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List
-
+from typing import Any, Dict, List
 
 # =============================================================================
 # CONFIGURATION
@@ -76,50 +75,79 @@ DEBUG = os.environ.get("CURSOR_HOOK_DEBUG", "0") == "1"
 
 # SAST-scannable code file extensions (Snyk Code supported languages)
 CODE_EXTENSIONS = {
-    '.js', '.jsx', '.mjs', '.cjs',       # JavaScript
-    '.ts', '.tsx',                         # TypeScript
-    '.py',                                 # Python
-    '.java',                               # Java
-    '.kt', '.kts',                         # Kotlin
-    '.go',                                 # Go
-    '.rb',                                 # Ruby
-    '.php',                                # PHP
-    '.cs',                                 # C#
-    '.vb',                                 # VB.NET
-    '.swift',                              # Swift
-    '.m', '.mm',                           # Objective-C
-    '.scala',                              # Scala
-    '.rs',                                 # Rust
-    '.c', '.cpp', '.cc', '.h', '.hpp',    # C/C++
-    '.cls', '.trigger',                    # Apex
-    '.ex', '.exs',                         # Elixir
-    '.groovy',                             # Groovy
-    '.dart',                               # Dart
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".cjs",  # JavaScript
+    ".ts",
+    ".tsx",  # TypeScript
+    ".py",  # Python
+    ".java",  # Java
+    ".kt",
+    ".kts",  # Kotlin
+    ".go",  # Go
+    ".rb",  # Ruby
+    ".php",  # PHP
+    ".cs",  # C#
+    ".vb",  # VB.NET
+    ".swift",  # Swift
+    ".m",
+    ".mm",  # Objective-C
+    ".scala",  # Scala
+    ".rs",  # Rust
+    ".c",
+    ".cpp",
+    ".cc",
+    ".h",
+    ".hpp",  # C/C++
+    ".cls",
+    ".trigger",  # Apex
+    ".ex",
+    ".exs",  # Elixir
+    ".groovy",  # Groovy
+    ".dart",  # Dart
 }
 
 # SCA manifest and lock files (Snyk Open Source supported ecosystems)
 MANIFEST_FILES = {
-    'package.json', 'package-lock.json', 'npm-shrinkwrap.json',  # npm
-    'yarn.lock',                                                   # Yarn
-    'pnpm-lock.yaml',                                              # pnpm
-    'requirements.txt', 'setup.py', 'pyproject.toml',             # pip/Poetry
-    'Pipfile', 'Pipfile.lock', 'poetry.lock',                     # Pipenv/Poetry
-    'pom.xml',                                                     # Maven
-    'build.gradle', 'build.gradle.kts', 'gradle.lockfile',        # Gradle
-    'Gemfile', 'Gemfile.lock',                                     # RubyGems
-    'go.mod', 'go.sum',                                            # Go modules
-    'Cargo.toml', 'Cargo.lock',                                   # Cargo/Rust
-    'packages.config', 'packages.lock.json',                       # NuGet
-    'composer.json', 'composer.lock',                              # Composer/PHP
-    'Podfile', 'Podfile.lock',                                    # CocoaPods
-    'Package.swift', 'Package.resolved',                           # Swift PM
-    'mix.exs', 'mix.lock',                                        # Hex/Elixir
-    'pubspec.yaml', 'pubspec.lock',                                # Pub/Dart
+    "package.json",
+    "package-lock.json",
+    "npm-shrinkwrap.json",  # npm
+    "yarn.lock",  # Yarn
+    "pnpm-lock.yaml",  # pnpm
+    "requirements.txt",
+    "setup.py",
+    "pyproject.toml",  # pip/Poetry
+    "Pipfile",
+    "Pipfile.lock",
+    "poetry.lock",  # Pipenv/Poetry
+    "pom.xml",  # Maven
+    "build.gradle",
+    "build.gradle.kts",
+    "gradle.lockfile",  # Gradle
+    "Gemfile",
+    "Gemfile.lock",  # RubyGems
+    "go.mod",
+    "go.sum",  # Go modules
+    "Cargo.toml",
+    "Cargo.lock",  # Cargo/Rust
+    "packages.config",
+    "packages.lock.json",  # NuGet
+    "composer.json",
+    "composer.lock",  # Composer/PHP
+    "Podfile",
+    "Podfile.lock",  # CocoaPods
+    "Package.swift",
+    "Package.resolved",  # Swift PM
+    "mix.exs",
+    "mix.lock",  # Hex/Elixir
+    "pubspec.yaml",
+    "pubspec.lock",  # Pub/Dart
 }
 
 # File suffixes that indicate SCA manifest files (for patterns like *.csproj)
 MANIFEST_SUFFIXES = {
-    '.csproj',   # NuGet / .NET
+    ".csproj",  # NuGet / .NET
 }
 
 # MCP tool names for clearing state
@@ -130,6 +158,7 @@ SCA_SCAN_TOOL = "snyk_sca_scan"
 # =============================================================================
 # UTILITY FUNCTIONS
 # =============================================================================
+
 
 def debug_log(message: str) -> None:
     """Print debug message to stderr if DEBUG is enabled."""
@@ -186,9 +215,9 @@ def read_state(workspace: str) -> Dict[str, Any]:
     state_file = get_state_file_path(workspace)
     try:
         if os.path.exists(state_file):
-            with open(state_file, "r") as f:
+            with open(state_file) as f:
                 return json.load(f)
-    except (json.JSONDecodeError, IOError):
+    except (OSError, json.JSONDecodeError):
         pass
     return {"code_files": [], "manifest_files": [], "last_update": None}
 
@@ -228,6 +257,7 @@ def log_to_panel(message: str) -> None:
 # =============================================================================
 # HOOK HANDLERS
 # =============================================================================
+
 
 def handle_after_file_edit(data: Dict[str, Any], workspace: str) -> None:
     """
@@ -386,6 +416,7 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
 # =============================================================================
 # MAIN ENTRY POINT
 # =============================================================================
+
 
 def main() -> None:
     """

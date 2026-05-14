@@ -3,8 +3,7 @@
 import json
 import os
 
-import pytest
-
+from helpers import read_json
 from merge_json import (
     main,
     merge_claude_settings,
@@ -14,8 +13,6 @@ from merge_json import (
     unmerge_cursor_hooks,
     unmerge_mcp_servers,
 )
-
-from helpers import read_json
 
 
 class TestCursorHooksLifecycle:
@@ -44,7 +41,7 @@ class TestCursorHooksLifecycle:
 
 class TestClaudeSettingsLifecycle:
     def test_full_lifecycle(self, existing_claude_target, snyk_claude_source):
-        original = read_json(existing_claude_target)
+        read_json(existing_claude_target)
 
         # 1. Merge snyk into target with existing prettier hooks
         merge_claude_settings(existing_claude_target, snyk_claude_source)
@@ -139,9 +136,7 @@ class TestAllStrategiesFreshFiles:
 
 
 class TestBackupChain:
-    def test_backup_reflects_state_before_each_merge(
-        self, tmp_path, snyk_mcp_source
-    ):
+    def test_backup_reflects_state_before_each_merge(self, tmp_path, snyk_mcp_source):
         target = str(tmp_path / "mcp.json")
 
         # First merge — no target existed, so no .bak
@@ -161,9 +156,7 @@ class TestBackupChain:
 
 
 class TestCliRoundTrip:
-    def test_main_merge_then_unmerge(
-        self, monkeypatch, tmp_path, snyk_mcp_source
-    ):
+    def test_main_merge_then_unmerge(self, monkeypatch, tmp_path, snyk_mcp_source):
         target = str(tmp_path / "mcp.json")
 
         # Merge via CLI

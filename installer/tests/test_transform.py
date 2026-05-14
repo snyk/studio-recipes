@@ -3,7 +3,6 @@
 import os
 
 import pytest
-
 from transform import main, mdc_to_md, skill_to_command, strip_frontmatter
 
 
@@ -51,9 +50,7 @@ class TestTransformMain:
         src = tmp_path / "input.md"
         src.write_text("---\nfoo: bar\n---\nBody")
         dest = str(tmp_path / "output.md")
-        monkeypatch.setattr(
-            "sys.argv", ["transform.py", "mdc_to_md", str(src), dest]
-        )
+        monkeypatch.setattr("sys.argv", ["transform.py", "mdc_to_md", str(src), dest])
         main()
         assert open(dest).read() == "Body"
 

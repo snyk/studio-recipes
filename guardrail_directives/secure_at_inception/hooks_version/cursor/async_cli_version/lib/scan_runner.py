@@ -32,7 +32,6 @@ from platform_utils import (
     is_pid_alive,
 )
 
-
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
@@ -46,6 +45,7 @@ PID_STALENESS_TIMEOUT = 600
 # =============================================================================
 # CACHE DIRECTORY MANAGEMENT
 # =============================================================================
+
 
 def get_cache_dir(workspace: str) -> str:
     workspace_hash = hashlib.sha256(workspace.encode()).hexdigest()[:8]
@@ -61,6 +61,7 @@ def ensure_cache_dirs(workspace: str) -> str:
 # =============================================================================
 # SARIF PARSING
 # =============================================================================
+
 
 def parse_sarif_results(json_output: str) -> List[Dict[str, Any]]:
     """Parse Snyk Code SARIF JSON output into a list of vulnerability dicts."""
@@ -99,16 +100,18 @@ def parse_sarif_results(json_output: str) -> List[Dict[str, Any]]:
                 artifact = phys_loc.get("artifactLocation", {})
                 region = phys_loc.get("region", {})
 
-                vulnerabilities.append({
-                    "id": rule_id,
-                    "title": rule_id.replace("/", " - ").replace("_", " ").title(),
-                    "severity": severity,
-                    "cwe": cwe,
-                    "file_path": artifact.get("uri", "unknown"),
-                    "start_line": region.get("startLine", 0),
-                    "end_line": region.get("endLine", region.get("startLine", 0)),
-                    "message": message,
-                })
+                vulnerabilities.append(
+                    {
+                        "id": rule_id,
+                        "title": rule_id.replace("/", " - ").replace("_", " ").title(),
+                        "severity": severity,
+                        "cwe": cwe,
+                        "file_path": artifact.get("uri", "unknown"),
+                        "start_line": region.get("startLine", 0),
+                        "end_line": region.get("endLine", region.get("startLine", 0)),
+                        "message": message,
+                    }
+                )
 
     return vulnerabilities
 
@@ -116,6 +119,7 @@ def parse_sarif_results(json_output: str) -> List[Dict[str, Any]]:
 # =============================================================================
 # PATH RESOLUTION
 # =============================================================================
+
 
 def _augment_path_for_snyk(env: Dict[str, str]) -> None:
     """Ensure the snyk binary is discoverable on PATH.
@@ -140,9 +144,7 @@ def _augment_path_for_snyk(env: Dict[str, str]) -> None:
 # AUTH TOKEN RESOLUTION
 # =============================================================================
 
-_SNYK_CONFIG_PATH = os.path.join(
-    os.path.expanduser("~"), ".config", "configstore", "snyk.json"
-)
+_SNYK_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".config", "configstore", "snyk.json")
 
 
 def _get_snyk_config_path() -> str:
@@ -167,14 +169,14 @@ def check_snyk_auth() -> Optional[str]:
         return token
 
     try:
-        with open(_get_snyk_config_path(), "r") as f:
+        with open(_get_snyk_config_path()) as f:
             config = json.load(f)
         api_key = config.get("api")
         if api_key and isinstance(api_key, str):
             return api_key
         if config.get("INTERNAL_OAUTH_TOKEN_STORAGE"):
             return "__oauth__"
-    except (json.JSONDecodeError, IOError, FileNotFoundError):
+    except (OSError, json.JSONDecodeError, FileNotFoundError):
         pass
 
     return None
@@ -231,18 +233,19 @@ def _ensure_snyk_token(env: Dict[str, str]) -> None:
         return
 
     try:
-        with open(_get_snyk_config_path(), "r") as f:
+        with open(_get_snyk_config_path()) as f:
             config = json.load(f)
         api_key = config.get("api")
         if api_key and isinstance(api_key, str):
             env["SNYK_TOKEN"] = api_key
-    except (json.JSONDecodeError, IOError, FileNotFoundError):
+    except (OSError, json.JSONDecodeError, FileNotFoundError):
         pass
 
 
 # =============================================================================
 # SCAN CHANNEL
 # =============================================================================
+
 
 class _ScanChannel:
     """Generic background scan channel (SAST or SCA).
@@ -296,7 +299,7 @@ class _ScanChannel:
             pass
 
         try:
-            with open(pid_file, "r") as f:
+            with open(pid_file) as f:
                 pid = int(f.read().strip())
             if is_pid_alive(pid):
                 return True
@@ -314,9 +317,9 @@ class _ScanChannel:
     def get_completion_info(self, workspace: str) -> Optional[Dict[str, Any]]:
         """Read the full done-file record (status, started_at, vulnerabilities)."""
         try:
-            with open(self.done_file(workspace), "r") as f:
+            with open(self.done_file(workspace)) as f:
                 return json.load(f)
-        except (json.JSONDecodeError, IOError, FileNotFoundError):
+        except (OSError, json.JSONDecodeError, FileNotFoundError):
             return None
 
     def _read_status(self, workspace: str) -> Optional[str]:
@@ -342,6 +345,7 @@ _sca = _ScanChannel("sca_scan.pid", "sca_scan.done", "sca_scan_worker.py", "SCA 
 # =============================================================================
 # LAUNCH / WAIT HELPERS (module-level so patches on public API functions apply)
 # =============================================================================
+
 
 def _do_launch(
     workspace: str,
@@ -391,8 +395,10 @@ def _do_wait(
     log_fn,
 ) -> Optional[str]:
     """Poll until the scan completes, times out, or the process dies."""
+
     def _noop(_msg: str) -> None:
         pass
+
     if log_fn is None:
         log_fn = _noop
 
@@ -432,6 +438,7 @@ def _do_wait(
 # SCAN STATE MANAGEMENT — public API (SAST)
 # =============================================================================
 
+
 def get_scan_pid_file(workspace: str) -> str:
     return _sast.pid_file(workspace)
 
@@ -469,14 +476,18 @@ def _read_scan_status(workspace: str) -> Optional[str]:
     return _sast._read_status(workspace)
 
 
-def wait_for_scan(
-    workspace: str, timeout: float = SCAN_WAIT_TIMEOUT, log_fn=None
-) -> Optional[str]:
+def wait_for_scan(workspace: str, timeout: float = SCAN_WAIT_TIMEOUT, log_fn=None) -> Optional[str]:
     """Wait for a background scan to complete. Returns the status string
     or None if the wait timed out."""
     return _do_wait(
-        workspace, is_scan_complete, is_scan_running, launch_background_scan,
-        _read_scan_status, "scan", timeout, log_fn,
+        workspace,
+        is_scan_complete,
+        is_scan_running,
+        launch_background_scan,
+        _read_scan_status,
+        "scan",
+        timeout,
+        log_fn,
     )
 
 
@@ -488,6 +499,7 @@ def clear_scan_state(workspace: str) -> None:
 # =============================================================================
 # SCAN STATE MANAGEMENT — public API (SCA)
 # =============================================================================
+
 
 def get_sca_pid_file(workspace: str) -> str:
     return _sca.pid_file(workspace)
@@ -532,8 +544,14 @@ def wait_for_sca_scan(
     """Wait for a background SCA scan to complete. Returns the status string
     or None if the wait timed out."""
     return _do_wait(
-        workspace, is_sca_scan_complete, is_sca_scan_running, launch_background_sca_scan,
-        _read_sca_scan_status, "SCA scan", timeout, log_fn,
+        workspace,
+        is_sca_scan_complete,
+        is_sca_scan_running,
+        launch_background_sca_scan,
+        _read_sca_scan_status,
+        "SCA scan",
+        timeout,
+        log_fn,
     )
 
 
@@ -546,12 +564,24 @@ def clear_sca_scan_state(workspace: str) -> None:
 # MANIFEST HASH UTILITIES
 # =============================================================================
 
-_MANIFEST_EXCLUSION_DIRS = frozenset({
-    'node_modules', '.git', '.venv', '__pycache__',
-    'target', 'vendor', '.gradle', 'build',
-    'dist', '.tox', '.eggs', '.mypy_cache',
-    '.ruff_cache', 'pytest_cache',
-})
+_MANIFEST_EXCLUSION_DIRS = frozenset(
+    {
+        "node_modules",
+        ".git",
+        ".venv",
+        "__pycache__",
+        "target",
+        "vendor",
+        ".gradle",
+        "build",
+        "dist",
+        ".tox",
+        ".eggs",
+        ".mypy_cache",
+        ".ruff_cache",
+        "pytest_cache",
+    }
+)
 
 
 def snapshot_manifest_hashes(
@@ -567,10 +597,10 @@ def snapshot_manifest_hashes(
             if filename in manifest_files or Path(filename).suffix.lower() in manifest_suffixes:
                 abs_path = os.path.join(dirpath, filename)
                 try:
-                    with open(abs_path, 'rb') as f:
+                    with open(abs_path, "rb") as f:
                         digest = hashlib.sha256(f.read()).hexdigest()
                     hashes[abs_path] = digest
-                except (IOError, OSError):
+                except OSError:
                     pass
     return hashes
 

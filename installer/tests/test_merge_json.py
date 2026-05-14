@@ -4,7 +4,7 @@ import json
 import os
 
 import pytest
-
+from helpers import read_json
 from merge_json import (
     STRATEGIES,
     _backup,
@@ -27,9 +27,6 @@ from merge_json import (
     verify_gemini_settings,
     verify_mcp_servers,
 )
-
-from helpers import read_json
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Helper functions
@@ -135,9 +132,7 @@ class TestCommandScriptKeyAndLauncher:
         assert _command_launcher(cmd) == "python3"
         assert _command_script_key(cmd).endswith("snyk_secure_at_inception.py")
 
-    def test_merge_replaces_legacy_when_target_has_redirect(
-        self, write_json, snyk_cursor_source
-    ):
+    def test_merge_replaces_legacy_when_target_has_redirect(self, write_json, snyk_cursor_source):
         target = write_json(
             "target.json",
             {
@@ -175,9 +170,7 @@ class TestMergeCursorHooks:
         assert len(result["hooks"]["afterFileEdit"]) == 1
         assert len(result["hooks"]["stop"]) == 1
 
-    def test_merge_preserves_existing_hooks(
-        self, existing_cursor_target, snyk_cursor_source
-    ):
+    def test_merge_preserves_existing_hooks(self, existing_cursor_target, snyk_cursor_source):
         merge_cursor_hooks(existing_cursor_target, snyk_cursor_source)
         result = read_json(existing_cursor_target)
         commands = [e["command"] for e in result["hooks"]["afterFileEdit"]]
@@ -236,18 +229,14 @@ class TestMergeCursorHooks:
         merge_cursor_hooks(target, snyk_cursor_source)
         assert len(read_json(target)["hooks"]["afterFileEdit"]) == 1
 
-    def test_merge_replaces_legacy_launcher(
-        self, write_json, snyk_cursor_source
-    ):
+    def test_merge_replaces_legacy_launcher(self, write_json, snyk_cursor_source):
         target = write_json(
             "target.json",
             {
                 "version": 1,
                 "hooks": {
                     "afterFileEdit": [
-                        {
-                            "command": 'python "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
-                        }
+                        {"command": 'python "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'}
                     ]
                 },
             },
@@ -259,18 +248,14 @@ class TestMergeCursorHooks:
             'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
         )
 
-    def test_merge_replaces_legacy_python3_launcher(
-        self, write_json, snyk_cursor_source
-    ):
+    def test_merge_replaces_legacy_python3_launcher(self, write_json, snyk_cursor_source):
         target = write_json(
             "target.json",
             {
                 "version": 1,
                 "hooks": {
                     "afterFileEdit": [
-                        {
-                            "command": 'python3 "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
-                        }
+                        {"command": 'python3 "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'}
                     ]
                 },
             },
@@ -282,18 +267,14 @@ class TestMergeCursorHooks:
             'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
         )
 
-    def test_merge_does_not_replace_non_legacy_launcher(
-        self, write_json, snyk_cursor_source
-    ):
+    def test_merge_does_not_replace_non_legacy_launcher(self, write_json, snyk_cursor_source):
         target = write_json(
             "target.json",
             {
                 "version": 1,
                 "hooks": {
                     "afterFileEdit": [
-                        {
-                            "command": 'cat "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
-                        }
+                        {"command": 'cat "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'}
                     ]
                 },
             },
@@ -327,9 +308,7 @@ class TestMergeClaudeSettings:
         assert "PostToolUse" in result["hooks"]
         assert "Stop" in result["hooks"]
 
-    def test_merge_into_matching_group(
-        self, existing_claude_target, snyk_claude_source
-    ):
+    def test_merge_into_matching_group(self, existing_claude_target, snyk_claude_source):
         merge_claude_settings(existing_claude_target, snyk_claude_source)
         result = read_json(existing_claude_target)
         # The Edit|Write group should have both prettier and snyk hooks
@@ -374,9 +353,7 @@ class TestMergeClaudeSettings:
         assert len(stop_groups) == 1
         assert "matcher" not in stop_groups[0]
 
-    def test_merge_preserves_non_hooks_settings(
-        self, existing_claude_target, snyk_claude_source
-    ):
+    def test_merge_preserves_non_hooks_settings(self, existing_claude_target, snyk_claude_source):
         merge_claude_settings(existing_claude_target, snyk_claude_source)
         result = read_json(existing_claude_target)
         assert result["allowedTools"] == ["Read", "Write"]
@@ -391,9 +368,7 @@ class TestMergeClaudeSettings:
         merge_claude_settings(existing_claude_target, snyk_claude_source)
         assert os.path.isfile(existing_claude_target + ".bak")
 
-    def test_merge_replaces_matching_script_hook_launcher(
-        self, write_json, snyk_claude_source
-    ):
+    def test_merge_replaces_matching_script_hook_launcher(self, write_json, snyk_claude_source):
         target = write_json(
             "target.json",
             {
@@ -414,18 +389,12 @@ class TestMergeClaudeSettings:
             },
         )
         merge_claude_settings(target, snyk_claude_source)
-        hooks = (
-            read_json(target)["hooks"]["PostToolUse"][0]["hooks"]
-        )
+        hooks = read_json(target)["hooks"]["PostToolUse"][0]["hooks"]
         assert len(hooks) == 1
-        assert hooks[0]["command"] == (
-            'uv run "$HOME/.claude/hooks/snyk_secure_at_inception.py"'
-        )
+        assert hooks[0]["command"] == ('uv run "$HOME/.claude/hooks/snyk_secure_at_inception.py"')
         assert hooks[0]["statusMessage"] == "Tracking code changes for security scan..."
 
-    def test_merge_replaces_legacy_python3_hook_launcher(
-        self, write_json, snyk_claude_source
-    ):
+    def test_merge_replaces_legacy_python3_hook_launcher(self, write_json, snyk_claude_source):
         target = write_json(
             "target.json",
             {
@@ -448,10 +417,8 @@ class TestMergeClaudeSettings:
         merge_claude_settings(target, snyk_claude_source)
         hooks = read_json(target)["hooks"]["PostToolUse"][0]["hooks"]
         assert len(hooks) == 1
-        assert hooks[0]["command"] == (
-            'uv run "$HOME/.claude/hooks/snyk_secure_at_inception.py"'
-        )
-        
+        assert hooks[0]["command"] == ('uv run "$HOME/.claude/hooks/snyk_secure_at_inception.py"')
+
     def test_merge_fails_on_invalid_json(self, tmp_path, snyk_claude_source):
         target = tmp_path / "target.json"
         target.write_text("{ invalid }")
@@ -471,9 +438,7 @@ class TestMergeMcpServers:
         assert "Snyk" in result["mcpServers"]
         assert result["mcpServers"]["Snyk"]["command"] == "npx"
 
-    def test_merge_preserves_non_snyk_servers(
-        self, existing_mcp_target, snyk_mcp_source
-    ):
+    def test_merge_preserves_non_snyk_servers(self, existing_mcp_target, snyk_mcp_source):
         merge_mcp_servers(existing_mcp_target, snyk_mcp_source)
         result = read_json(existing_mcp_target)
         assert "GitHub" in result["mcpServers"]
@@ -505,9 +470,7 @@ class TestMergeMcpServers:
         assert "Snyk" in result["mcpServers"]
         assert "SnykCode" in result["mcpServers"]
 
-    def test_merge_multiple_with_preexisting(
-        self, existing_mcp_target, multi_snyk_mcp_source
-    ):
+    def test_merge_multiple_with_preexisting(self, existing_mcp_target, multi_snyk_mcp_source):
         merge_mcp_servers(existing_mcp_target, multi_snyk_mcp_source)
         result = read_json(existing_mcp_target)
         assert "GitHub" in result["mcpServers"]
@@ -547,14 +510,10 @@ class TestUnmergeCursorHooks:
                 "hooks": {
                     "afterFileEdit": [
                         {"command": "eslint --fix"},
-                        {
-                            "command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
-                        },
+                        {"command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'},
                     ],
                     "stop": [
-                        {
-                            "command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
-                        },
+                        {"command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'},
                     ],
                 },
             },
@@ -571,9 +530,7 @@ class TestUnmergeCursorHooks:
                 "version": 1,
                 "hooks": {
                     "stop": [
-                        {
-                            "command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
-                        },
+                        {"command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'},
                     ],
                 },
             },
@@ -618,9 +575,7 @@ class TestUnmergeCursorHooks:
                 "version": 1,
                 "hooks": {
                     "afterFileEdit": [
-                        {
-                            "command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
-                        },
+                        {"command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'},
                     ],
                     "beforeCommand": [{"command": "echo hi"}],
                 },
@@ -739,15 +694,13 @@ class TestUnmergeClaudeSettings:
                     "PostToolUse": [
                         {
                             "matcher": "Edit|Write",
-                            "hooks": [
-                                {"type": "command", "command": "prettier --write"}
-                            ],
+                            "hooks": [{"type": "command", "command": "prettier --write"}],
                         }
                     ]
                 }
             },
         )
-        original = read_json(target)
+        read_json(target)
         unmerge_claude_settings(target, snyk_claude_source)
         # prettier should still be there
         result = read_json(target)
@@ -917,9 +870,7 @@ class TestGeminiSettingsStrategies:
         assert "AfterTool" in result["hooks"]
         assert "AfterAgent" in result["hooks"]
 
-    def test_merge_preserves_unrelated_top_level_keys(
-        self, write_json, snyk_gemini_source
-    ):
+    def test_merge_preserves_unrelated_top_level_keys(self, write_json, snyk_gemini_source):
         target = write_json("target.json", {"theme": "dark", "hooks": {}})
         merge_gemini_settings(target, snyk_gemini_source)
         result = read_json(target)
@@ -963,9 +914,7 @@ class TestGeminiSettingsStrategies:
 
 
 class TestMain:
-    def test_dispatches_correctly(
-        self, monkeypatch, empty_target, snyk_mcp_source
-    ):
+    def test_dispatches_correctly(self, monkeypatch, empty_target, snyk_mcp_source):
         monkeypatch.setattr(
             "sys.argv",
             ["merge_json.py", "merge_mcp_servers", empty_target, snyk_mcp_source],
@@ -1043,18 +992,10 @@ class TestVerifyClaudeSettings:
                     "PostToolUse": [
                         {
                             "matcher": "Edit|Write",
-                            "hooks": [
-                                {"type": "command", "command": "prettier --write"}
-                            ],
+                            "hooks": [{"type": "command", "command": "prettier --write"}],
                         }
                     ],
-                    "Stop": [
-                        {
-                            "hooks": [
-                                {"type": "command", "command": "echo done"}
-                            ]
-                        }
-                    ],
+                    "Stop": [{"hooks": [{"type": "command", "command": "echo done"}]}],
                 }
             },
         )

@@ -5,5 +5,5 @@ import json
 
 def read_json(path):
     """Load JSON from a file path."""
-    with open(path, "r") as f:
+    with open(path) as f:
         return json.load(f)

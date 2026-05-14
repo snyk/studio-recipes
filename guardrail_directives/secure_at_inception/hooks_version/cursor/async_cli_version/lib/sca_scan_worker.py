@@ -103,19 +103,19 @@ def parse_snyk_test_results(json_output: str) -> List[Dict[str, Any]]:
             cve = cve_list[0] if cve_list else None
 
             fixed_in = vuln.get("fixedIn", [])
-            fix_available = bool(
-                vuln.get("isUpgradable") or vuln.get("isPatchable") or fixed_in
-            )
+            fix_available = bool(vuln.get("isUpgradable") or vuln.get("isPatchable") or fixed_in)
 
-            vulnerabilities.append({
-                "id": vuln_id,
-                "title": vuln.get("title", vuln_id),
-                "package_name": pkg_name,
-                "version": version,
-                "severity": vuln.get("severity", "unknown"),
-                "cve": cve,
-                "fix_available": fix_available,
-            })
+            vulnerabilities.append(
+                {
+                    "id": vuln_id,
+                    "title": vuln.get("title", vuln_id),
+                    "package_name": pkg_name,
+                    "version": version,
+                    "severity": vuln.get("severity", "unknown"),
+                    "cve": cve,
+                    "fix_available": fix_available,
+                }
+            )
 
     return vulnerabilities
 
@@ -134,7 +134,7 @@ def main():
 
     PID_FILE = os.path.join(CACHE_DIR, "sca_scan.pid")
     DONE_FILE = os.path.join(CACHE_DIR, "sca_scan.done")
-    LOG_FILE = os.path.join(CACHE_DIR, "sca_scan.log")
+    LOG_FILE = os.path.realpath(os.path.join(CACHE_DIR, "sca_scan.log"))
 
     sys.path.insert(0, LIB_DIR)
 
@@ -145,19 +145,16 @@ def main():
         os.remove(DONE_FILE)
 
     if not os.environ.get("SNYK_TOKEN"):
-        config_dir = os.environ.get(
-            "XDG_CONFIG_HOME", os.path.expanduser("~/.config")
-        )
+        config_dir = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
         snyk_config_path = os.path.join(config_dir, "configstore", "snyk.json")
         has_stored_auth = False
         try:
-            with open(snyk_config_path, "r") as f:
+            with open(snyk_config_path) as f:
                 snyk_cfg = json.load(f)
             has_stored_auth = bool(
-                snyk_cfg.get("api")
-                or snyk_cfg.get("INTERNAL_OAUTH_TOKEN_STORAGE")
+                snyk_cfg.get("api") or snyk_cfg.get("INTERNAL_OAUTH_TOKEN_STORAGE")
             )
-        except (json.JSONDecodeError, IOError, FileNotFoundError):
+        except (OSError, json.JSONDecodeError, FileNotFoundError):
             pass
 
         if not has_stored_auth:
@@ -202,13 +199,19 @@ def main():
 
     if exit_code > 1:
         combined_output = (stderr + stdout).lower()
-        if any(pattern in combined_output for pattern in [
-            "missingapitokenerror", "not authenticated",
-            "authentication required", "snyk-0005",
-        ]):
+        if any(
+            pattern in combined_output
+            for pattern in [
+                "missingapitokenerror",
+                "not authenticated",
+                "authentication required",
+                "snyk-0005",
+            ]
+        ):
             log("Snyk CLI authentication required")
-            finish("auth_required", started_at=started_at,
-                   error_detail="Snyk CLI is not authenticated")
+            finish(
+                "auth_required", started_at=started_at, error_detail="Snyk CLI is not authenticated"
+            )
             return
         log(f"SCA scan error: {stderr[:500]}")
         finish("error", started_at=started_at, error_detail=stderr[:500])

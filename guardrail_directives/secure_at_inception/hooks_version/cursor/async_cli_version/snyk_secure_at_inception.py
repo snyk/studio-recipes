@@ -23,9 +23,9 @@ PREREQUISITES:
   - Snyk authentication (snyk auth)
 """
 
-import sys
 import json
 import os
+import sys
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -35,25 +35,24 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 LIB_DIR = SCRIPT_DIR / "lib"
 sys.path.insert(0, str(LIB_DIR))
 
-from platform_utils import file_lock, normalize_path
-from scan_runner import (
+from platform_utils import file_lock, normalize_path  # noqa: E402 — imports follow sys.path setup
+from scan_runner import (  # noqa: E402 — imports follow sys.path setup
     check_snyk_auth,
     check_snyk_cli,
-    launch_background_scan,
-    wait_for_scan,
-    write_early_status,
-    get_cache_dir,
-    ensure_cache_dirs,
+    clear_sca_scan_state,
     clear_scan_state,
+    detect_manifest_changes,
+    ensure_cache_dirs,
+    get_cache_dir,
+    get_sca_completion_info,
     get_scan_completion_info,
     launch_background_sca_scan,
-    wait_for_sca_scan,
-    get_sca_completion_info,
-    clear_sca_scan_state,
+    launch_background_scan,
     snapshot_manifest_hashes,
-    detect_manifest_changes,
+    wait_for_sca_scan,
+    wait_for_scan,
+    write_early_status,
 )
-
 
 # =============================================================================
 # CONFIGURATION
@@ -62,45 +61,79 @@ from scan_runner import (
 DEBUG = os.environ.get("CURSOR_HOOK_DEBUG", "0") == "1"
 
 CODE_EXTENSIONS = {
-    '.js', '.jsx', '.mjs', '.cjs',
-    '.ts', '.tsx',
-    '.py',
-    '.java',
-    '.kt', '.kts',
-    '.go',
-    '.rb',
-    '.php',
-    '.cs',
-    '.vb',
-    '.swift',
-    '.m', '.mm',
-    '.scala',
-    '.rs',
-    '.c', '.cpp', '.cc', '.h', '.hpp',
-    '.cls', '.trigger',
-    '.ex', '.exs',
-    '.groovy',
-    '.dart',
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".cjs",
+    ".ts",
+    ".tsx",
+    ".py",
+    ".java",
+    ".kt",
+    ".kts",
+    ".go",
+    ".rb",
+    ".php",
+    ".cs",
+    ".vb",
+    ".swift",
+    ".m",
+    ".mm",
+    ".scala",
+    ".rs",
+    ".c",
+    ".cpp",
+    ".cc",
+    ".h",
+    ".hpp",
+    ".cls",
+    ".trigger",
+    ".ex",
+    ".exs",
+    ".groovy",
+    ".dart",
 }
 
 MANIFEST_FILES = {
-    'package.json', 'package-lock.json', 'npm-shrinkwrap.json',
-    'yarn.lock', 'pnpm-lock.yaml',
-    'requirements.txt', 'setup.py', 'setup.cfg', 'pyproject.toml',
-    'Pipfile', 'Pipfile.lock', 'poetry.lock', 'uv.lock',
-    'pom.xml', 'build.gradle', 'build.gradle.kts', 'gradle.lockfile', 'build.sbt',
-    'Gemfile', 'Gemfile.lock',
-    'go.mod', 'go.sum',
-    'Cargo.toml', 'Cargo.lock',
-    'packages.config', 'packages.lock.json',
-    'composer.json', 'composer.lock',
-    'Podfile', 'Podfile.lock',
-    'Package.swift', 'Package.resolved',
-    'mix.exs', 'mix.lock',
-    'pubspec.yaml', 'pubspec.lock',
+    "package.json",
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "requirements.txt",
+    "setup.py",
+    "setup.cfg",
+    "pyproject.toml",
+    "Pipfile",
+    "Pipfile.lock",
+    "poetry.lock",
+    "uv.lock",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "gradle.lockfile",
+    "build.sbt",
+    "Gemfile",
+    "Gemfile.lock",
+    "go.mod",
+    "go.sum",
+    "Cargo.toml",
+    "Cargo.lock",
+    "packages.config",
+    "packages.lock.json",
+    "composer.json",
+    "composer.lock",
+    "Podfile",
+    "Podfile.lock",
+    "Package.swift",
+    "Package.resolved",
+    "mix.exs",
+    "mix.lock",
+    "pubspec.yaml",
+    "pubspec.lock",
 }
 
-MANIFEST_SUFFIXES = {'.csproj', '.lock', '.fsproj', '.vbproj'}
+MANIFEST_SUFFIXES = {".csproj", ".lock", ".fsproj", ".vbproj"}
 
 MAX_STOP_CYCLES = 3
 
@@ -110,6 +143,7 @@ _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 # =============================================================================
 # UTILITY FUNCTIONS
 # =============================================================================
+
 
 def debug_log(message: str) -> None:
     if DEBUG:
@@ -153,9 +187,8 @@ def is_code_file(file_path: str) -> bool:
 # LINE TRACKING (computes which lines the agent modified)
 # =============================================================================
 
-def compute_modified_ranges(
-    file_content: str, edits: List[Dict[str, str]]
-) -> List[Dict[str, int]]:
+
+def compute_modified_ranges(file_content: str, edits: List[Dict[str, str]]) -> List[Dict[str, int]]:
     """Locate new_string in post-edit file content to determine modified line ranges."""
     ranges: List[Dict[str, int]] = []
     search_offset = 0
@@ -170,8 +203,8 @@ def compute_modified_ranges(
             idx = file_content.find(new_str)
 
         if idx >= 0:
-            start_line = file_content[:idx].count('\n') + 1
-            end_line = start_line + new_str.count('\n')
+            start_line = file_content[:idx].count("\n") + 1
+            end_line = start_line + new_str.count("\n")
             ranges.append({"start": start_line, "end": end_line})
             search_offset = idx + len(new_str)
 
@@ -202,6 +235,7 @@ def _accumulate_ranges(
 # VULNERABILITY FILTERING (isolates new vulns on agent-modified lines)
 # =============================================================================
 
+
 def _paths_match(path_a: str, path_b: str) -> bool:
     """Segment-aware suffix comparison."""
     norm_a = normalize_path(path_a)
@@ -211,7 +245,7 @@ def _paths_match(path_a: str, path_b: str) -> bool:
     parts_a = norm_a.split("/")
     parts_b = norm_b.split("/")
     shorter, longer = sorted([parts_a, parts_b], key=len)
-    return longer[-len(shorter):] == shorter
+    return longer[-len(shorter) :] == shorter
 
 
 def _find_vulns_for_file(
@@ -234,7 +268,8 @@ def _filter_new_vulns(
     if not modified_ranges:
         return []
     return [
-        v for v in vulns
+        v
+        for v in vulns
         if any(r["start"] <= v.get("start_line", 0) <= r["end"] for r in modified_ranges)
         and v.get("start_line", 0) > 0
     ]
@@ -311,6 +346,7 @@ def _format_sca_vuln_table(vulns: List[Dict[str, Any]]) -> str:
 # STATE MANAGEMENT
 # =============================================================================
 
+
 @contextmanager
 def _state_lock(workspace: str):
     """Exclusive file lock for state.json read-modify-write operations.
@@ -325,11 +361,17 @@ def read_state(workspace: str) -> Dict[str, Any]:
     state_file = get_state_file_path(workspace)
     try:
         if os.path.exists(state_file):
-            with open(state_file, "r") as f:
+            with open(state_file) as f:
                 return json.load(f)
-    except (json.JSONDecodeError, IOError):
+    except (OSError, json.JSONDecodeError):
         pass
-    return {"code_files": {}, "manifest_baseline": {}, "stop_cycles": 0, "last_edit_ts": "", "last_update": None}
+    return {
+        "code_files": {},
+        "manifest_baseline": {},
+        "stop_cycles": 0,
+        "last_edit_ts": "",
+        "last_update": None,
+    }
 
 
 def write_state(workspace: str, state: Dict[str, Any]) -> None:
@@ -358,6 +400,7 @@ def has_pending_changes(state: Dict[str, Any]) -> bool:
 # =============================================================================
 # HOOK HANDLERS
 # =============================================================================
+
 
 def handle_session_start(data: Dict[str, Any], workspace: str) -> None:
     """Verify prerequisites and launch a cache-warming scan at session start.
@@ -388,7 +431,8 @@ def handle_session_start(data: Dict[str, Any], workspace: str) -> None:
                 "and authenticate with `snyk auth`."
             )
             write_early_status(
-                workspace, "snyk_not_found",
+                workspace,
+                "snyk_not_found",
                 "Snyk CLI not found on PATH.",
             )
         elif "auth" in issues:
@@ -397,7 +441,8 @@ def handle_session_start(data: Dict[str, Any], workspace: str) -> None:
                 "until you run `snyk auth` in a terminal to authenticate."
             )
             write_early_status(
-                workspace, "auth_required",
+                workspace,
+                "auth_required",
                 "Snyk CLI is not authenticated. Run snyk auth.",
             )
 
@@ -444,7 +489,7 @@ def handle_after_file_edit(data: Dict[str, Any], workspace: str) -> None:
 
             try:
                 file_content = Path(file_path).read_text(encoding="utf-8", errors="replace")
-            except (IOError, OSError):
+            except OSError:
                 file_content = ""
 
             new_ranges = compute_modified_ranges(file_content, edits)
@@ -533,21 +578,25 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
     # --- Wait for SAST scan and evaluate results ---
     if code_files:
         scan_status = wait_for_scan(workspace, log_fn=log_to_panel)
-        scan_succeeded = (scan_status == "success")
+        scan_succeeded = scan_status == "success"
         scan_info = None
 
         # Stale detection: re-scan if edits happened after scan started
         if scan_succeeded:
             scan_info = get_scan_completion_info(workspace)
             last_edit_ts = state.get("last_edit_ts", "")
-            started_at = (scan_info.get("started_at") or scan_info.get("completed_at", "")) if scan_info else ""
+            started_at = (
+                (scan_info.get("started_at") or scan_info.get("completed_at", ""))
+                if scan_info
+                else ""
+            )
 
             if last_edit_ts and started_at and last_edit_ts > started_at:
                 log_to_panel("[SAI] Edits after scan started, re-scanning...")
                 clear_scan_state(workspace)
                 launch_background_scan(workspace)
                 scan_status = wait_for_scan(workspace, log_fn=log_to_panel)
-                scan_succeeded = (scan_status == "success")
+                scan_succeeded = scan_status == "success"
                 scan_info = None
 
         if scan_succeeded:
@@ -573,19 +622,24 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
                 else:
                     unevaluated_file_paths.append(fp)
 
-            new_vulns.sort(key=lambda v: (
-                _SEVERITY_ORDER.get(v.get("severity", "low"), 4),
-                v.get("file_path", ""),
-                v.get("start_line", 0),
-            ))
+            new_vulns.sort(
+                key=lambda v: (
+                    _SEVERITY_ORDER.get(v.get("severity", "low"), 4),
+                    v.get("file_path", ""),
+                    v.get("start_line", 0),
+                )
+            )
         else:
             scan_info = get_scan_completion_info(workspace)
             error_detail = scan_info.get("error_detail", "") if scan_info else ""
             file_list = ", ".join(Path(f).name for f in code_files)
 
             if scan_status == "auth_required":
-                log_to_panel(f"[SAI] Snyk CLI not authenticated: {error_detail}" if error_detail
-                             else "[SAI] Snyk CLI not authenticated")
+                log_to_panel(
+                    f"[SAI] Snyk CLI not authenticated: {error_detail}"
+                    if error_detail
+                    else "[SAI] Snyk CLI not authenticated"
+                )
                 sast_fallback = (
                     "The Snyk CLI is not authenticated. Run snyk_auth to authenticate, "
                     "then run snyk_code_scan on the current directory to check for "
@@ -633,12 +687,13 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
                 new_sca_vulns = sca_vulns
             else:
                 new_sca_vulns = [
-                    v for v in sca_vulns
-                    if (v.get("id", ""), v.get("package_name", ""), v.get("version", "")) not in baseline_keys
+                    v
+                    for v in sca_vulns
+                    if (v.get("id", ""), v.get("package_name", ""), v.get("version", ""))
+                    not in baseline_keys
                 ]
             new_sca_vulns = [
-                v for v in new_sca_vulns
-                if _should_block_on_sca_severity(v.get("severity", ""))
+                v for v in new_sca_vulns if _should_block_on_sca_severity(v.get("severity", ""))
             ]
         elif changed_manifests:
             manifest_list = ", ".join(Path(f).name for f in changed_manifests)
@@ -650,7 +705,9 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
                     f"dependency vulnerabilities in: {manifest_list}. Fix only NEWLY INTRODUCED issues."
                 )
             else:
-                log_to_panel(f"[SAI] SCA scan unavailable (status: {sca_status}); falling back to MCP")
+                log_to_panel(
+                    f"[SAI] SCA scan unavailable (status: {sca_status}); falling back to MCP"
+                )
                 sca_fallback = (
                     "Security scan could not complete. "
                     "Run snyk_sca_scan on the current directory to check for "
@@ -666,10 +723,12 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
     if sast_failed:
         if new_sca_vulns:
             sast_fallback += "\n\n## Newly Introduced Dependency Vulnerabilities\n\n"
-            sast_fallback += _format_sca_vuln_table(sorted(
-                new_sca_vulns,
-                key=lambda v: _SEVERITY_ORDER.get(v.get("severity", "low"), 4),
-            ))
+            sast_fallback += _format_sca_vuln_table(
+                sorted(
+                    new_sca_vulns,
+                    key=lambda v: _SEVERITY_ORDER.get(v.get("severity", "low"), 4),
+                )
+            )
         elif sca_fallback:
             sast_fallback += f"\n\n## Dependency Scan Unavailable\n\n{sca_fallback}"
         clear_state(workspace)
@@ -700,8 +759,10 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
     if not new_vulns and not new_sca_vulns and not sca_fallback:
         if unevaluated_file_paths:
             log_to_panel("=" * 70)
-            log_to_panel("[Secure at Inception] Some files not yet evaluated. "
-                         "They will be checked on the next stop.")
+            log_to_panel(
+                "[Secure at Inception] Some files not yet evaluated. "
+                "They will be checked on the next stop."
+            )
             log_to_panel("=" * 70)
         else:
             log_to_panel("=" * 70)
@@ -748,18 +809,21 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
     if new_vulns:
         log_to_panel(f"  Code vulnerabilities: {len(new_vulns)}")
         for v in new_vulns:
-            log_to_panel(f"    - {v['severity'].upper()}: {v['title']} "
-                         f"at {v['file_path']}:{v['start_line']}")
+            log_to_panel(
+                f"    - {v['severity'].upper()}: {v['title']} at {v['file_path']}:{v['start_line']}"
+            )
     if new_sca_vulns:
         log_to_panel(f"  Dependency vulnerabilities: {len(new_sca_vulns)}")
     if sca_fallback:
         log_to_panel("  SCA scan unavailable; MCP fallback included")
     if dirty_file_paths:
-        log_to_panel(f"  Files with vulns (kept in state): "
-                     f"{[Path(f).name for f in dirty_file_paths]}")
+        log_to_panel(
+            f"  Files with vulns (kept in state): {[Path(f).name for f in dirty_file_paths]}"
+        )
     if unevaluated_file_paths:
-        log_to_panel(f"  Unevaluated files (kept in state): "
-                     f"{[Path(f).name for f in unevaluated_file_paths]}")
+        log_to_panel(
+            f"  Unevaluated files (kept in state): {[Path(f).name for f in unevaluated_file_paths]}"
+        )
     if changed_manifests:
         log_to_panel(f"  Manifest files changed: {len(changed_manifests)}")
     log_to_panel("=" * 70)
@@ -770,6 +834,7 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
 # =============================================================================
 # MAIN ENTRY POINT
 # =============================================================================
+
 
 def main() -> None:
     try:

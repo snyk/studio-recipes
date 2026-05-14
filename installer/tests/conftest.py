@@ -14,11 +14,13 @@ sys.path.insert(0, os.path.dirname(__file__))
 @pytest.fixture
 def write_json(tmp_path):
     """Factory fixture: write_json(filename, data) -> absolute path string."""
+
     def _write(filename, data):
         path = tmp_path / filename
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, indent=2) + "\n")
         return str(path)
+
     return _write
 
 
@@ -35,12 +37,8 @@ def empty_target(tmp_path):
 SNYK_CURSOR_HOOKS = {
     "version": 1,
     "hooks": {
-        "afterFileEdit": [
-            {"command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'}
-        ],
-        "stop": [
-            {"command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'}
-        ],
+        "afterFileEdit": [{"command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'}],
+        "stop": [{"command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'}],
     },
 }
 

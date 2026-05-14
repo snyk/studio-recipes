@@ -36,6 +36,7 @@ from typing import Any, Dict, List, Optional
 
 try:
     import fcntl
+
     _HAS_FCNTL = True
 except ImportError:
     _HAS_FCNTL = False
@@ -44,18 +45,17 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 LIB_DIR = SCRIPT_DIR / "lib"
 sys.path.insert(0, str(LIB_DIR))
 
-from scan_runner import (
+from scan_runner import (  # noqa: E402 — imports follow sys.path setup
     check_snyk_auth,
+    clear_scan_state,
+    ensure_cache_dirs,
+    get_cache_dir,
+    get_scan_completion_info,
     is_scan_complete,
     launch_background_scan,
     wait_for_scan,
     write_early_status,
-    get_cache_dir,
-    ensure_cache_dirs,
-    clear_scan_state,
-    get_scan_completion_info,
 )
-
 
 # =============================================================================
 # CONFIGURATION
@@ -64,61 +64,93 @@ from scan_runner import (
 DEBUG = os.environ.get("COPILOT_HOOK_DEBUG", "0") == "1"
 
 CODE_EXTENSIONS = {
-    '.js', '.jsx', '.mjs', '.cjs',
-    '.ts', '.tsx',
-    '.py',
-    '.java',
-    '.kt', '.kts',
-    '.go',
-    '.rb',
-    '.php',
-    '.cs',
-    '.vb',
-    '.swift',
-    '.m', '.mm',
-    '.scala',
-    '.rs',
-    '.c', '.cpp', '.cc', '.h', '.hpp',
-    '.cls', '.trigger',
-    '.ex', '.exs',
-    '.groovy',
-    '.dart',
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".cjs",
+    ".ts",
+    ".tsx",
+    ".py",
+    ".java",
+    ".kt",
+    ".kts",
+    ".go",
+    ".rb",
+    ".php",
+    ".cs",
+    ".vb",
+    ".swift",
+    ".m",
+    ".mm",
+    ".scala",
+    ".rs",
+    ".c",
+    ".cpp",
+    ".cc",
+    ".h",
+    ".hpp",
+    ".cls",
+    ".trigger",
+    ".ex",
+    ".exs",
+    ".groovy",
+    ".dart",
 }
 
 MANIFEST_FILES = {
-    'package.json', 'package-lock.json', 'npm-shrinkwrap.json',
-    'yarn.lock', 'pnpm-lock.yaml',
-    'requirements.txt', 'setup.py', 'pyproject.toml',
-    'Pipfile', 'Pipfile.lock', 'poetry.lock',
-    'pom.xml', 'build.gradle', 'build.gradle.kts', 'gradle.lockfile',
-    'Gemfile', 'Gemfile.lock',
-    'go.mod', 'go.sum',
-    'Cargo.toml', 'Cargo.lock',
-    'packages.config', 'packages.lock.json',
-    'composer.json', 'composer.lock',
-    'Podfile', 'Podfile.lock',
-    'Package.swift', 'Package.resolved',
-    'mix.exs', 'mix.lock',
-    'pubspec.yaml', 'pubspec.lock',
+    "package.json",
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "requirements.txt",
+    "setup.py",
+    "pyproject.toml",
+    "Pipfile",
+    "Pipfile.lock",
+    "poetry.lock",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "gradle.lockfile",
+    "Gemfile",
+    "Gemfile.lock",
+    "go.mod",
+    "go.sum",
+    "Cargo.toml",
+    "Cargo.lock",
+    "packages.config",
+    "packages.lock.json",
+    "composer.json",
+    "composer.lock",
+    "Podfile",
+    "Podfile.lock",
+    "Package.swift",
+    "Package.resolved",
+    "mix.exs",
+    "mix.lock",
+    "pubspec.yaml",
+    "pubspec.lock",
 }
 
-MANIFEST_SUFFIXES = {'.csproj'}
+MANIFEST_SUFFIXES = {".csproj"}
 
 # preToolUse wait timeout (leave buffer for JSON output within 30s hook timeout)
 PRE_TOOL_SCAN_WAIT_TIMEOUT = 25
 
 # Regex patterns for git VCS operations that should be gated
 GIT_VCS_PATTERNS = [
-    re.compile(r'\bgit\s+commit\b'),
-    re.compile(r'\bgit\s+push\b'),
-    re.compile(r'\bgh\s+pr\s+create\b'),
-    re.compile(r'\bgh\s+pr\s+merge\b'),
+    re.compile(r"\bgit\s+commit\b"),
+    re.compile(r"\bgit\s+push\b"),
+    re.compile(r"\bgh\s+pr\s+create\b"),
+    re.compile(r"\bgh\s+pr\s+merge\b"),
 ]
 
 
 # =============================================================================
 # UTILITY FUNCTIONS
 # =============================================================================
+
 
 def debug_log(message: str) -> None:
     if DEBUG:
@@ -136,10 +168,14 @@ def output_allow() -> None:
 
 def output_deny(reason: str) -> None:
     """Output JSON that denies the tool call with a reason shown to the agent."""
-    print(json.dumps({
-        "permissionDecision": "deny",
-        "permissionDecisionReason": reason,
-    }))
+    print(
+        json.dumps(
+            {
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        )
+    )
 
 
 def get_state_file_path(workspace: str) -> str:
@@ -169,10 +205,9 @@ def is_git_vcs_operation(command: str) -> bool:
 
 def _compute_vuln_fingerprint(vulns: List[Dict[str, Any]]) -> str:
     """Compute a hash fingerprint of vulnerability IDs for cycle tracking."""
-    vuln_ids = sorted(set(
-        f"{v.get('id', '')}:{v.get('file_path', '')}:{v.get('start_line', 0)}"
-        for v in vulns
-    ))
+    vuln_ids = sorted(
+        set(f"{v.get('id', '')}:{v.get('file_path', '')}:{v.get('start_line', 0)}" for v in vulns)
+    )
     return hashlib.sha256("|".join(vuln_ids).encode()).hexdigest()[:16]
 
 
@@ -180,9 +215,8 @@ def _compute_vuln_fingerprint(vulns: List[Dict[str, Any]]) -> str:
 # LINE TRACKING (computes which lines the agent modified)
 # =============================================================================
 
-def compute_modified_ranges(
-    file_content: str, edits: List[Dict[str, str]]
-) -> List[Dict[str, int]]:
+
+def compute_modified_ranges(file_content: str, edits: List[Dict[str, str]]) -> List[Dict[str, int]]:
     """Locate new_string in post-edit file content to determine modified line ranges."""
     ranges: List[Dict[str, int]] = []
     search_offset = 0
@@ -197,8 +231,8 @@ def compute_modified_ranges(
             idx = file_content.find(new_str)
 
         if idx >= 0:
-            start_line = file_content[:idx].count('\n') + 1
-            end_line = start_line + new_str.count('\n')
+            start_line = file_content[:idx].count("\n") + 1
+            end_line = start_line + new_str.count("\n")
             ranges.append({"start": start_line, "end": end_line})
             search_offset = idx + len(new_str)
 
@@ -229,6 +263,7 @@ def _accumulate_ranges(
 # VULNERABILITY FILTERING (isolates new vulns on agent-modified lines)
 # =============================================================================
 
+
 def _normalize_path(path: str) -> str:
     while path.startswith("./"):
         path = path[2:]
@@ -244,7 +279,7 @@ def _paths_match(path_a: str, path_b: str) -> bool:
     parts_a = norm_a.split("/")
     parts_b = norm_b.split("/")
     shorter, longer = sorted([parts_a, parts_b], key=len)
-    return longer[-len(shorter):] == shorter
+    return longer[-len(shorter) :] == shorter
 
 
 def _find_vulns_for_file(
@@ -267,7 +302,8 @@ def _filter_new_vulns(
     if not modified_ranges:
         return []
     return [
-        v for v in vulns
+        v
+        for v in vulns
         if any(r["start"] <= v.get("start_line", 0) <= r["end"] for r in modified_ranges)
         and v.get("start_line", 0) > 0
     ]
@@ -314,6 +350,7 @@ def _format_vuln_table(vulns: List[Dict[str, Any]]) -> str:
 # STATE MANAGEMENT
 # =============================================================================
 
+
 @contextmanager
 def _state_lock(workspace: str):
     """Exclusive file lock for state.json read-modify-write operations.
@@ -336,9 +373,9 @@ def read_state(workspace: str) -> Dict[str, Any]:
     state_file = get_state_file_path(workspace)
     try:
         if os.path.exists(state_file):
-            with open(state_file, "r") as f:
+            with open(state_file) as f:
                 return json.load(f)
-    except (json.JSONDecodeError, IOError):
+    except (OSError, json.JSONDecodeError):
         pass
     return {
         "code_files": {},
@@ -376,6 +413,7 @@ def has_pending_changes(state: Dict[str, Any]) -> bool:
 # SCAN EVALUATION (shared by early notification and git gating)
 # =============================================================================
 
+
 def _evaluate_completed_scan(
     workspace: str,
     code_files: Dict[str, Dict[str, Any]],
@@ -409,11 +447,13 @@ def _evaluate_completed_scan(
             clean_file_paths.append(fp)
 
     severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-    new_vulns.sort(key=lambda v: (
-        severity_order.get(v.get("severity", "low"), 4),
-        v.get("file_path", ""),
-        v.get("start_line", 0),
-    ))
+    new_vulns.sort(
+        key=lambda v: (
+            severity_order.get(v.get("severity", "low"), 4),
+            v.get("file_path", ""),
+            v.get("start_line", 0),
+        )
+    )
 
     return new_vulns, clean_file_paths, dirty_file_paths
 
@@ -476,6 +516,7 @@ def _maybe_notify_vulns(workspace: str, command: str) -> None:
 # HOOK HANDLERS
 # =============================================================================
 
+
 def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
     """Track file edits and launch background scans.
     Output is ignored by Copilot -- this is fire-and-forget."""
@@ -512,29 +553,23 @@ def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
                     # We have both old and new -- compute ranges from new content
                     edits = [{"new_string": new_content}]
                     try:
-                        file_content = Path(file_path).read_text(
-                            encoding="utf-8", errors="replace"
-                        )
-                    except (IOError, OSError):
+                        file_content = Path(file_path).read_text(encoding="utf-8", errors="replace")
+                    except OSError:
                         file_content = new_content
                     new_ranges = compute_modified_ranges(file_content, edits)
                 elif new_content:
                     edits = [{"new_string": new_content}]
                     try:
-                        file_content = Path(file_path).read_text(
-                            encoding="utf-8", errors="replace"
-                        )
-                    except (IOError, OSError):
+                        file_content = Path(file_path).read_text(encoding="utf-8", errors="replace")
+                    except OSError:
                         file_content = new_content
                     new_ranges = compute_modified_ranges(file_content, edits)
                 else:
                     # Fall back: mark entire file as modified
                     try:
-                        file_content = Path(file_path).read_text(
-                            encoding="utf-8", errors="replace"
-                        )
-                        line_count = file_content.count('\n') + 1
-                    except (IOError, OSError):
+                        file_content = Path(file_path).read_text(encoding="utf-8", errors="replace")
+                        line_count = file_content.count("\n") + 1
+                    except OSError:
                         line_count = 1
                     new_ranges = [{"start": 1, "end": line_count}]
 
@@ -549,14 +584,12 @@ def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
             elif tool_name == "create":
                 # New file -- mark entire file as modified
                 content = tool_args.get("content", "")
-                line_count = content.count('\n') + 1 if content else 1
+                line_count = content.count("\n") + 1 if content else 1
                 if not content:
                     try:
-                        file_content = Path(file_path).read_text(
-                            encoding="utf-8", errors="replace"
-                        )
-                        line_count = file_content.count('\n') + 1
-                    except (IOError, OSError):
+                        file_content = Path(file_path).read_text(encoding="utf-8", errors="replace")
+                        line_count = file_content.count("\n") + 1
+                    except OSError:
                         pass
                 code_files = state.get("code_files", {})
                 code_files[file_path] = {
@@ -654,7 +687,7 @@ def handle_pre_tool_use(data: Dict[str, Any], workspace: str) -> None:
         scan_status = wait_for_scan(
             workspace, timeout=PRE_TOOL_SCAN_WAIT_TIMEOUT, log_fn=log_to_panel
         )
-        scan_succeeded = (scan_status == "success")
+        scan_succeeded = scan_status == "success"
         scan_info = None
 
         # Stale detection: re-scan if edits happened after scan started
@@ -663,7 +696,8 @@ def handle_pre_tool_use(data: Dict[str, Any], workspace: str) -> None:
             last_edit_ts = state.get("last_edit_ts", "")
             started_at = (
                 (scan_info.get("started_at") or scan_info.get("completed_at", ""))
-                if scan_info else ""
+                if scan_info
+                else ""
             )
 
             if last_edit_ts and started_at and last_edit_ts > started_at:
@@ -673,16 +707,16 @@ def handle_pre_tool_use(data: Dict[str, Any], workspace: str) -> None:
                 scan_status = wait_for_scan(
                     workspace, timeout=PRE_TOOL_SCAN_WAIT_TIMEOUT, log_fn=log_to_panel
                 )
-                scan_succeeded = (scan_status == "success")
+                scan_succeeded = scan_status == "success"
                 scan_info = None
 
         if scan_succeeded:
-            new_vulns, clean_file_paths, dirty_file_paths = \
-                _evaluate_completed_scan(workspace, code_files)
+            new_vulns, clean_file_paths, dirty_file_paths = _evaluate_completed_scan(
+                workspace, code_files
+            )
 
             log_to_panel(
-                f"[SAI] {len(new_vulns)} new vuln(s), "
-                f"{len(clean_file_paths)} clean file(s)"
+                f"[SAI] {len(new_vulns)} new vuln(s), {len(clean_file_paths)} clean file(s)"
             )
         else:
             # Scan failed -- build fallback message
@@ -693,7 +727,8 @@ def handle_pre_tool_use(data: Dict[str, Any], workspace: str) -> None:
             if scan_status == "auth_required":
                 log_to_panel(
                     f"[SAI] Snyk CLI not authenticated: {error_detail}"
-                    if error_detail else "[SAI] Snyk CLI not authenticated"
+                    if error_detail
+                    else "[SAI] Snyk CLI not authenticated"
                 )
                 fallback = (
                     "The Snyk CLI is not authenticated. Run snyk_auth to authenticate, "
@@ -710,8 +745,7 @@ def handle_pre_tool_use(data: Dict[str, Any], workspace: str) -> None:
             elif scan_status is None:
                 log_to_panel("[SAI] Scan timed out, denying git operation")
                 output_deny(
-                    "Security scan is still in progress. "
-                    "Please wait a moment and retry the commit."
+                    "Security scan is still in progress. Please wait a moment and retry the commit."
                 )
                 return
             else:
@@ -744,9 +778,7 @@ def handle_pre_tool_use(data: Dict[str, Any], workspace: str) -> None:
     current_fingerprint = _compute_vuln_fingerprint(new_vulns) if new_vulns else ""
 
     if deny_cycles > 0 and current_fingerprint and current_fingerprint == last_fingerprint:
-        log_to_panel(
-            f"[SAI] User chose to proceed (retry with same vulns, cycle {deny_cycles})"
-        )
+        log_to_panel(f"[SAI] User chose to proceed (retry with same vulns, cycle {deny_cycles})")
         clear_state(workspace)
         output_allow()
         return
@@ -788,9 +820,7 @@ def handle_pre_tool_use(data: Dict[str, Any], workspace: str) -> None:
         reason_parts.insert(0, "/snyk-batch-fix")
 
     reason_parts.append("")
-    reason_parts.append(
-        "To proceed without fixing: retry the commit without changes."
-    )
+    reason_parts.append("To proceed without fixing: retry the commit without changes.")
 
     log_to_panel(f"[SAI] Denying git operation: {len(new_vulns)} vuln(s) found")
     output_deny("\n".join(reason_parts))
@@ -814,6 +844,7 @@ def handle_agent_stop(data: Dict[str, Any], workspace: str) -> None:
 # =============================================================================
 # MAIN ENTRY POINT
 # =============================================================================
+
 
 def main() -> None:
     try:

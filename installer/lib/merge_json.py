@@ -23,16 +23,29 @@ import sys
 LEGACY_LAUNCHERS = frozenset({"python", "python3"})
 
 # Tokens that start shell redirection / piping; truncate argv before these for script identity.
-_REDIR_PIPE_TOKENS = frozenset({
-    ">>", ">", "<", "|", "2>", "2>>", "&>", "&>>", "2>&1", "<&", ">&", ">>&",
-})
+_REDIR_PIPE_TOKENS = frozenset(
+    {
+        ">>",
+        ">",
+        "<",
+        "|",
+        "2>",
+        "2>>",
+        "&>",
+        "&>>",
+        "2>&1",
+        "<&",
+        ">&",
+        ">>&",
+    }
+)
 
 
 def _load_json(path):
     """Load JSON file, returning empty dict if file doesn't exist."""
     if not os.path.exists(path):
         return {}
-    with open(path, "r") as f:
+    with open(path) as f:
         return json.load(f)
 
 
@@ -215,7 +228,7 @@ def merge_cursor_hooks(target_path, source_path):
     try:
         target = _load_json(target_path)
     except Exception:
-        raise ValueError(f"Invalid JSON in file: {target_path}")
+        raise ValueError(f"Invalid JSON in file: {target_path}") from None
 
     # Ensure target has basic structure
     if "version" not in target:
@@ -247,7 +260,7 @@ def merge_claude_settings(target_path, source_path):
     try:
         target = _load_json(target_path)
     except Exception:
-        raise ValueError(f"Invalid JSON in file: {target_path}")
+        raise ValueError(f"Invalid JSON in file: {target_path}") from None
 
     if "hooks" not in target:
         target["hooks"] = {}
@@ -268,9 +281,7 @@ def merge_claude_settings(target_path, source_path):
                     if "hooks" not in tgt_group:
                         tgt_group["hooks"] = []
 
-                    _merge_command_entries(
-                        tgt_group["hooks"], src_group.get("hooks", [])
-                    )
+                    _merge_command_entries(tgt_group["hooks"], src_group.get("hooks", []))
 
                     merged = True
                     break
@@ -377,8 +388,7 @@ def unmerge_cursor_hooks(target_path, source_path):
         remove_commands = {e.get("command") for e in entries if "command" in e}
 
         target["hooks"][event] = [
-            e for e in target["hooks"][event]
-            if e.get("command") not in remove_commands
+            e for e in target["hooks"][event] if e.get("command") not in remove_commands
         ]
 
         # Clean up empty event arrays
@@ -421,15 +431,11 @@ def unmerge_claude_settings(target_path, source_path):
                     continue
 
                 tgt_group["hooks"] = [
-                    h for h in tgt_group.get("hooks", [])
-                    if h.get("command") not in remove_commands
+                    h for h in tgt_group.get("hooks", []) if h.get("command") not in remove_commands
                 ]
 
         # Remove groups with empty hooks
-        target["hooks"][event] = [
-            g for g in target["hooks"][event]
-            if g.get("hooks")
-        ]
+        target["hooks"][event] = [g for g in target["hooks"][event] if g.get("hooks")]
 
         # Clean up empty event arrays
         if not target["hooks"][event]:
@@ -512,9 +518,7 @@ def verify_cursor_hooks(target_path, source_path):
             missing.append(f"  event '{event}' not found in {target_path}")
             continue
 
-        existing_commands = {
-            e.get("command") for e in target_hooks[event] if "command" in e
-        }
+        existing_commands = {e.get("command") for e in target_hooks[event] if "command" in e}
         for entry in entries:
             cmd = entry.get("command", "")
             if cmd and cmd not in existing_commands:

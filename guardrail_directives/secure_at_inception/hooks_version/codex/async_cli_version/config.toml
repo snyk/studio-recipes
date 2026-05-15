@@ -1,0 +1,36 @@
+# Codex CLI hook config for Snyk Secure At Inception.
+#
+# Merge this into ~/.codex/config.toml (user-level) or
+# <repo>/.codex/config.toml (project-level; the workspace must be trusted).
+#
+# Codex hooks are experimental and gated behind the codex_hooks feature flag.
+
+[features]
+hooks = true
+
+# --- Session start: verify auth + CLI, warm scan cache ---
+[[hooks.SessionStart]]
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = 'python3 "$HOME/.codex/hooks/snyk_secure_at_inception.py"'
+statusMessage = "Initializing Snyk security scanning..."
+
+# --- After every file mutation: track modified lines, launch background scan ---
+# apply_patch is Codex's primary file-mutation tool. Edit/Write are matched
+# defensively in case they are exposed by the runtime.
+[[hooks.PostToolUse]]
+matcher = "^(apply_patch|Edit|Write)$"
+
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = 'python3 "$HOME/.codex/hooks/snyk_secure_at_inception.py"'
+statusMessage = "Tracking code changes for security scan..."
+
+# --- On stop: wait for the scan, block if new vulns were introduced ---
+[[hooks.Stop]]
+
+[[hooks.Stop.hooks]]
+type = "command"
+command = 'python3 "$HOME/.codex/hooks/snyk_secure_at_inception.py"'
+statusMessage = "Evaluating security scan results..."

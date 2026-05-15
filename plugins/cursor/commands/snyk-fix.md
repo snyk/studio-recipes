@@ -122,6 +122,38 @@ And Path Traversal is selected as highest priority, target BOTH lines 45 and 112
 - **Dependency Path**: [direct | transitive via X → Y → Z]
 ```
 
+### Step 2.5: Check for Fix Path (SCA Only)
+
+**⚠️ If the scan results do not report any fix version or upgrade path for the selected SCA vulnerability, do NOT proceed to Phase 4.** The agent must not attempt to discover or invent a fix on its own when Snyk has no recommended remediation.
+
+Instead, produce a **No Fix Available Report** and STOP:
+
+```
+## No Fix Available
+
+| Vulnerability | [Title] |
+|---------------|---------|
+| **ID** | [Snyk Issue ID] |
+| **Severity** | [Critical / High / Medium / Low] |
+| **Package** | [package@current_version] |
+| **Dependency Path** | [direct / transitive via X → Y → Z] |
+
+### Why No Fix Was Applied
+Snyk does not report a fix version or upgrade path for this vulnerability.
+The agent will not attempt to resolve issues where no known fix exists.
+
+### Alternatives to Consider
+- Monitor for a future fix release from the package maintainer
+- Evaluate replacing the package with a maintained alternative
+- Apply a manual workaround if the vulnerability context allows it
+- Accept the risk and document in your security policy
+```
+
+After producing this report:
+- Send `snyk_send_feedback` with `fixedExistingIssuesCount: 0`
+- Do NOT make any file changes
+- STOP
+
 ---
 
 ## Phase 3: Remediation (Code Vulnerabilities)
@@ -187,45 +219,128 @@ Common fix patterns:
 
 **Skip to Phase 5 if this is a Code vulnerability (already handled in Phase 3).**
 
-### Step 4.1: Analyze Dependency Path
-- Document the full dependency path (direct → transitive → vulnerable)
-- Identify manifest files to modify (`package.json`, `requirements.txt`, etc.)
-- Determine if vulnerable package is direct or transitive
+### Step 4.1: Determine Remediation Strategy
 
-**For transitive dependencies:**
-- Identify which direct dependency pulls in the vulnerable transitive
-- Check if upgrading the direct dependency will pull in the fixed transitive
-- If app directly imports the transitive: note this for breaking change analysis
+Analyze the dependency path and determine which strategy applies. Exactly one of these three strategies must be selected before proceeding:
 
-### Step 4.2: Check for Breaking Changes
-Search codebase for potential impact:
-```bash
-# Search for imports of the package
-grep -r "from 'package'" --include="*.ts" --include="*.js"
-grep -r "require('package')" --include="*.ts" --include="*.js"
+**Strategy A — Direct Upgrade**
+The vulnerable package is a direct dependency in the project manifest. Upgrade it to a version where the vulnerability is fixed.
+
+**Strategy B — Parent Upgrade**
+The vulnerable package is a transitive dependency. A newer version of the direct (parent) dependency pulls in a fixed version of the transitive. Upgrade the parent.
+
+**Strategy C — Transitive Fix**
+The vulnerable package is a transitive dependency, but no available version of the parent pulls in a fixed transitive. Resolve the transitive to a fixed version using the lowest-impact mechanism available in the ecosystem.
+
+#### How to choose:
+
+1. Is the vulnerable package declared directly in the project manifest?
+   - **Yes** → **Strategy A**
+   - **No** → Continue to step 2
+
+2. Identify the direct dependency (parent) that pulls in the vulnerable transitive. Does any available version of the parent resolve the vulnerable transitive to a fixed version?
+   - **Yes** → **Strategy B** (upgrade the parent)
+   - **No** → **Strategy C** (transitive fix)
+
+If the application directly imports or uses the transitive dependency (not just via the parent), note this — it affects breaking change analysis for Strategy C.
+
+Document the chosen strategy:
+```
+## Remediation Strategy
+- **Strategy**: [A: Direct Upgrade | B: Parent Upgrade | C: Transitive Fix]
+- **Target package to change**: [package@current → package@target]
+- **Parent dependency** (if B/C): [parent@current]
+- **Manifest file**: [path to manifest]
 ```
 
-If complex breaking changes detected:
-- Add TODO comments with migration notes
-- Note in summary that manual review is needed
+### Step 4.2: Breaking Change Assessment
 
-### Step 4.3: Apply Minimal Upgrade
-- Edit ONLY the necessary dependency in the manifest
-- Use the LOWEST version that fixes the vulnerability
-- Preserve file formatting and comments
+**⚠️ ALWAYS run `snyk_breakability_check` BEFORE applying any changes.** If the tool is unavailable, errors out, or does not return a LOW/MEDIUM/HIGH risk level, proceed to Step 4.2a.
 
-**Example (package.json):**
-```json
-// Before
-"lodash": "^4.17.15"
+Call `snyk_breakability_check` with the package that will actually change in the manifest:
 
-// After - minimal fix
-"lodash": "^4.17.21"
-```
+| Strategy | Check breakability on |
+|----------|----------------------|
+| A (Direct Upgrade) | The direct dependency being upgraded |
+| B (Parent Upgrade) | The parent dependency being upgraded |
+| C (Transitive Fix) | The transitive dependency being resolved to a new version |
 
-### Step 4.4: Regenerate Lockfile
+#### Breakability Decision Tree
 
-Run the appropriate install command:
+The breakability result (LOW / MEDIUM / HIGH) is a general likelihood assessment — it is not a confirmation of actual breakage in this specific project. Use the result to determine the next action.
+
+**Interactive vs. autonomous execution**: when a human is in the loop (interactive session), present trade-offs and ask for confirmation at MEDIUM and HIGH risk. When running autonomously (background agent, no human available), the agent must evaluate the same evidence a human would — vulnerability severity, breaking change risk, breaking change details — make the decision itself, and **document its reasoning** in the output. An autonomous agent must never block waiting for input that will not come.
+
+**Strategy A (Direct Upgrade) and Strategy B (Parent Upgrade):**
+
+| Risk | Action |
+|------|--------|
+| **LOW** | Auto-apply the upgrade. Proceed to Step 4.4. |
+| **MEDIUM** | **Interactive**: present the breaking change summary and recommend applying; ask the user to confirm. **Autonomous**: evaluate the vulnerability severity against the breaking change details, decide whether to apply or produce an advisory, and document the reasoning. |
+| **HIGH** | **Interactive**: present the full trade-off (vulnerability details, breaking change summary, exact proposed changes) and ask the user whether to proceed. **Autonomous**: evaluate the full trade-off, decide whether to apply or produce a Full Advisory (Phase 4a), and document the reasoning. |
+
+**Strategy B → fallback to C:** If Strategy B gets a HIGH breakability result and the decision (user or agent) is to not proceed, fall back to Strategy C. Re-run `snyk_breakability_check` on the transitive version jump and follow the Strategy C decision tree below.
+
+**Strategy C (Transitive Fix):**
+
+| Risk | Action |
+|------|--------|
+| **LOW** | Auto-apply the fix. Proceed to Step 4.4. |
+| **MEDIUM** | **Interactive**: present the breaking change summary and recommend applying; ask the user to confirm. **Autonomous**: evaluate the vulnerability severity against the breaking change details, decide whether to apply or produce an advisory, and document the reasoning. |
+| **HIGH** | **Interactive**: present the full trade-off and ask the user whether to proceed. If the vulnerability is **Critical severity with a known exploit**, emphasize the urgency. **Autonomous**: evaluate the full trade-off, decide whether to apply or produce a Full Advisory (Phase 4a), and document the reasoning. |
+
+### Step 4.2a: Breakability Fallback — Semver + Usage Analysis
+
+**This step activates when `snyk_breakability_check` is unavailable (tool not found, errors out, times out) OR returns a response without a LOW/MEDIUM/HIGH risk level** (e.g., "no additional breakability context available"). If breakability returned a valid risk level, skip this step entirely.
+
+When breakability data is unavailable, derive a substitute risk level by combining **semver distance** and **codebase usage**:
+
+1. **Determine the semver distance** between the current version and the target version:
+   - **Patch** bump (e.g., 1.2.3 → 1.2.5): lowest inherent risk
+   - **Minor** bump (e.g., 1.2.3 → 1.3.0): moderate inherent risk
+   - **Major** bump (e.g., 1.2.3 → 2.0.0): highest inherent risk
+
+2. **Search the codebase for direct usages of the package being upgraded.** Look for imports, requires, includes, or other dependency references using patterns appropriate to the project's language and ecosystem. The agent determines the correct search patterns based on the ecosystem — do not use hardcoded patterns.
+
+3. **Combine both signals to derive a substitute risk level:**
+
+| Semver Distance | No direct usage | Light usage | Heavy / complex usage |
+|-----------------|-----------------|-------------|----------------------|
+| **Patch** | LOW | LOW | LOW |
+| **Minor** | LOW | MEDIUM | MEDIUM |
+| **Major** | HIGH | HIGH | HIGH |
+
+4. **Feed the substitute risk level into the same Breakability Decision Tree from Step 4.2.** No separate code path — the same thresholds and actions apply.
+
+**Important**: when a substitute risk level is used, note this in the remediation summary (Phase 6) so the user knows the risk assessment was derived from codebase analysis, not from breakability data.
+
+### Step 4.3: Version Selection
+
+When multiple versions fix the vulnerability, do NOT blindly pick the lowest version number. Optimize for:
+
+1. Fixes the target vulnerability
+2. Lowest breakability risk (run `snyk_breakability_check` on candidates if needed)
+3. Lowest version number (tiebreaker only)
+
+### Step 4.4: Apply Fix
+
+**Only reach this step if the breakability decision allows it (auto-apply or user/agent confirmed).**
+
+**Strategy A (Direct Upgrade):**
+Update the version in the manifest and run the ecosystem's install command (`npm install pkg@version`, `yarn upgrade`, `go get`, `pip install`, `mvn dependency:resolve`, etc.). Preserve file formatting and comments.
+
+**Strategy B (Parent Upgrade):**
+Update the parent dependency version in the manifest and run the ecosystem's install command. After installation, verify that the resolved transitive is now the fixed version.
+
+**Strategy C (Transitive Fix):**
+Use the lowest-impact mechanism that makes the resolver choose a fixed version of the transitive. The exact mechanism is ecosystem-dependent — do not assume one universal ordering.
+
+1. **Resolver-only update first**: Refresh the lockfile or run the ecosystem's update/resolve command for the vulnerable package. This is appropriate when the fixed version is already allowed by the existing constraints.
+2. **If that fails**, inspect the ecosystem and repo layout, then choose the appropriate native resolver-control mechanism: top-level constraint/declaration, central dependency-management entry, force/override/resolution, exclusion, or replacement.
+3. **Prefer the narrowest effective scope.** Use a stronger override/force/replace only when a normal declaration or narrower exclusion cannot make the resolver choose the fixed version.
+4. **Hard pin only as a last resort.**
+
+#### Reference: common install/resolve commands
 
 | Package Manager | Command |
 |-----------------|---------|
@@ -235,6 +350,8 @@ Run the appropriate install command:
 | pip | `pip install -r requirements.txt` |
 | maven | `mvn dependency:resolve` |
 
+This table is not exhaustive — use the appropriate command for the project's ecosystem.
+
 **IMPORTANT**: Use `required_permissions: ["all"]` for package manager commands.
 
 **If installation fails:**
@@ -242,6 +359,58 @@ Run the appropriate install command:
 - If dependency conflict: try a different version or note as unfixable
 - Revert manifest changes if resolution completely fails
 - Document the failure reason
+
+---
+
+## Phase 4a: Full Advisory — SCA No-Apply Path
+
+**Enter this phase when the decision is to NOT apply an SCA fix** — whether because the user declined, or because the agent (in autonomous mode) determined the risk outweighs the benefit.
+
+Produce an advisory instead of making changes.
+
+### Advisory Output Format
+
+```
+## Security Advisory — Manual Action Required
+
+### Vulnerability
+- **ID**: [Snyk Issue ID]
+- **Severity**: [Critical | High | Medium | Low]
+- **Package**: [vulnerable_package@current_version]
+- **Title**: [vulnerability title]
+
+### Why This Was Not Auto-Applied
+[1-2 sentences: e.g., "The required transitive fix from pkg@1.0 to pkg@2.0 has a HIGH
+breaking change risk. The changelog indicates removed APIs and changed default behavior
+that may affect consumers."]
+
+### Breaking Change Details
+[Summary from snyk_breakability_check — what changed between versions, which APIs were
+removed/renamed/modified, migration notes if available]
+
+### Exact Changes Required
+To apply this fix manually, make the following changes:
+
+**1. Manifest change** ([path/to/manifest]):
+[Exact content to add or modify — the override/resolution entry or version bump]
+
+**2. Regenerate lockfile**:
+[Exact command to run]
+
+**3. Validate**:
+[Command to re-run SCA scan and tests]
+
+### Alternatives
+- Wait for [parent_package] to release a version that includes the fixed transitive
+- Evaluate replacing [vulnerable_package] with an alternative
+- Accept the risk and document in your security policy
+```
+
+**After producing the advisory:**
+- Do NOT make any file changes
+- Do NOT proceed to Phase 5
+- Send `snyk_send_feedback` with `fixedExistingIssuesCount: 0`
+- STOP
 
 ---
 
@@ -258,7 +427,7 @@ Run the appropriate install command:
 
 **For SCA vulnerabilities - If vulnerability still present:**
 - Check if lockfile was properly updated
-- Try explicit version install: `npm install <pkg>@<exact_version>`
+- Try explicit version install using the package manager's exact-version syntax
 - Maximum 3 attempts, then STOP and report failure
 
 **If NEW vulnerabilities introduced:**
@@ -272,7 +441,7 @@ Run the appropriate install command:
 *For SCA:*
 - Check severity trade-off:
   - **New severity LOWER than fixed**: Accept (net security improvement)
-  - **New severity EQUAL OR HIGHER**: Try higher version (up to 3 iterations)
+  - **New severity EQUAL OR HIGHER**: Try an alternative version. Run `snyk_breakability_check` on each candidate before attempting — do not blindly try higher versions without assessing their risk. Up to 3 iterations.
   - If no clean version exists: Revert and report as unfixable
 
 ### Step 5.1a: Identify Additional Issues Fixed (SCA Only)
@@ -282,12 +451,18 @@ A single upgrade often fixes multiple vulnerabilities:
 - Record each: ID, severity, title
 
 ### Step 5.2: Run Tests
-- Execute project tests (`npm test`, `pytest`, etc.)
+- Execute the project's test suite using the appropriate test runner
 - If tests fail due to the fix:
+
+  *For Code vulnerabilities:*
   - Prefer adjusting the fix over changing tests
   - Only modify tests if the fix legitimately changes expected behavior
   - Apply mechanical fixes only (renamed imports, etc.)
   - Maximum 2 attempts to resolve test failures
+
+  *For SCA vulnerabilities:*
+  - **If breakability was LOW**: prefer adjusting code to match the new API over downgrading. Apply mechanical fixes only (renamed imports, signature changes). Maximum 2 attempts.
+  - **If breakability was MEDIUM or HIGH**: test failures likely confirm real breaking changes. Do NOT attempt mechanical fixes — revert immediately and present the situation to the user with the test failure details and breaking change summary.
 
 ### Step 5.3: Run Linting
 - Run project linter if configured
@@ -340,6 +515,14 @@ A single upgrade often fixes multiple vulnerabilities:
 | **Snyk ID** | [SNYK-JS-XXX / CVE-XXX] |
 | **Severity** | [Critical/High/Medium/Low] |
 | **Package** | [package@old] → [package@new] |
+| **Strategy** | [Direct Upgrade / Parent Upgrade / Transitive Fix] |
+| **Breaking Change Risk** | [LOW / MEDIUM / HIGH] |
+| **Risk Source** | [Breakability Check / Codebase Usage Analysis] |
+
+### Breaking Change Summary
+[1-2 sentence summary from the breakability check — what changed between the versions.
+If risk was derived from codebase usage analysis: note that breakability data was unavailable
+and describe the usage pattern that informed the risk level.]
 
 ### Additional Issues Fixed by This Upgrade
 | ID | Severity | Title |
@@ -356,7 +539,7 @@ A single upgrade often fixes multiple vulnerabilities:
 | Check | Result |
 |-------|--------|
 | Snyk Re-scan | ✅ Resolved / ❌ Still present |
-| TypeScript/Build | ✅ Pass / ❌ Fail |
+| Build | ✅ Pass / ❌ Fail |
 | Linting | ✅ Pass / ❌ Fail |
 | Tests | ✅ Pass / ⚠️ Skipped (reason) / ❌ Fail |
 
@@ -519,10 +702,10 @@ If the vulnerability cannot be fixed automatically:
 4. Do NOT leave partial/broken fixes
 
 ### SCA - No Fix Available
-If no upgrade path exists:
-1. Document this clearly
-2. Suggest alternatives (replace package, patch, accept risk)
-3. Do NOT make changes
+Follow Step 2.5. Produce the No Fix Available Report and STOP.
+
+### SCA - Fix Declined or Skipped
+Clean exit — produce the Full Advisory (Phase 4a) if not already shown, send `snyk_send_feedback` with `fixedExistingIssuesCount: 0`, and STOP.
 
 ### Partial Success (Code)
 If some instances are fixed but others fail:
@@ -534,7 +717,8 @@ If some instances are fixed but others fail:
 ### Rollback Triggers
 Revert ALL changes if:
 - Unable to produce clean fix after 3 attempts (new vulnerabilities introduced)
-- Tests fail and cannot be reasonably fixed
+- Tests fail and cannot be reasonably fixed (Code), or tests fail when breakability was MEDIUM/HIGH (SCA)
+- Tests fail after 2 mechanical fix attempts when breakability was LOW (SCA)
 - Fix would require changing business logic
 - Dependency resolution completely fails
 
@@ -550,14 +734,19 @@ Revert ALL changes if:
 
 ## Constraints
 
-1. **One vulnerability TYPE per run** - Fix all instances of ONE vulnerability type (Code) or ONE dependency issue (SCA)
-2. **Minimal changes** - Only modify what's necessary
-3. **No new vulnerabilities** - Fixes must be clean (or net improvement for SCA)
-4. **Preserve functionality** - Tests must pass
-5. **No scope creep** - Don't refactor or "improve" other code
-6. **Consistent fixes** - Apply the same fix pattern across all instances (Code)
-7. **User confirmation for PR** - Never auto-create PRs
-8. **Always prompt for PR** - Every successful fix MUST end with the PR prompt question
+1. **One vulnerability TYPE per run** — Fix all instances of ONE vulnerability type (Code) or ONE dependency issue (SCA)
+2. **Minimal changes** — Only modify what's necessary
+3. **No new vulnerabilities** — Fixes must be clean (or net improvement for SCA)
+4. **Preserve functionality** — Tests must pass
+5. **No scope creep** — Don't refactor or "improve" other code
+6. **Consistent fixes** — Apply the same fix pattern across all instances (Code)
+7. **User confirmation for PR** — Never auto-create PRs
+8. **Always prompt for PR** — Every successful fix MUST end with the PR prompt question
+9. **Breakability gates all SCA fixes** — The agent MUST NOT apply any SCA upgrade without first running `snyk_breakability_check` and following the risk-based decision tree
+10. **Confirmation for MEDIUM and HIGH risk (SCA)** — See the interactive/autonomous rules in Step 4.2's Breakability Decision Tree
+11. **Version selection considers breakability (SCA)** — When multiple versions fix an SCA vulnerability, prefer the one with the lowest breakability risk, not just the lowest version number
+12. **Ecosystem-agnostic intent (SCA)** — SCA remediation steps describe what to do conceptually (e.g., "resolve the transitive to a fixed version using the lowest-impact mechanism"). Ecosystem-specific commands appear only as reference examples.
+13. **No fix path means no fix attempt (SCA)** — See Step 2.5
 
 ---
 
@@ -566,10 +755,13 @@ Revert ALL changes if:
 Before ending the conversation, verify ALL are complete:
 
 - [ ] Vulnerability type identified and documented (including all instances for code vulns)
-- [ ] Fix applied successfully
+- [ ] Fix path verified for SCA (if no fix exists: No Fix Available Report produced and STOP)
+- [ ] Remediation strategy determined for SCA (A, B, or C)
+- [ ] Breaking change assessment performed for SCA
+- [ ] Fix applied successfully (or Full Advisory produced if not applying)
 - [ ] Re-scan shows ALL instances resolved (or net improvement for SCA)
 - [ ] Tests pass (or failures documented)
 - [ ] Summary displayed to user (with instance count if multiple)
 - [ ] Snyk feedback sent with correct count
-- [ ] **PR prompt asked** ← Do NOT skip this step
+- [ ] **PR prompt asked** ← Do NOT skip this step (only if fix was applied)
 - [ ] PR created (if user confirmed)

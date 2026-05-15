@@ -556,6 +556,32 @@ class TestDetectAdes:
         result = installer.detect_ades()
         assert "claude" in result
 
+    def test_detects_codex_from_directory(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        (tmp_path / ".codex").mkdir()
+        result = installer.detect_ades()
+        assert "codex" in result
+
+    def test_detects_codex_from_cli(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr(installer, "_cursor_app_bundle_exists", lambda: False)
+        mock_run = MagicMock(return_value=MagicMock(returncode=1))
+        monkeypatch.setattr("subprocess.run", mock_run)
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/usr/bin/codex" if cmd == "codex" else None
+        )
+        result = installer.detect_ades()
+        assert "codex" in result
+
+    def test_detects_more(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        (tmp_path / ".cursor").mkdir()
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".codex").mkdir()
+        result = installer.detect_ades()
+        assert "codex" in result
+        assert len(result) > 1
+
 
 # ===========================================================================
 # TestManifest
@@ -614,6 +640,33 @@ class TestManifest:
     def test_get_sources_missing_ade(self, manifest):
         sources = manifest.get_sources("sai-hooks-async", "vscode")
         assert sources == {}
+
+    def test_codex_sources_for_sai_hooks(self, manifest):
+        sources = manifest.get_sources("sai-hooks-async", "codex")
+        assert "files" in sources
+        assert "config_merge" in sources
+        # Hook scripts go to ~/.codex/hooks/, config to ~/.codex/config.toml
+        dests = {f["dest"] for f in sources["files"]}
+        assert ".codex/hooks/snyk_secure_at_inception.py" in dests
+        assert sources["config_merge"]["target"] == ".codex/config.toml"
+        assert sources["config_merge"]["strategy"] == "merge_codex_config"
+
+    def test_codex_sources_for_mcp_use_same_config_toml(self, manifest):
+        sources = manifest.get_sources("mcp-config", "codex")
+        # MCP servers go in the SAME ~/.codex/config.toml as hooks (Codex convention)
+        assert sources["config_merge"]["target"] == ".codex/config.toml"
+        assert sources["config_merge"]["strategy"] == "merge_codex_config"
+
+    def test_codex_skill_uses_dot_agents_path(self, manifest):
+        sources = manifest.get_sources("secure-dependency-health-check-skill", "codex")
+        dests = [f["dest"] for f in sources["files"]]
+        # Codex skills convention is ~/.agents/skills/, not ~/.codex/skills/
+        assert all(d.startswith(".agents/skills/snyk/") for d in dests), dests
+
+    def test_codex_has_no_slash_command_recipes(self, manifest):
+        # Codex CLI does not support user-defined slash commands.
+        for recipe_id in ("snyk-fix-command", "snyk-batch-fix-command"):
+            assert manifest.get_sources(recipe_id, "codex") == {}, recipe_id
 
     def test_are_rules_conflicting_no_conflict(self, manifest, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
@@ -993,6 +1046,44 @@ class TestLifecycle:
             installer.install_recipe(recipe_id, "claude", manifest, payload, dry_run=True)
 
         assert not (fake_home / ".claude" / "hooks" / "snyk_secure_at_inception.py").exists()
+
+    def test_codex_install_verify_uninstall(self, tmp_path, payload, manifest, monkeypatch):
+        # Codex doesn't get all recipes (no slash commands), so use a fresh fake_home
+        # without claude/cursor pre-created so we exercise the codex-only path.
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        recipes = manifest.resolve_recipes("default")
+
+        # Install codex recipes
+        for recipe_id in recipes:
+            installer.install_recipe(recipe_id, "codex", manifest, payload, dry_run=False)
+
+        # Hook scripts and lib live under ~/.codex/
+        assert (tmp_path / ".codex" / "hooks" / "snyk_secure_at_inception.py").exists()
+        assert (tmp_path / ".codex" / "hooks" / "lib" / "scan_runner.py").exists()
+        # Skill files live under ~/.agents/skills/snyk/ (NOT ~/.codex/)
+        assert (
+            tmp_path / ".agents" / "skills" / "snyk" / "secure-dependency-health-check" / "SKILL.md"
+        ).exists()
+        # Hooks + MCP both merged into a single config.toml
+        config_toml = (tmp_path / ".codex" / "config.toml").read_text()
+        assert "hooks = true" in config_toml
+        assert "[mcp_servers.Snyk]" in config_toml
+        assert "PostToolUse" in config_toml
+
+        # Slash-command recipes have no codex source, so they should produce no files
+        assert not (tmp_path / ".codex" / "commands" / "snyk-fix.md").exists()
+
+        # Verify
+        for recipe_id in recipes:
+            assert installer.verify_recipe(recipe_id, "codex", manifest, payload)
+
+        # Uninstall removes our entries; user content (none here) is preserved
+        installer.uninstall(["codex"], manifest, payload, dry_run=False)
+        assert not (tmp_path / ".codex" / "hooks" / "snyk_secure_at_inception.py").exists()
+        # config.toml itself is removed when only Snyk content was present
+        assert not (tmp_path / ".codex" / "config.toml").exists()
+        # .bak file from the merge backup is left behind (intentional, matches claude behavior)
+        assert (tmp_path / ".codex" / "config.toml.bak").exists()
 
 
 # ===========================================================================

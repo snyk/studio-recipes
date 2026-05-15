@@ -115,7 +115,16 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--ade",
-        choices=["cursor", "claude", "gemini", "kiro", "windsurf", "copilot-cli", "copilot-vscode"],
+        choices=[
+            "cursor",
+            "claude",
+            "gemini",
+            "kiro",
+            "codex",
+            "windsurf",
+            "copilot-cli",
+            "copilot-vscode",
+        ],
         default=None,
         help="Target specific ADE (auto-detect if omitted)",
     )
@@ -666,6 +675,7 @@ ADE_HOMES = {
     "claude": ".claude",
     "gemini": ".gemini",
     "kiro": ".kiro",
+    "codex": ".codex",
     "windsurf": ".codeium/windsurf",
     "copilot-cli": ".copilot",
     "copilot-vscode": "User",
@@ -801,11 +811,16 @@ def detect_ades() -> List[str]:
     if (home / ".kiro").is_dir() or shutil.which("kiro"):
         detected.append("kiro")
 
-    if (
-        (home / ".codeium" / "windsurf").is_dir()
-        or (home / ".windsurf").is_dir()
-        or shutil.which("windsurf")
-    ):
+    if (home / ".codex").is_dir():
+        detected.append("codex")
+    elif shutil.which("codex"):
+        detected.append("codex")
+
+    if (home / ".codeium" / "windsurf").is_dir():
+        detected.append("windsurf")
+    elif (home / ".windsurf").is_dir():
+        detected.append("windsurf")
+    elif shutil.which("windsurf"):
         detected.append("windsurf")
 
     if (home / ".copilot").is_dir() or shutil.which("copilot"):
@@ -835,10 +850,11 @@ def get_target_ades(
     print("  2) Claude Code")
     print("  3) Gemini Code")
     print("  4) Kiro")
-    print("  5) Windsurf")
-    print("  6) GitHub Copilot CLI")
-    print("  7) GitHub Copilot in VS Code")
-    print("  8) All")
+    print("  5) Codex CLI")
+    print("  6) Windsurf")
+    print("  7) GitHub Copilot CLI")
+    print("  8) GitHub Copilot in VS Code")
+    print("  9) All")
     print()
     reply = input("  Choose (1/2/3/4/5/6/7): ").strip()
     choices = {
@@ -846,10 +862,20 @@ def get_target_ades(
         "2": ["claude"],
         "3": ["gemini"],
         "4": ["kiro"],
-        "5": ["windsurf"],
-        "6": ["copilot-cli"],
-        "7": ["copilot-vscode"],
-        "8": ["cursor", "claude", "gemini", "kiro", "windsurf", "copilot-cli", "copilot-vscode"],
+        "5": ["codex"],
+        "6": ["windsurf"],
+        "7": ["copilot-cli"],
+        "8": ["copilot-vscode"],
+        "9": [
+            "cursor",
+            "claude",
+            "gemini",
+            "kiro",
+            "codex",
+            "windsurf",
+            "copilot-cli",
+            "copilot-vscode",
+        ],
     }
     if reply in choices:
         return choices[reply]
@@ -862,7 +888,7 @@ def get_target_ades(
 # =============================================================================
 
 _WIN32_REWRITE_STRATEGIES: frozenset[str] = frozenset(
-    {"cursor_hooks", "claude_settings", "gemini_settings", "kiro_settings"}
+    {"cursor_hooks", "claude_settings", "gemini_settings", "kiro_settings", "codex_config"}
 )
 
 
@@ -874,6 +900,8 @@ def _platform_source(strategy: str, source: Path) -> Iterator[Path]:
     rewritten to (py -3, %USERPROFILE%). Without a temp file, merge_json (which only accepts paths)
     would receive the original source and install the wrong commands on Windows.
     delete=False is required because Windows cannot read a file that is still open.
+
+    Dispatches on file extension: JSON for cursor/claude sources, TOML for codex.
     """
     should_create_temp = sys.platform == "win32" and any(
         s in strategy for s in _WIN32_REWRITE_STRATEGIES
@@ -881,14 +909,37 @@ def _platform_source(strategy: str, source: Path) -> Iterator[Path]:
     if not should_create_temp:
         yield source
         return
-    with open(source) as f:
-        data = json.load(f)
+
+    is_toml = source.suffix.lower() == ".toml"
+    if is_toml:
+        # Use vendored tomli/tomli_w from the installer's lib/ directory.
+        vendor_dir = str(Path(__file__).resolve().parent / "lib" / "_vendor")
+        if vendor_dir not in sys.path:
+            sys.path.insert(0, vendor_dir)
+        try:
+            import tomllib as _toml_read  # Python 3.11+
+        except ImportError:  # pragma: no cover
+            import tomli as _toml_read  # type: ignore[no-redef]
+        import tomli_w as _toml_write
+
+        with open(source, "rb") as f:
+            data = _toml_read.load(f)
+    else:
+        with open(source) as f:
+            data = json.load(f)
+
     data = rewrite_hook_commands_for_platform(data)
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+
+    suffix = ".toml" if is_toml else ".json"
+    mode = "wb" if is_toml else "w"
+    tmp = tempfile.NamedTemporaryFile(mode=mode, suffix=suffix, delete=False)
     tmp_path = Path(tmp.name)
     try:
-        json.dump(data, tmp, indent=2)
-        tmp.write("\n")
+        if is_toml:
+            _toml_write.dump(data, tmp)
+        else:
+            json.dump(data, tmp, indent=2)
+            tmp.write("\n")
         tmp.close()
         yield tmp_path
     finally:

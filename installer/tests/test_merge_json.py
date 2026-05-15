@@ -12,17 +12,22 @@ from merge_json import (
     _command_script_key,
     _is_snyk_command,
     _load_json,
+    _load_toml,
     _write_json,
+    _write_toml,
     main,
     merge_claude_settings,
+    merge_codex_config,
     merge_cursor_hooks,
     merge_gemini_settings,
     merge_mcp_servers,
     unmerge_claude_settings,
+    unmerge_codex_config,
     unmerge_cursor_hooks,
     unmerge_gemini_settings,
     unmerge_mcp_servers,
     verify_claude_settings,
+    verify_codex_config,
     verify_cursor_hooks,
     verify_gemini_settings,
     verify_mcp_servers,
@@ -1069,3 +1074,242 @@ class TestVerifyMcpServers:
         with pytest.raises(SystemExit) as exc_info:
             verify_mcp_servers(target, snyk_mcp_source)
         assert exc_info.value.code == 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Codex TOML config: merge / unmerge / verify
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _read_toml(path):
+    """Helper: read a TOML file into a dict (uses the same reader as merge_json)."""
+    return _load_toml(path)
+
+
+class TestLoadToml:
+    def test_returns_dict_from_valid_file(self, tmp_path):
+        p = tmp_path / "data.toml"
+        p.write_text('key = "value"\n')
+        assert _load_toml(str(p)) == {"key": "value"}
+
+    def test_returns_empty_dict_for_missing_file(self, tmp_path):
+        assert _load_toml(str(tmp_path / "nope.toml")) == {}
+
+
+class TestWriteToml:
+    def test_writes_round_trippable_content(self, tmp_path):
+        p = str(tmp_path / "out.toml")
+        _write_toml(p, {"a": 1, "nested": {"b": True}})
+        assert _load_toml(p) == {"a": 1, "nested": {"b": True}}
+
+    def test_creates_parent_directories(self, tmp_path):
+        p = str(tmp_path / "a" / "b" / "c" / "out.toml")
+        _write_toml(p, {"x": True})
+        assert os.path.exists(p)
+
+
+class TestMergeCodexConfig:
+    """merge_codex_config handles features, hooks, and mcp_servers concerns."""
+
+    def test_creates_target_when_missing(self, tmp_path, snyk_codex_hooks_source):
+        target = str(tmp_path / "config.toml")
+        merge_codex_config(target, snyk_codex_hooks_source)
+        data = _read_toml(target)
+        assert data["features"]["hooks"] is True
+        assert "SessionStart" in data["hooks"]
+        assert "PostToolUse" in data["hooks"]
+        assert "Stop" in data["hooks"]
+
+    def test_preserves_existing_user_keys(self, existing_codex_target, snyk_codex_hooks_source):
+        merge_codex_config(existing_codex_target, snyk_codex_hooks_source)
+        data = _read_toml(existing_codex_target)
+        # User's top-level scalar preserved
+        assert data["model"] == "gpt-5"
+        # User's other [features] flag preserved alongside ours
+        assert data["features"]["my_other_flag"] is True
+        assert data["features"]["hooks"] is True
+        # User's MCP server preserved
+        assert data["mcp_servers"]["GitHub"]["command"] == "gh"
+
+    def test_creates_backup_file(self, existing_codex_target, snyk_codex_hooks_source):
+        merge_codex_config(existing_codex_target, snyk_codex_hooks_source)
+        assert os.path.exists(existing_codex_target + ".bak")
+
+    def test_merges_mcp_servers_alongside_hooks(
+        self, existing_codex_target, snyk_codex_hooks_source, snyk_codex_mcp_source
+    ):
+        merge_codex_config(existing_codex_target, snyk_codex_hooks_source)
+        merge_codex_config(existing_codex_target, snyk_codex_mcp_source)
+        data = _read_toml(existing_codex_target)
+        assert data["mcp_servers"]["Snyk"]["command"] == "npx"
+        assert data["mcp_servers"]["GitHub"]["command"] == "gh"
+        assert data["features"]["hooks"] is True
+        assert "PostToolUse" in data["hooks"]
+
+    def test_idempotent_dedupes_by_command(self, tmp_path, snyk_codex_hooks_source):
+        target = str(tmp_path / "config.toml")
+        merge_codex_config(target, snyk_codex_hooks_source)
+        merge_codex_config(target, snyk_codex_hooks_source)
+        data = _read_toml(target)
+        # Each event has exactly one matcher group with exactly one hook entry
+        for event in ("SessionStart", "PostToolUse", "Stop"):
+            assert len(data["hooks"][event]) == 1
+            assert len(data["hooks"][event][0]["hooks"]) == 1
+
+    def test_appends_when_existing_hook_has_different_matcher(
+        self, write_toml, snyk_codex_hooks_source
+    ):
+        # Pre-existing PostToolUse with a different matcher must coexist with ours.
+        target = write_toml(
+            "config.toml",
+            """
+[[hooks.PostToolUse]]
+matcher = "^(eslint|prettier)$"
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "echo lint"
+""",
+        )
+        merge_codex_config(target, snyk_codex_hooks_source)
+        data = _read_toml(target)
+        matchers = sorted(g.get("matcher", "") for g in data["hooks"]["PostToolUse"])
+        assert matchers == ["^(apply_patch|Edit|Write)$", "^(eslint|prettier)$"]
+
+    def test_dedupes_within_same_matcher_group(self, write_toml, snyk_codex_hooks_source):
+        # Existing PostToolUse with the SAME matcher and a different command:
+        # ours appends without removing theirs.
+        target = write_toml(
+            "config.toml",
+            """
+[[hooks.PostToolUse]]
+matcher = "^(apply_patch|Edit|Write)$"
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "echo other-tool"
+""",
+        )
+        merge_codex_config(target, snyk_codex_hooks_source)
+        data = _read_toml(target)
+        groups = data["hooks"]["PostToolUse"]
+        assert len(groups) == 1  # Same matcher → single group
+        commands = [h["command"] for h in groups[0]["hooks"]]
+        assert "echo other-tool" in commands
+        assert any("snyk_secure_at_inception" in c for c in commands)
+
+    def test_invalid_toml_raises_value_error(self, tmp_path, snyk_codex_hooks_source):
+        target = tmp_path / "bad.toml"
+        target.write_text("this is not [valid toml = \n")
+        with pytest.raises(ValueError, match="Invalid TOML"):
+            merge_codex_config(str(target), snyk_codex_hooks_source)
+
+
+class TestUnmergeCodexConfig:
+    """unmerge_codex_config removes Snyk entries while preserving user content."""
+
+    def test_round_trip_preserves_user_content(
+        self, existing_codex_target, snyk_codex_hooks_source, snyk_codex_mcp_source
+    ):
+        merge_codex_config(existing_codex_target, snyk_codex_hooks_source)
+        merge_codex_config(existing_codex_target, snyk_codex_mcp_source)
+        unmerge_codex_config(existing_codex_target, snyk_codex_mcp_source)
+        unmerge_codex_config(existing_codex_target, snyk_codex_hooks_source)
+        data = _read_toml(existing_codex_target)
+        assert data == {
+            "model": "gpt-5",
+            "features": {"my_other_flag": True},
+            "mcp_servers": {"GitHub": {"command": "gh", "args": ["mcp"]}},
+        }
+
+    def test_removes_target_file_when_only_snyk_entries_present(
+        self, tmp_path, snyk_codex_hooks_source
+    ):
+        target = str(tmp_path / "config.toml")
+        merge_codex_config(target, snyk_codex_hooks_source)
+        unmerge_codex_config(target, snyk_codex_hooks_source)
+        # Empty result file is removed entirely (not left as a stub)
+        assert not os.path.exists(target)
+
+    def test_idempotent_when_already_unmerged(self, existing_codex_target, snyk_codex_hooks_source):
+        unmerge_codex_config(existing_codex_target, snyk_codex_hooks_source)
+        unmerge_codex_config(existing_codex_target, snyk_codex_hooks_source)
+        # User content untouched after a no-op double unmerge
+        data = _read_toml(existing_codex_target)
+        assert data["model"] == "gpt-5"
+
+    def test_noop_for_missing_target(self, tmp_path, snyk_codex_hooks_source):
+        target = str(tmp_path / "absent.toml")
+        unmerge_codex_config(target, snyk_codex_hooks_source)
+        assert not os.path.exists(target)
+
+    def test_preserves_hook_entries_we_did_not_install(
+        self, existing_codex_target, snyk_codex_hooks_source
+    ):
+        merge_codex_config(existing_codex_target, snyk_codex_hooks_source)
+        # Manually add an unrelated hook under the same matcher
+        data = _read_toml(existing_codex_target)
+        data["hooks"]["PostToolUse"][0]["hooks"].append(
+            {"type": "command", "command": "echo my-own-hook"}
+        )
+        _write_toml(existing_codex_target, data)
+        # Unmerge: ours should be removed, the user's preserved
+        unmerge_codex_config(existing_codex_target, snyk_codex_hooks_source)
+        data = _read_toml(existing_codex_target)
+        commands = [h["command"] for h in data["hooks"]["PostToolUse"][0]["hooks"]]
+        assert commands == ["echo my-own-hook"]
+
+
+class TestVerifyCodexConfig:
+    """verify_codex_config exits 1 on missing entries; returns silently on success."""
+
+    def test_passes_after_merge(self, existing_codex_target, snyk_codex_hooks_source):
+        merge_codex_config(existing_codex_target, snyk_codex_hooks_source)
+        verify_codex_config(existing_codex_target, snyk_codex_hooks_source)  # no SystemExit
+
+    def test_fails_when_features_flag_missing(self, tmp_path, snyk_codex_hooks_source):
+        target = str(tmp_path / "config.toml")
+        with pytest.raises(SystemExit) as exc_info:
+            verify_codex_config(target, snyk_codex_hooks_source)
+        assert exc_info.value.code == 1
+
+    def test_fails_when_hook_event_missing(self, write_toml, snyk_codex_hooks_source, capsys):
+        target = write_toml("config.toml", "[features]\nhooks = true\n")
+        with pytest.raises(SystemExit):
+            verify_codex_config(target, snyk_codex_hooks_source)
+        err = capsys.readouterr().err
+        assert "SessionStart" in err
+
+    def test_fails_when_mcp_server_missing(self, tmp_path, snyk_codex_mcp_source):
+        target = str(tmp_path / "config.toml")
+        with pytest.raises(SystemExit) as exc_info:
+            verify_codex_config(target, snyk_codex_mcp_source)
+        assert exc_info.value.code == 1
+
+    def test_fails_when_hook_command_missing(self, write_toml, snyk_codex_hooks_source, capsys):
+        # Same matcher group exists but with the wrong command.
+        target = write_toml(
+            "config.toml",
+            """
+[features]
+hooks = true
+
+[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "echo wrong"
+
+[[hooks.PostToolUse]]
+matcher = "^(apply_patch|Edit|Write)$"
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "echo wrong"
+
+[[hooks.Stop]]
+[[hooks.Stop.hooks]]
+type = "command"
+command = "echo wrong"
+""",
+        )
+        with pytest.raises(SystemExit):
+            verify_codex_config(target, snyk_codex_hooks_source)
+        err = capsys.readouterr().err
+        assert "snyk_secure_at_inception" in err

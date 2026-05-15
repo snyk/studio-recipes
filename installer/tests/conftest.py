@@ -175,3 +175,83 @@ def multi_snyk_mcp_source(write_json):
 @pytest.fixture
 def existing_mcp_target(write_json):
     return write_json("target/mcp.json", GITHUB_MCP_CONFIG)
+
+
+# ---------------------------------------------------------------------------
+# Codex TOML fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def write_toml(tmp_path):
+    """Factory: write_toml(filename, raw_text) -> absolute path string."""
+
+    def _write(filename, raw_text):
+        path = tmp_path / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not raw_text.endswith("\n"):
+            raw_text += "\n"
+        path.write_text(raw_text)
+        return str(path)
+
+    return _write
+
+
+SNYK_CODEX_HOOKS_TOML = """\
+[features]
+hooks = true
+
+[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = 'python3 "$HOME/.codex/hooks/snyk_secure_at_inception.py"'
+statusMessage = "Initializing Snyk security scanning..."
+
+[[hooks.PostToolUse]]
+matcher = "^(apply_patch|Edit|Write)$"
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = 'python3 "$HOME/.codex/hooks/snyk_secure_at_inception.py"'
+statusMessage = "Tracking code changes for security scan..."
+
+[[hooks.Stop]]
+[[hooks.Stop.hooks]]
+type = "command"
+command = 'python3 "$HOME/.codex/hooks/snyk_secure_at_inception.py"'
+statusMessage = "Evaluating security scan results..."
+"""
+
+
+SNYK_CODEX_MCP_TOML = """\
+[mcp_servers.Snyk]
+command = "npx"
+args = ["-y", "snyk@latest", "mcp", "-t", "stdio"]
+"""
+
+
+EXISTING_CODEX_CONFIG_TOML = """\
+# user's pre-existing codex config
+model = "gpt-5"
+
+[features]
+my_other_flag = true
+
+[mcp_servers.GitHub]
+command = "gh"
+args = ["mcp"]
+"""
+
+
+@pytest.fixture
+def snyk_codex_hooks_source(write_toml):
+    return write_toml("source/codex_hooks.toml", SNYK_CODEX_HOOKS_TOML)
+
+
+@pytest.fixture
+def snyk_codex_mcp_source(write_toml):
+    return write_toml("source/codex_mcp.toml", SNYK_CODEX_MCP_TOML)
+
+
+@pytest.fixture
+def existing_codex_target(write_toml):
+    return write_toml("target/config.toml", EXISTING_CODEX_CONFIG_TOML)

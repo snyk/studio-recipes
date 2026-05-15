@@ -61,7 +61,7 @@ Choose with `--profile <name>`.
 | Goal | Flag |
 |---|---|
 | Preview without writing files | `--dry-run` |
-| Install for one assistant only | `--ade <cursor\|claude\|gemini\|kiro\|windsurf\|copilot-cli\|copilot-vscode>` |
+| Install for one assistant only | `--ade <cursor\|claude\|gemini\|kiro\|codex\|windsurf\|copilot-cli\|copilot-vscode>` |
 | Skip confirmation prompts | `-y`, `--yes` |
 | Re-verify a previous install | `--verify` |
 | Remove what was installed | `--uninstall` |
@@ -95,6 +95,7 @@ The installer adapts each recipe to the assistant's native mechanism (slash comm
 | Claude Code | ✓ | ✓ | ✓ | ✓ |
 | Gemini | ✓ | ✓ | ✓ | ✓ |
 | Kiro | — | ✓ | ✓ | ✓ |
+| Codex | ✓ | - | ✓ | ✓ |
 | Windsurf | — | ✓ | ✓ | ✓ |
 | GitHub Copilot in VS Code | — | ✓ | ✓ | ✓ |
 | GitHub Copilot CLI | — | — *(not yet supported by Copilot CLI)* | ✓ | ✓ |

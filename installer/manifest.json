@@ -49,6 +49,19 @@
             "source": "guardrail_directives/secure_at_inception/hooks_version/gemini/async_cli_version/settings.json",
             "strategy": "merge_gemini_settings"
           }
+        },
+        "codex": {
+          "files": [
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/codex/async_cli_version/snyk_secure_at_inception.py", "dest": ".codex/hooks/snyk_secure_at_inception.py" },
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/codex/async_cli_version/lib/platform_utils.py", "dest": ".codex/hooks/lib/platform_utils.py" },
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/codex/async_cli_version/lib/scan_runner.py", "dest": ".codex/hooks/lib/scan_runner.py" },
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/codex/async_cli_version/lib/scan_worker.py", "dest": ".codex/hooks/lib/scan_worker.py" }
+          ],
+          "config_merge": {
+            "target": ".codex/config.toml",
+            "source": "guardrail_directives/secure_at_inception/hooks_version/codex/async_cli_version/config.toml",
+            "strategy": "merge_codex_config"
+          }
         }
       }
     },
@@ -87,7 +100,8 @@
             { "src": "command_directives/synchronous_remediation/command/single_all_in_one_command/snyk-fix.md", "dest": "prompts/snyk-fix.prompt.md" }
           ]
         }
-      }
+      },
+      "comment": "Codex CLI does not support user-defined slash commands; this recipe is intentionally not provided for codex."
     },
     "snyk-batch-fix-command": {
       "type": "command",
@@ -124,7 +138,8 @@
             { "src": "command_directives/synchronous_remediation/command/snyk-batch-fix.md", "dest": "prompts/snyk-batch-fix.prompt.md" }
           ]
         }
-      }
+      },
+      "comment": "Codex CLI does not support user-defined slash commands; this recipe is intentionally not provided for codex."
     },
     "mcp-config": {
       "type": "mcp",
@@ -157,6 +172,13 @@
             "target": ".kiro/settings/mcp.json",
             "source": "mcp/.mcp.json",
             "strategy": "merge_mcp_servers"
+          }
+        },
+        "codex": {
+          "config_merge": {
+            "target": ".codex/config.toml",
+            "source": "mcp/.mcp-codex.toml",
+            "strategy": "merge_codex_config"
           }
         },
         "windsurf": {
@@ -212,6 +234,12 @@
         "kiro": {
           "files": [
             { "src": "command_directives/synchronous_remediation/skills/secure-dependency-health-check/SKILL.md", "dest": ".kiro/skills/secure-dependency-health-check/SKILL.md" }
+          ]
+        },
+        "codex": {
+          "files": [
+            { "src": "command_directives/synchronous_remediation/skills/secure-dependency-health-check/SKILL.md", "dest": ".agents/skills/snyk/secure-dependency-health-check/SKILL.md" },
+            { "src": "command_directives/synchronous_remediation/skills/secure-dependency-health-check/references/package-evaluation-criteria.md", "dest": ".agents/skills/snyk/secure-dependency-health-check/references/package-evaluation-criteria.md" }
           ]
         },
         "windsurf": {

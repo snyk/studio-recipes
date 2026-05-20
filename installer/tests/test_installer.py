@@ -15,7 +15,8 @@ sys.path.insert(0, str(INSTALLER_DIR))
 sys.path.insert(0, str(INSTALLER_DIR / "lib"))
 
 # Import with underscore since the filename has hyphens
-import importlib
+import importlib  # noqa: E402 — imports follow sys.path setup
+
 installer = importlib.import_module("snyk-studio-installer")
 
 
@@ -23,13 +24,16 @@ installer = importlib.import_module("snyk-studio-installer")
 # TestCheckPrerequisites
 # ===========================================================================
 
+
 class TestCheckPrerequisites:
     @pytest.fixture(autouse=True)
     def mock_node_installed(self, monkeypatch):
         monkeypatch.setattr(installer, "ensure_node_installed", lambda _: True)
 
     def test_all_ok(self, monkeypatch, capsys):
-        monkeypatch.setattr("shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None)
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None
+        )
 
         def mock_run(cmd, **kwargs):
             m = MagicMock()
@@ -46,7 +50,9 @@ class TestCheckPrerequisites:
         assert "OK Snyk CLI 1.1302.0" in captured.out
 
     def test_outdated_snyk_warning(self, monkeypatch, capsys):
-        monkeypatch.setattr("shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None)
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None
+        )
 
         def mock_run(cmd, **kwargs):
             m = MagicMock()
@@ -63,7 +69,9 @@ class TestCheckPrerequisites:
         assert "WARNING Snyk CLI 1.1301.0 is outdated" in captured.out
 
     def test_outdated_snyk_cancel(self, monkeypatch, capsys):
-        monkeypatch.setattr("shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None)
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None
+        )
 
         def mock_run(cmd, **kwargs):
             m = MagicMock()
@@ -86,9 +94,11 @@ class TestCheckPrerequisites:
         monkeypatch.setattr("sys.platform", "linux")
 
         cmds_run = []
+
         def mock_run(cmd, **kwargs):
             cmds_run.append(cmd)
             return MagicMock(returncode=0)
+
         monkeypatch.setattr(installer, "run", mock_run)
 
         # Mock input to say 'y' to continue
@@ -100,10 +110,13 @@ class TestCheckPrerequisites:
         assert "WARNING Snyk CLI not found" in captured.out
 
     def test_outdated_snyk_auto_upgrade(self, monkeypatch, capsys):
-        monkeypatch.setattr("shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None)
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None
+        )
         monkeypatch.setattr("sys.platform", "linux")
 
         cmds_run = []
+
         def mock_run(cmd, **kwargs):
             cmds_run.append(cmd)
             m = MagicMock()
@@ -122,7 +135,9 @@ class TestCheckPrerequisites:
         assert "WARNING Snyk CLI 1.1301.0 is outdated" in captured.out
 
     def test_version_parse_edge_case(self, monkeypatch, capsys):
-        monkeypatch.setattr("shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None)
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None
+        )
 
         def mock_run(cmd, **kwargs):
             m = MagicMock()
@@ -139,7 +154,9 @@ class TestCheckPrerequisites:
         assert "is outdated" not in captured.out
 
     def test_version_malformed_no_error(self, monkeypatch, capsys):
-        monkeypatch.setattr("shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None)
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None
+        )
 
         def mock_run(cmd, **kwargs):
             m = MagicMock()
@@ -157,6 +174,7 @@ class TestCheckPrerequisites:
 # TestParseArgs
 # ===========================================================================
 
+
 class TestParseArgs:
     def test_defaults(self):
         args = installer.parse_args([])
@@ -169,14 +187,18 @@ class TestParseArgs:
         assert args.yes is False
 
     def test_all_flags(self):
-        args = installer.parse_args([
-            "--profile", "minimal",
-            "--ade", "cursor",
-            "--dry-run",
-            "--verify",
-            "--list",
-            "-y",
-        ])
+        args = installer.parse_args(
+            [
+                "--profile",
+                "minimal",
+                "--ade",
+                "cursor",
+                "--dry-run",
+                "--verify",
+                "--list",
+                "-y",
+            ]
+        )
         assert args.profile == "minimal"
         assert args.ade == "cursor"
         assert args.dry_run is True
@@ -196,10 +218,27 @@ class TestParseArgs:
         args = installer.parse_args(["--ade", "kiro"])
         assert args.ade == "kiro"
 
+    def test_codex_ade_accepted(self):
+        args = installer.parse_args(["--ade", "codex"])
+        assert args.ade == "codex"
+
+    def test_windsurf_ade_accepted(self):
+        args = installer.parse_args(["--ade", "windsurf"])
+        assert args.ade == "windsurf"
+
+    def test_copilot_cli_ade_accepted(self):
+        args = installer.parse_args(["--ade", "copilot-cli"])
+        assert args.ade == "copilot-cli"
+
+    def test_copilot_vscode_ade_accepted(self):
+        args = installer.parse_args(["--ade", "copilot-vscode"])
+        assert args.ade == "copilot-vscode"
+
 
 # ===========================================================================
 # TestColor
 # ===========================================================================
+
 
 class TestColor:
     def test_disabled_returns_plain_text(self):
@@ -221,23 +260,31 @@ class TestColor:
 # TestEnsureNodeInstalled
 # ===========================================================================
 
+
 class TestEnsureNodeInstalled:
     def test_node_npm_already_installed(self, monkeypatch):
-        monkeypatch.setattr("shutil.which", lambda cmd: "/bin/cmd" if cmd in ("node", "npm") else None)
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/bin/cmd" if cmd in ("node", "npm") else None
+        )
         assert installer.ensure_node_installed(auto_yes=True) is True
 
     def test_darwin_brew_install(self, monkeypatch, capsys):
         def mock_which(cmd):
-            if cmd == "brew": return "/opt/homebrew/bin/brew"
+            if cmd == "brew":
+                return "/opt/homebrew/bin/brew"
             return None
+
         monkeypatch.setattr("shutil.which", mock_which)
         monkeypatch.setattr("platform.system", lambda: "Darwin")
 
         cmds_run = []
+
         def mock_run(cmd, **kwargs):
             cmds_run.append(cmd)
             # simulate node being available after run
-            monkeypatch.setattr("shutil.which", lambda c: "/bin/cmd" if c in ("node", "npm") else mock_which(c))
+            monkeypatch.setattr(
+                "shutil.which", lambda c: "/bin/cmd" if c in ("node", "npm") else mock_which(c)
+            )
             return MagicMock(returncode=0)
 
         monkeypatch.setattr(installer, "run", mock_run)
@@ -246,19 +293,26 @@ class TestEnsureNodeInstalled:
 
     def test_darwin_homebrew_install(self, monkeypatch, capsys):
         """Verify that the installer correctly attempts to install Homebrew when missing on macOS."""
+
         def mock_which(cmd):
             return None
+
         monkeypatch.setattr("shutil.which", mock_which)
         monkeypatch.setattr("platform.system", lambda: "Darwin")
 
         runs = []
+
         def mock_run(cmd, **kwargs):
             runs.append((cmd, kwargs))
+
             # After Homebrew install, simulate brew being found
             def next_which(c):
-                if c == "brew": return "/opt/homebrew/bin/brew"
-                if c in ("node", "npm") and any("node" in r[0] for r in runs): return "/bin/cmd"
+                if c == "brew":
+                    return "/opt/homebrew/bin/brew"
+                if c in ("node", "npm") and any("node" in r[0] for r in runs):
+                    return "/bin/cmd"
                 return None
+
             monkeypatch.setattr("shutil.which", next_which)
             return MagicMock(returncode=0)
 
@@ -274,32 +328,49 @@ class TestEnsureNodeInstalled:
 
     def test_windows_winget_install(self, monkeypatch, capsys):
         def mock_which(cmd):
-            if cmd == "winget": return "C:\\winget.exe"
+            if cmd == "winget":
+                return "C:\\winget.exe"
             return None
+
         monkeypatch.setattr("shutil.which", mock_which)
         monkeypatch.setattr("platform.system", lambda: "Windows")
 
         cmds_run = []
+
         def mock_run(cmd, **kwargs):
             cmds_run.append(cmd)
-            monkeypatch.setattr("shutil.which", lambda c: "/bin/cmd" if c in ("node", "npm") else mock_which(c))
+            monkeypatch.setattr(
+                "shutil.which", lambda c: "/bin/cmd" if c in ("node", "npm") else mock_which(c)
+            )
             return MagicMock(returncode=0)
 
         monkeypatch.setattr(installer, "run", mock_run)
         assert installer.ensure_node_installed(auto_yes=True) is True
-        assert ["winget", "install", "OpenJS.NodeJS.LTS", "--silent", "--accept-package-agreements", "--accept-source-agreements"] in cmds_run
+        assert [
+            "winget",
+            "install",
+            "OpenJS.NodeJS.LTS",
+            "--silent",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+        ] in cmds_run
 
     def test_linux_apt_get_install(self, monkeypatch, capsys):
         def mock_which(cmd):
-            if cmd == "apt-get": return "/usr/bin/apt-get"
+            if cmd == "apt-get":
+                return "/usr/bin/apt-get"
             return None
+
         monkeypatch.setattr("shutil.which", mock_which)
         monkeypatch.setattr("platform.system", lambda: "Linux")
 
         cmds_run = []
+
         def mock_run(cmd, **kwargs):
             cmds_run.append(cmd)
-            monkeypatch.setattr("shutil.which", lambda c: "/bin/cmd" if c in ("node", "npm") else mock_which(c))
+            monkeypatch.setattr(
+                "shutil.which", lambda c: "/bin/cmd" if c in ("node", "npm") else mock_which(c)
+            )
             return MagicMock(returncode=0)
 
         monkeypatch.setattr(installer, "run", mock_run)
@@ -309,15 +380,19 @@ class TestEnsureNodeInstalled:
 
     def test_user_declines_install(self, monkeypatch, capsys):
         def mock_which(cmd):
-            if cmd == "brew": return "/usr/local/bin/brew"
+            if cmd == "brew":
+                return "/usr/local/bin/brew"
             return None
+
         monkeypatch.setattr(installer.shutil, "which", mock_which)
         monkeypatch.setattr(installer.platform, "system", lambda: "Darwin")
 
         input_prompts = []
+
         def mock_input(prompt):
             input_prompts.append(prompt)
             return "n"
+
         monkeypatch.setattr("builtins.input", mock_input)
 
         assert installer.ensure_node_installed(auto_yes=False) is False
@@ -359,8 +434,45 @@ class TestEnsureNodeInstalled:
 
 
 # ===========================================================================
+# TestWinCompatibility
+# ===========================================================================
+
+
+class TestWinCompatibility:
+    def test_find_win_npm_executable_returns_none_on_non_windows(self, monkeypatch):
+        monkeypatch.setattr("sys.platform", "linux")
+        assert installer._find_win_npm_executable("snyk") is None
+
+    def test_win_resolve_cmd_passthrough_on_non_windows(self, monkeypatch):
+        monkeypatch.setattr("sys.platform", "linux")
+        cmd = ["snyk", "--version"]
+        assert installer._win_resolve_cmd(cmd) == cmd
+
+    def test_win_resolve_cmd_wraps_cmd_extension_with_cmd_c(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("sys.platform", "win32")
+        fake_snyk = tmp_path / "snyk.cmd"
+        fake_snyk.touch()
+        monkeypatch.setattr(
+            installer.shutil, "which", lambda name: str(fake_snyk) if name == "snyk" else None
+        )
+        result = installer._win_resolve_cmd(["snyk", "--version"])
+        assert result[:2] == ["cmd", "/c"]
+        assert "snyk" in result
+
+    def test_win_resolve_cmd_passthrough_for_exe(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("sys.platform", "win32")
+        fake_node = tmp_path / "node.exe"
+        fake_node.touch()
+        monkeypatch.setattr(
+            installer.shutil, "which", lambda name: str(fake_node) if name == "node" else None
+        )
+        assert installer._win_resolve_cmd(["node", "--version"]) == ["node", "--version"]
+
+
+# ===========================================================================
 # TestDetectAdes
 # ===========================================================================
+
 
 class TestDetectAdes:
     def test_detects_cursor_from_directory(self, tmp_path, monkeypatch):
@@ -383,7 +495,9 @@ class TestDetectAdes:
 
     def test_detects_gemini_from_cli(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
-        monkeypatch.setattr("shutil.which", lambda cmd: "/usr/bin/gemini" if cmd == "gemini" else None)
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/usr/bin/gemini" if cmd == "gemini" else None
+        )
         result = installer.detect_ades()
         assert "gemini" in result
 
@@ -423,9 +537,7 @@ class TestDetectAdes:
             args, kwargs = call
             assert args[0] == ["pgrep", "-xiq", "cursor"]
 
-    def test_detects_cursor_from_macos_app_bundle_without_dot_cursor(
-        self, tmp_path, monkeypatch
-    ):
+    def test_detects_cursor_from_macos_app_bundle_without_dot_cursor(self, tmp_path, monkeypatch):
         """When ~/.cursor is absent, macOS Cursor.app implies cursor (no pgrep)."""
 
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
@@ -490,14 +602,75 @@ class TestDetectAdes:
 
     def test_detects_claude_from_cli(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
-        monkeypatch.setattr("shutil.which", lambda cmd: "/usr/bin/claude" if cmd == "claude" else None)
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/usr/bin/claude" if cmd == "claude" else None
+        )
         result = installer.detect_ades()
         assert "claude" in result
+
+    def test_detects_codex_from_directory(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        (tmp_path / ".codex").mkdir()
+        result = installer.detect_ades()
+        assert "codex" in result
+
+    def test_detects_codex_from_cli(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr(installer, "_cursor_app_bundle_exists", lambda: False)
+        mock_run = MagicMock(return_value=MagicMock(returncode=1))
+        monkeypatch.setattr("subprocess.run", mock_run)
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/usr/bin/codex" if cmd == "codex" else None
+        )
+        result = installer.detect_ades()
+        assert "codex" in result
+
+    def test_detects_windsurf_from_codeium_directory(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        (tmp_path / ".codeium" / "windsurf").mkdir(parents=True)
+        result = installer.detect_ades()
+        assert "windsurf" in result
+
+    def test_detects_windsurf_from_windsurf_directory(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        (tmp_path / ".windsurf").mkdir()
+        result = installer.detect_ades()
+        assert "windsurf" in result
+
+    def test_detects_windsurf_from_cli(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/usr/bin/windsurf" if cmd == "windsurf" else None
+        )
+        result = installer.detect_ades()
+        assert "windsurf" in result
+
+    def test_detects_copilot_cli_from_directory(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        (tmp_path / ".copilot").mkdir()
+        result = installer.detect_ades()
+        assert "copilot-cli" in result
+
+    def test_detects_copilot_vscode_from_code_cli(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr("shutil.which", lambda cmd: "/usr/bin/code" if cmd == "code" else None)
+        result = installer.detect_ades()
+        assert "copilot-vscode" in result
+
+    def test_detects_more(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        (tmp_path / ".cursor").mkdir()
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".codex").mkdir()
+        result = installer.detect_ades()
+        assert "codex" in result
+        assert len(result) > 1
 
 
 # ===========================================================================
 # TestManifest
 # ===========================================================================
+
 
 class TestManifest:
     @pytest.fixture
@@ -508,7 +681,7 @@ class TestManifest:
         recipes = manifest.resolve_recipes("default")
         assert "sai-hooks-async" in recipes
         assert "snyk-fix-command" in recipes
-        assert len(recipes) == 5
+        assert len(recipes) == 6
 
     def test_resolve_minimal_profile(self, manifest):
         recipes = manifest.resolve_recipes("minimal")
@@ -537,13 +710,19 @@ class TestManifest:
         assert sources["config_merge"]["target"] == ".kiro/settings/mcp.json"
 
     def test_gemini_sources_for_all_default_recipes(self, manifest):
+        # snyk-fix-skill is intentionally limited to command-less platforms (codex, copilot-cli)
+        skill_only_recipes = {"snyk-fix-skill"}
         for recipe_id in manifest.resolve_recipes("default"):
+            if recipe_id in skill_only_recipes:
+                continue
             sources = manifest.get_sources(recipe_id, "gemini")
             assert sources, f"missing gemini sources for {recipe_id}"
 
     def test_kiro_sources_for_all_default_recipes_except_hooks(self, manifest):
+        # snyk-fix-skill is intentionally limited to command-less platforms (codex, copilot-cli)
+        skill_only_recipes = {"snyk-fix-skill"}
         for recipe_id in manifest.resolve_recipes("default"):
-            if recipe_id == "sai-hooks-async":
+            if recipe_id in ("sai-hooks-async", *skill_only_recipes):
                 continue
             sources = manifest.get_sources(recipe_id, "kiro")
             assert sources, f"missing kiro sources for {recipe_id}"
@@ -551,6 +730,60 @@ class TestManifest:
     def test_get_sources_missing_ade(self, manifest):
         sources = manifest.get_sources("sai-hooks-async", "vscode")
         assert sources == {}
+
+    def test_codex_sources_for_sai_hooks(self, manifest):
+        sources = manifest.get_sources("sai-hooks-async", "codex")
+        assert "files" in sources
+        assert "config_merge" in sources
+        # Hook scripts go to ~/.codex/hooks/, config to ~/.codex/config.toml
+        dests = {f["dest"] for f in sources["files"]}
+        assert ".codex/hooks/snyk_secure_at_inception.py" in dests
+        assert sources["config_merge"]["target"] == ".codex/config.toml"
+        assert sources["config_merge"]["strategy"] == "merge_codex_config"
+
+    def test_codex_sources_for_mcp_use_same_config_toml(self, manifest):
+        sources = manifest.get_sources("mcp-config", "codex")
+        # MCP servers go in the SAME ~/.codex/config.toml as hooks (Codex convention)
+        assert sources["config_merge"]["target"] == ".codex/config.toml"
+        assert sources["config_merge"]["strategy"] == "merge_codex_config"
+
+    def test_codex_skill_uses_dot_agents_path(self, manifest):
+        sources = manifest.get_sources("secure-dependency-health-check-skill", "codex")
+        dests = [f["dest"] for f in sources["files"]]
+        # Codex skills convention is ~/.agents/skills/, not ~/.codex/skills/
+        assert all(d.startswith(".agents/skills/snyk/") for d in dests), dests
+
+    def test_codex_snyk_fix_skill_uses_dot_agents_path(self, manifest):
+        sources = manifest.get_sources("snyk-fix-skill", "codex")
+        dests = [f["dest"] for f in sources["files"]]
+        # Codex skills convention is ~/.agents/skills/, not ~/.codex/skills/
+        assert all(d.startswith(".agents/skills/snyk/") for d in dests), dests
+
+    def test_copilot_cli_snyk_fix_skill_uses_dot_copilot_path(self, manifest):
+        sources = manifest.get_sources("snyk-fix-skill", "copilot-cli")
+        dests = [f["dest"] for f in sources["files"]]
+        assert all(d.startswith(".copilot/skills/") for d in dests), dests
+
+    def test_windsurf_uses_global_workflows_for_commands(self, manifest):
+        for recipe_id in ("snyk-fix-command", "snyk-batch-fix-command"):
+            sources = manifest.get_sources(recipe_id, "windsurf")
+            dests = [f["dest"] for f in sources["files"]]
+            assert all(".codeium/windsurf/global_workflows/" in d for d in dests), dests
+
+    def test_windsurf_skill_uses_dot_agents_path(self, manifest):
+        sources = manifest.get_sources("secure-dependency-health-check-skill", "windsurf")
+        dests = [f["dest"] for f in sources["files"]]
+        assert all(d.startswith(".agents/skills/") for d in dests), dests
+
+    def test_windsurf_mcp_config_target(self, manifest):
+        sources = manifest.get_sources("mcp-config", "windsurf")
+        assert sources["config_merge"]["target"] == ".codeium/windsurf/mcp_config.json"
+        assert sources["config_merge"]["strategy"] == "merge_mcp_servers"
+
+    def test_codex_has_no_slash_command_recipes(self, manifest):
+        # Codex CLI does not support user-defined slash commands.
+        for recipe_id in ("snyk-fix-command", "snyk-batch-fix-command"):
+            assert manifest.get_sources(recipe_id, "codex") == {}, recipe_id
 
     def test_are_rules_conflicting_no_conflict(self, manifest, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
@@ -570,7 +803,9 @@ class TestManifest:
         monkeypatch.chdir(tmp_path)
         rule_path = tmp_path / ".cursor/rules/snyk_rules.mdc"
         rule_path.parent.mkdir(parents=True)
-        rule_path.write_text("<!--# BEGIN SNYK GLOBAL RULE -->\ncontent\n<!--# END SNYK GLOBAL RULE -->")
+        rule_path.write_text(
+            "<!--# BEGIN SNYK GLOBAL RULE -->\ncontent\n<!--# END SNYK GLOBAL RULE -->"
+        )
         assert manifest.are_rules_conflicting("cursor") is True
 
     def test_are_rules_conflicting_global(self, manifest, tmp_path, monkeypatch):
@@ -578,7 +813,9 @@ class TestManifest:
         # windsurf has a global rule: .codeium/windsurf/memories/global_rules.md
         rule_path = tmp_path / ".codeium/windsurf/memories/global_rules.md"
         rule_path.parent.mkdir(parents=True)
-        rule_path.write_text("<!--# BEGIN SNYK GLOBAL RULE -->\ncontent\n<!--# END SNYK GLOBAL RULE -->")
+        rule_path.write_text(
+            "<!--# BEGIN SNYK GLOBAL RULE -->\ncontent\n<!--# END SNYK GLOBAL RULE -->"
+        )
         assert manifest.are_rules_conflicting("windsurf") is True
 
     def test_are_skills_conflicting_no_conflict(self, manifest, tmp_path, monkeypatch):
@@ -613,6 +850,7 @@ class TestManifest:
 # TestCopyFile
 # ===========================================================================
 
+
 class TestCopyFile:
     def test_copies_new_file(self, tmp_path):
         src = tmp_path / "src.txt"
@@ -644,6 +882,7 @@ class TestCopyFile:
 # TestRewriteHookCommands
 # ===========================================================================
 
+
 class TestRewriteHookCommands:
     def test_noop_on_unix(self, monkeypatch):
         monkeypatch.setattr("sys.platform", "darwin")
@@ -653,11 +892,21 @@ class TestRewriteHookCommands:
 
     def test_rewrites_on_windows(self, monkeypatch):
         monkeypatch.setattr("sys.platform", "win32")
-        data = {"hooks": {"PostToolUse": [
-            {"matcher": "Edit|Write", "hooks": [
-                {"type": "command", "command": 'python3 "$HOME/.claude/hooks/snyk_secure_at_inception.py"'}
-            ]}
-        ]}}
+        data = {
+            "hooks": {
+                "PostToolUse": [
+                    {
+                        "matcher": "Edit|Write",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": 'python3 "$HOME/.claude/hooks/snyk_secure_at_inception.py"',
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
         result = installer.rewrite_hook_commands_for_platform(data)
         cmd = result["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
         assert cmd.startswith("py -3")
@@ -673,6 +922,7 @@ class TestRewriteHookCommands:
 # ===========================================================================
 # TestPlatformSource
 # ===========================================================================
+
 
 class TestPlatformSource:
     def test_non_windows_passthrough(self, tmp_path, monkeypatch):
@@ -706,10 +956,24 @@ class TestPlatformSource:
         source = tmp_path / "hooks.json"
         source.write_text('{"hooks": {}}')
         tmp_file_path = None
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError):  # noqa: PT012 — exception must propagate through context manager __exit__
             with installer._platform_source("merge_claude_settings", source) as resolved_path:
                 tmp_file_path = resolved_path
                 raise RuntimeError("boom")
+        assert tmp_file_path is not None
+        assert not tmp_file_path.exists()
+
+    def test_windows_toml_strategy_rewrites_and_cleans_up(self, tmp_path, monkeypatch):
+        # codex_config is in _WIN32_REWRITE_STRATEGIES and sources are .toml files
+        monkeypatch.setattr("sys.platform", "win32")
+        source = tmp_path / "config.toml"
+        source.write_text('[hooks]\ncommand = "python3 $HOME/.codex/hooks/test.py"\n')
+        tmp_file_path = None
+        with installer._platform_source("merge_codex_config", source) as resolved_path:
+            assert resolved_path != source
+            assert resolved_path.suffix == ".toml"
+            tmp_file_path = resolved_path
+            assert tmp_file_path.exists()
         assert tmp_file_path is not None
         assert not tmp_file_path.exists()
 
@@ -718,10 +982,11 @@ class TestPlatformSource:
 # TestMergeConfig
 # ===========================================================================
 
+
 class TestMergeConfig:
     def test_dry_run(self, tmp_path, capsys):
         source = tmp_path / "source.json"
-        source.write_text('{}')
+        source.write_text("{}")
         target = tmp_path / "target.json"
         payload = MagicMock()
         installer.merge_config("merge_cursor_hooks", target, source, payload, dry_run=True)
@@ -732,7 +997,7 @@ class TestMergeConfig:
         monkeypatch.setattr("sys.platform", "linux")
         monkeypatch.setattr(sys, "path", list(sys.path))
         source = tmp_path / "source.json"
-        source.write_text('{}')
+        source.write_text("{}")
         target = tmp_path / "target.json"
         payload = installer.PayloadContext()
         payload.setup()
@@ -782,6 +1047,7 @@ class TestMergeConfig:
 # ===========================================================================
 # TestLifecycle
 # ===========================================================================
+
 
 class TestLifecycle:
     """Integration test: install -> verify -> uninstall with temp HOME."""
@@ -846,9 +1112,12 @@ class TestLifecycle:
         assert gemini_settings.exists()
 
         settings_after_install = json.loads(gemini_settings.read_text())
-        assert settings_after_install.get("hooks"), "expected hooks merged into gemini settings.json"
-        assert settings_after_install.get("mcpServers", {}).get("Snyk"), \
+        assert settings_after_install.get("hooks"), (
+            "expected hooks merged into gemini settings.json"
+        )
+        assert settings_after_install.get("mcpServers", {}).get("Snyk"), (
             "expected MCP server merged into gemini settings.json"
+        )
 
         for ade in ades:
             for recipe_id in recipes:
@@ -860,10 +1129,12 @@ class TestLifecycle:
         assert not (fake_home / ".gemini" / "commands" / "snyk-fix.md").exists()
 
         settings_after_uninstall = json.loads(gemini_settings.read_text())
-        assert not settings_after_uninstall.get("hooks"), \
+        assert not settings_after_uninstall.get("hooks"), (
             "unmerge_gemini_settings should remove Snyk hooks from settings.json"
-        assert "Snyk" not in settings_after_uninstall.get("mcpServers", {}), \
+        )
+        assert "Snyk" not in settings_after_uninstall.get("mcpServers", {}), (
             "unmerge_mcp_servers should remove the Snyk MCP server from settings.json"
+        )
 
     def test_install_verify_uninstall_kiro(self, fake_home, payload, manifest):
         ades = ["kiro"]
@@ -876,12 +1147,15 @@ class TestLifecycle:
         kiro_mcp_settings = fake_home / ".kiro" / "settings" / "mcp.json"
         assert (fake_home / ".kiro" / "steering" / "snyk-fix.md").exists()
         assert (fake_home / ".kiro" / "steering" / "snyk-batch-fix.md").exists()
-        assert (fake_home / ".kiro" / "skills" / "secure-dependency-health-check" / "SKILL.md").exists()
+        assert (
+            fake_home / ".kiro" / "skills" / "secure-dependency-health-check" / "SKILL.md"
+        ).exists()
         assert kiro_mcp_settings.exists()
 
         settings_after_install = json.loads(kiro_mcp_settings.read_text())
-        assert settings_after_install.get("mcpServers", {}).get("Snyk"), \
+        assert settings_after_install.get("mcpServers", {}).get("Snyk"), (
             "expected MCP server merged into .kiro/settings/mcp.json"
+        )
 
         for ade in ades:
             for recipe_id in recipes:
@@ -893,8 +1167,9 @@ class TestLifecycle:
         assert not (fake_home / ".kiro" / "steering" / "snyk-fix.md").exists()
 
         settings_after_uninstall = json.loads(kiro_mcp_settings.read_text())
-        assert "Snyk" not in settings_after_uninstall.get("mcpServers", {}), \
+        assert "Snyk" not in settings_after_uninstall.get("mcpServers", {}), (
             "unmerge_mcp_servers should remove the Snyk MCP server from .kiro/settings/mcp.json"
+        )
 
     def test_dry_run_makes_no_changes(self, fake_home, payload, manifest):
         recipes = manifest.resolve_recipes("default")
@@ -903,10 +1178,104 @@ class TestLifecycle:
 
         assert not (fake_home / ".claude" / "hooks" / "snyk_secure_at_inception.py").exists()
 
+    def test_codex_install_verify_uninstall(self, tmp_path, payload, manifest, monkeypatch):
+        # Codex doesn't get all recipes (no slash commands), so use a fresh fake_home
+        # without claude/cursor pre-created so we exercise the codex-only path.
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        recipes = manifest.resolve_recipes("default")
+
+        # Install codex recipes
+        for recipe_id in recipes:
+            installer.install_recipe(recipe_id, "codex", manifest, payload, dry_run=False)
+
+        # Hook scripts and lib live under ~/.codex/
+        assert (tmp_path / ".codex" / "hooks" / "snyk_secure_at_inception.py").exists()
+        assert (tmp_path / ".codex" / "hooks" / "lib" / "scan_runner.py").exists()
+        # Skill files live under ~/.agents/skills/snyk/ (NOT ~/.codex/)
+        assert (
+            tmp_path / ".agents" / "skills" / "snyk" / "secure-dependency-health-check" / "SKILL.md"
+        ).exists()
+        assert (tmp_path / ".agents" / "skills" / "snyk" / "snyk-fix" / "SKILL.md").exists()
+        # Hooks + MCP both merged into a single config.toml
+        config_toml = (tmp_path / ".codex" / "config.toml").read_text()
+        assert "hooks = true" in config_toml
+        assert "[mcp_servers.Snyk]" in config_toml
+        assert "PostToolUse" in config_toml
+
+        # Slash-command recipes have no codex source, so they should produce no files
+        assert not (tmp_path / ".codex" / "commands" / "snyk-fix.md").exists()
+
+        # Verify
+        for recipe_id in recipes:
+            assert installer.verify_recipe(recipe_id, "codex", manifest, payload)
+
+        # Uninstall removes our entries; user content (none here) is preserved
+        installer.uninstall(["codex"], manifest, payload, dry_run=False)
+        assert not (tmp_path / ".codex" / "hooks" / "snyk_secure_at_inception.py").exists()
+        # config.toml itself is removed when only Snyk content was present
+        assert not (tmp_path / ".codex" / "config.toml").exists()
+        # .bak file from the merge backup is left behind (intentional, matches claude behavior)
+        assert (tmp_path / ".codex" / "config.toml.bak").exists()
+
+    def test_copilot_cli_install_verify_uninstall(self, tmp_path, payload, manifest, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        recipes = manifest.resolve_recipes("default")
+
+        for recipe_id in recipes:
+            installer.install_recipe(recipe_id, "copilot-cli", manifest, payload, dry_run=False)
+
+        assert (
+            tmp_path / ".copilot" / "skills" / "secure-dependency-health-check" / "SKILL.md"
+        ).exists()
+        assert (tmp_path / ".copilot" / "skills" / "snyk-fix" / "SKILL.md").exists()
+
+        for recipe_id in recipes:
+            assert installer.verify_recipe(recipe_id, "copilot-cli", manifest, payload)
+
+        installer.uninstall(["copilot-cli"], manifest, payload, dry_run=False)
+        assert not (tmp_path / ".copilot" / "skills" / "snyk-fix" / "SKILL.md").exists()
+
+    def test_install_verify_uninstall_windsurf(self, tmp_path, payload, manifest, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        (tmp_path / ".codeium" / "windsurf").mkdir(parents=True)
+        recipes = manifest.resolve_recipes("default")
+
+        for recipe_id in recipes:
+            installer.install_recipe(recipe_id, "windsurf", manifest, payload, dry_run=False)
+
+        # Workflow files go under .codeium/windsurf/global_workflows/
+        assert (tmp_path / ".codeium" / "windsurf" / "global_workflows" / "snyk-fix.md").exists()
+        assert (
+            tmp_path / ".codeium" / "windsurf" / "global_workflows" / "snyk-batch-fix.md"
+        ).exists()
+        # Skills go under .agents/skills/ (not under the windsurf ADE home)
+        assert (
+            tmp_path / ".agents" / "skills" / "secure-dependency-health-check" / "SKILL.md"
+        ).exists()
+        # MCP config merged into .codeium/windsurf/mcp_config.json
+        mcp_config = tmp_path / ".codeium" / "windsurf" / "mcp_config.json"
+        assert mcp_config.exists()
+        assert json.loads(mcp_config.read_text()).get("mcpServers", {}).get("Snyk"), (
+            "expected MCP server merged into .codeium/windsurf/mcp_config.json"
+        )
+
+        for recipe_id in recipes:
+            assert installer.verify_recipe(recipe_id, "windsurf", manifest, payload)
+
+        installer.uninstall(["windsurf"], manifest, payload, dry_run=False)
+
+        assert not (
+            tmp_path / ".codeium" / "windsurf" / "global_workflows" / "snyk-fix.md"
+        ).exists()
+        assert "Snyk" not in json.loads(mcp_config.read_text()).get("mcpServers", {}), (
+            "unmerge_mcp_servers should remove the Snyk MCP server from mcp_config.json"
+        )
+
 
 # ===========================================================================
 # TestVerifyRecipe
 # ===========================================================================
+
 
 class TestVerifyRecipe:
     def test_verify_recipe_invalid_json(self, tmp_path, monkeypatch, capsys):
@@ -931,8 +1300,8 @@ class TestVerifyRecipe:
 # TestVSCodeSettingsConflict
 # ===========================================================================
 
-class TestVSCodeSettingsConflict:
 
+class TestVSCodeSettingsConflict:
     @pytest.fixture
     def manifest(self):
         """Fixture to provide a Manifest instance using the real manifest.json."""
@@ -955,7 +1324,7 @@ class TestVSCodeSettingsConflict:
             "home": home,
             "workspace": tmp_path,
             "global_dir": home / "Library" / "Application Support" / "Cursor" / "User",
-            "workspace_dir": tmp_path / ".vscode"
+            "workspace_dir": tmp_path / ".vscode",
         }
 
     def test_no_settings_files(self, manifest, vscode_env):
@@ -964,47 +1333,67 @@ class TestVSCodeSettingsConflict:
     def test_workspace_conflict(self, manifest, vscode_env):
         ws_dir = vscode_env["workspace_dir"]
         ws_dir.mkdir(parents=True)
-        (ws_dir / "settings.json").write_text(json.dumps({
-            "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
-            "snyk.securityAtInception.executionFrequency": "On Code Generation"
-        }))
+        (ws_dir / "settings.json").write_text(
+            json.dumps(
+                {
+                    "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
+                    "snyk.securityAtInception.executionFrequency": "On Code Generation",
+                }
+            )
+        )
         assert manifest.are_extension_settings_conflicting("cursor")
 
     def test_workspace_no_conflict_global_conflict(self, manifest, vscode_env):
         # Global has it enabled
         global_dir = vscode_env["global_dir"]
         global_dir.mkdir(parents=True)
-        (global_dir / "settings.json").write_text(json.dumps({
-            "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
-            "snyk.securityAtInception.executionFrequency": "On Code Generation"
-        }))
+        (global_dir / "settings.json").write_text(
+            json.dumps(
+                {
+                    "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
+                    "snyk.securityAtInception.executionFrequency": "On Code Generation",
+                }
+            )
+        )
 
         # Workspace has it explicitly disabled - this SHOULD NOT conflict as it overrides global.
         # Note: Both keys must be present for the installer to update its resolved settings.
         ws_dir = vscode_env["workspace_dir"]
         ws_dir.mkdir(parents=True)
-        (ws_dir / "settings.json").write_text(json.dumps({
-            "snyk.securityAtInception.autoConfigureSnykMcpServer": False,
-            "snyk.securityAtInception.executionFrequency": "On Code Generation"
-        }))
+        (ws_dir / "settings.json").write_text(
+            json.dumps(
+                {
+                    "snyk.securityAtInception.autoConfigureSnykMcpServer": False,
+                    "snyk.securityAtInception.executionFrequency": "On Code Generation",
+                }
+            )
+        )
 
         assert not manifest.are_extension_settings_conflicting("cursor")
 
     def test_workspace_manual_frequency_is_no_conflict(self, manifest, vscode_env):
         ws_dir = vscode_env["workspace_dir"]
         ws_dir.mkdir(parents=True)
-        (ws_dir / "settings.json").write_text(json.dumps({
-            "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
-            "snyk.securityAtInception.executionFrequency": "Manual"
-        }))
+        (ws_dir / "settings.json").write_text(
+            json.dumps(
+                {
+                    "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
+                    "snyk.securityAtInception.executionFrequency": "Manual",
+                }
+            )
+        )
         assert not manifest.are_extension_settings_conflicting("cursor")
 
     def test_unset_execution_frequency_defaults_to_manual_no_conflict(self, manifest, vscode_env):
         ws_dir = vscode_env["workspace_dir"]
         ws_dir.mkdir(parents=True)
-        (ws_dir / "settings.json").write_text(json.dumps({
-            "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
-        }))
+        (ws_dir / "settings.json").write_text(
+            json.dumps(
+                {
+                    "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
+                }
+            )
+        )
         assert not manifest.are_extension_settings_conflicting("cursor")
 
     def test_windows_global_path(self, manifest, vscode_env, monkeypatch):
@@ -1014,10 +1403,14 @@ class TestVSCodeSettingsConflict:
 
         win_global_dir = appdata / "Cursor" / "User"
         win_global_dir.mkdir(parents=True)
-        (win_global_dir / "settings.json").write_text(json.dumps({
-            "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
-            "snyk.securityAtInception.executionFrequency": "On Code Generation"
-        }))
+        (win_global_dir / "settings.json").write_text(
+            json.dumps(
+                {
+                    "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
+                    "snyk.securityAtInception.executionFrequency": "On Code Generation",
+                }
+            )
+        )
 
         assert manifest.are_extension_settings_conflicting("cursor")
 
@@ -1031,10 +1424,14 @@ class TestVSCodeSettingsConflict:
         # Global has conflict values
         global_dir = vscode_env["global_dir"]
         global_dir.mkdir(parents=True)
-        (global_dir / "settings.json").write_text(json.dumps({
-            "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
-            "snyk.securityAtInception.executionFrequency": "On Code Generation"
-        }))
+        (global_dir / "settings.json").write_text(
+            json.dumps(
+                {
+                    "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
+                    "snyk.securityAtInception.executionFrequency": "On Code Generation",
+                }
+            )
+        )
         # 'claude' has no extension-settings entries in manifest.json, so it should return False.
         assert not manifest.are_extension_settings_conflicting("claude")
 
@@ -1045,7 +1442,7 @@ class TestVSCodeSettingsConflict:
         original_data = {
             "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
             "snyk.securityAtInception.executionFrequency": "On Code Generation",
-            "other.setting": "value"
+            "other.setting": "value",
         }
         settings_file.write_text(json.dumps(original_data))
 
@@ -1073,22 +1470,31 @@ class TestVSCodeSettingsConflict:
     def test_path_outside_home_or_workspace_security(self, manifest, vscode_env, monkeypatch):
         # Create a settings file in a "malicious" location outside home and workspace
         import tempfile
+
         with tempfile.TemporaryDirectory() as tmp_dir:
             malicious_file = Path(tmp_dir) / "settings.json"
-            malicious_file.write_text(json.dumps({
-                "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
-                "snyk.securityAtInception.executionFrequency": "On Code Generation"
-            }))
+            malicious_file.write_text(
+                json.dumps(
+                    {
+                        "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
+                        "snyk.securityAtInception.executionFrequency": "On Code Generation",
+                    }
+                )
+            )
 
             # Mock get_extension_settings_path to return this file
-            monkeypatch.setattr(manifest, "get_extension_settings_path", lambda ade: [malicious_file])
+            monkeypatch.setattr(
+                manifest, "get_extension_settings_path", lambda ade: [malicious_file]
+            )
 
             # are_extension_settings_conflicting should ignore it and return False
             assert not manifest.are_extension_settings_conflicting("cursor")
 
+
 # ===========================================================================
 # TestConflictResolution
 # ===========================================================================
+
 
 class TestConflictResolution:
     @pytest.fixture
@@ -1119,14 +1525,16 @@ class TestConflictResolution:
         settings_file = tmp_path / "settings.json"
         settings_file.write_text("{}")
 
-        with patch("builtins.open", side_effect=IOError("Permission denied")):
+        with patch("builtins.open", side_effect=OSError("Permission denied")):
             manifest.resolve_extension_conflicts([str(settings_file)])
 
         assert "Failed to update settings file" in capsys.readouterr().out
 
+
 # ===========================================================================
 # TestMacMcpLogic
 # ===========================================================================
+
 
 class TestMacMcpLogic:
     @pytest.fixture
@@ -1172,6 +1580,7 @@ class TestMacMcpLogic:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         import merge_json
+
         mock_verify_strategy = MagicMock()
         monkeypatch.setitem(merge_json.STRATEGIES, "verify_mcp_servers", mock_verify_strategy)
 
@@ -1179,6 +1588,7 @@ class TestMacMcpLogic:
         @contextlib.contextmanager
         def mock_platform_source(strategy, source):
             yield source
+
         monkeypatch.setattr(installer, "_platform_source", mock_platform_source)
 
         installer.verify_recipe("mcp-config", "cursor", manifest, payload)
@@ -1187,11 +1597,14 @@ class TestMacMcpLogic:
         # args[1] is the resolved_path string
         assert Path(args[1]).name == ".mcp.mac.json"
 
-    def test_verify_recipe_mac_cli_ade_uses_regular_mcp(self, monkeypatch, payload, manifest, tmp_path):
+    def test_verify_recipe_mac_cli_ade_uses_regular_mcp(
+        self, monkeypatch, payload, manifest, tmp_path
+    ):
         monkeypatch.setattr("sys.platform", "darwin")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         import merge_json
+
         mock_verify_strategy = MagicMock()
         monkeypatch.setitem(merge_json.STRATEGIES, "verify_mcp_servers", mock_verify_strategy)
 
@@ -1199,6 +1612,7 @@ class TestMacMcpLogic:
         @contextlib.contextmanager
         def mock_platform_source(strategy, source):
             yield source
+
         monkeypatch.setattr(installer, "_platform_source", mock_platform_source)
 
         installer.verify_recipe("mcp-config", "claude", manifest, payload)

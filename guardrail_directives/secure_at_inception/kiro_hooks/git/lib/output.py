@@ -21,10 +21,10 @@ from typing import List
 
 from filter_new_vulns import FilterResult, NewCodeVulnerability, PackageSecurityDelta
 
-
 # =============================================================================
 # COLORS
 # =============================================================================
+
 
 class Colors:
     RED = "\033[91m"
@@ -49,10 +49,11 @@ def colored(text: str, color: str) -> str:
 # STATUS PRINTERS
 # =============================================================================
 
+
 def print_header(text: str) -> None:
-    print(colored(f"\n{'='*60}", Colors.CYAN))
+    print(colored(f"\n{'=' * 60}", Colors.CYAN))
     print(colored(f"  {text}", Colors.BOLD))
-    print(colored(f"{'='*60}", Colors.CYAN))
+    print(colored(f"{'=' * 60}", Colors.CYAN))
 
 
 def print_success(text: str) -> None:
@@ -81,6 +82,7 @@ def print_cache_status(hit: bool, target: str) -> None:
 # =============================================================================
 # TABLE FORMATTERS
 # =============================================================================
+
 
 def format_code_vuln_table(vulns: List[NewCodeVulnerability]) -> str:
     """Format code vulnerabilities as a table."""
@@ -141,6 +143,7 @@ def format_package_table(deltas: List[PackageSecurityDelta]) -> str:
 # FIX INSTRUCTIONS
 # =============================================================================
 
+
 def generate_fix_command(result: FilterResult) -> str:
     """Generate the /snyk-fix-batch command with vulnerability IDs."""
     vuln_ids = []
@@ -164,18 +167,30 @@ def generate_detailed_fix_instructions(result: FilterResult) -> str:
     """Generate detailed instructions for fixing the issues."""
     lines = []
 
-    lines.append(colored("\n╔══════════════════════════════════════════════════════════════╗", Colors.MAGENTA))
-    lines.append(colored("║           HOW TO FIX THESE ISSUES                            ║", Colors.MAGENTA))
-    lines.append(colored("╚══════════════════════════════════════════════════════════════╝", Colors.MAGENTA))
+    lines.append(
+        colored(
+            "\n╔══════════════════════════════════════════════════════════════╗", Colors.MAGENTA
+        )
+    )
+    lines.append(
+        colored("║           HOW TO FIX THESE ISSUES                            ║", Colors.MAGENTA)
+    )
+    lines.append(
+        colored("╚══════════════════════════════════════════════════════════════╝", Colors.MAGENTA)
+    )
 
     lines.append("")
     lines.append(colored("Copy and paste this command into your AI assistant:", Colors.BOLD))
     lines.append("")
 
     fix_cmd = generate_fix_command(result)
-    lines.append(colored("┌────────────────────────────────────────────────────────────────┐", Colors.CYAN))
+    lines.append(
+        colored("┌────────────────────────────────────────────────────────────────┐", Colors.CYAN)
+    )
     lines.append(colored(f"│  {fix_cmd.ljust(62)} │", Colors.CYAN + Colors.BOLD))
-    lines.append(colored("└────────────────────────────────────────────────────────────────┘", Colors.CYAN))
+    lines.append(
+        colored("└────────────────────────────────────────────────────────────────┘", Colors.CYAN)
+    )
 
     lines.append("")
     lines.append("Or fix individually:")

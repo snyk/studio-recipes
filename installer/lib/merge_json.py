@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
-"""JSON config merging and verification for Snyk Studio Recipes installer.
+"""Config merging and verification for Snyk Studio Recipes installer.
 
-Merge strategies (create .bak backup, write pretty-printed JSON, idempotent):
+JSON merge strategies (create .bak backup, write pretty-printed JSON, idempotent):
   - merge_cursor_hooks:    ~/.cursor/hooks.json
   - merge_claude_settings: ~/.claude/settings.json
   - merge_gemini_settings: ~/.gemini/settings.json
   - merge_mcp_servers:     ~/.mcp.json or ~/.cursor/.mcp.json
 
+TOML merge strategies (~/.codex/config.toml, single file used for all of
+[features], [[hooks.*]], and [mcp_servers.*]):
+  - merge_codex_config
+
 Unmerge strategies (remove Snyk entries, idempotent):
-  - unmerge_cursor_hooks, unmerge_claude_settings, unmerge_gemini_settings, unmerge_mcp_servers
+  - unmerge_cursor_hooks, unmerge_claude_settings, unmerge_gemini_settings,
+    unmerge_mcp_servers, unmerge_codex_config
 
 Verify strategies (read-only, exit 1 if entries missing):
-  - verify_cursor_hooks, verify_claude_settings, verify_gemini_settings, verify_mcp_servers
+  - verify_cursor_hooks, verify_claude_settings, verify_gemini_settings,
+    verify_mcp_servers, verify_codex_config
 """
 
 import json
@@ -23,16 +29,40 @@ import sys
 LEGACY_LAUNCHERS = frozenset({"python", "python3"})
 
 # Tokens that start shell redirection / piping; truncate argv before these for script identity.
-_REDIR_PIPE_TOKENS = frozenset({
-    ">>", ">", "<", "|", "2>", "2>>", "&>", "&>>", "2>&1", "<&", ">&", ">>&",
-})
+_REDIR_PIPE_TOKENS = frozenset(
+    {
+        ">>",
+        ">",
+        "<",
+        "|",
+        "2>",
+        "2>>",
+        "&>",
+        "&>>",
+        "2>&1",
+        "<&",
+        ">&",
+        ">>&",
+    }
+)
+
+# TOML support: stdlib tomllib on 3.11+, vendored tomli as fallback.
+# Writer (tomli_w) is always vendored — TOML has no stdlib writer.
+_VENDOR_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_vendor")
+if _VENDOR_DIR not in sys.path:
+    sys.path.insert(0, _VENDOR_DIR)
+try:
+    import tomllib as _toml_reader  # Python 3.11+
+except ImportError:  # pragma: no cover - 3.8/3.9/3.10 fallback
+    import tomli as _toml_reader  # type: ignore[no-redef]
+import tomli_w as _toml_writer  # noqa: E402
 
 
 def _load_json(path):
     """Load JSON file, returning empty dict if file doesn't exist."""
     if not os.path.exists(path):
         return {}
-    with open(path, "r") as f:
+    with open(path) as f:
         return json.load(f)
 
 
@@ -203,6 +233,21 @@ def _merge_command_entries(target_entries, source_entries):
             script_to_idx[script_key] = idx
 
 
+def _load_toml(path):
+    """Load TOML file, returning empty dict if file doesn't exist."""
+    if not os.path.exists(path):
+        return {}
+    with open(path, "rb") as f:
+        return _toml_reader.load(f)
+
+
+def _write_toml(path, data):
+    """Write TOML to file with trailing newline."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "wb") as f:
+        _toml_writer.dump(data, f)
+
+
 def merge_cursor_hooks(target_path, source_path):
     """Merge Snyk hooks into Cursor's top-level hooks.json (~/.cursor/hooks.json).
 
@@ -215,7 +260,7 @@ def merge_cursor_hooks(target_path, source_path):
     try:
         target = _load_json(target_path)
     except Exception:
-        raise ValueError(f"Invalid JSON in file: {target_path}")
+        raise ValueError(f"Invalid JSON in file: {target_path}") from None
 
     # Ensure target has basic structure
     if "version" not in target:
@@ -247,7 +292,7 @@ def merge_claude_settings(target_path, source_path):
     try:
         target = _load_json(target_path)
     except Exception:
-        raise ValueError(f"Invalid JSON in file: {target_path}")
+        raise ValueError(f"Invalid JSON in file: {target_path}") from None
 
     if "hooks" not in target:
         target["hooks"] = {}
@@ -268,9 +313,7 @@ def merge_claude_settings(target_path, source_path):
                     if "hooks" not in tgt_group:
                         tgt_group["hooks"] = []
 
-                    _merge_command_entries(
-                        tgt_group["hooks"], src_group.get("hooks", [])
-                    )
+                    _merge_command_entries(tgt_group["hooks"], src_group.get("hooks", []))
 
                     merged = True
                     break
@@ -377,8 +420,7 @@ def unmerge_cursor_hooks(target_path, source_path):
         remove_commands = {e.get("command") for e in entries if "command" in e}
 
         target["hooks"][event] = [
-            e for e in target["hooks"][event]
-            if e.get("command") not in remove_commands
+            e for e in target["hooks"][event] if e.get("command") not in remove_commands
         ]
 
         # Clean up empty event arrays
@@ -421,15 +463,11 @@ def unmerge_claude_settings(target_path, source_path):
                     continue
 
                 tgt_group["hooks"] = [
-                    h for h in tgt_group.get("hooks", [])
-                    if h.get("command") not in remove_commands
+                    h for h in tgt_group.get("hooks", []) if h.get("command") not in remove_commands
                 ]
 
         # Remove groups with empty hooks
-        target["hooks"][event] = [
-            g for g in target["hooks"][event]
-            if g.get("hooks")
-        ]
+        target["hooks"][event] = [g for g in target["hooks"][event] if g.get("hooks")]
 
         # Clean up empty event arrays
         if not target["hooks"][event]:
@@ -512,9 +550,7 @@ def verify_cursor_hooks(target_path, source_path):
             missing.append(f"  event '{event}' not found in {target_path}")
             continue
 
-        existing_commands = {
-            e.get("command") for e in target_hooks[event] if "command" in e
-        }
+        existing_commands = {e.get("command") for e in target_hooks[event] if "command" in e}
         for entry in entries:
             cmd = entry.get("command", "")
             if cmd and cmd not in existing_commands:
@@ -635,6 +671,203 @@ def verify_vscode_mcp(target_path, source_path):
         sys.exit(1)
 
 
+def merge_codex_config(target_path, source_path):
+    """Merge Snyk entries into Codex's ~/.codex/config.toml.
+
+    Handles three top-level concerns the source TOML may declare:
+      - ``[features]``:        shallow-merge (source overrides target keys)
+      - ``[hooks.<event>]``:   matcher-aware append, dedupe by ``command``
+      - ``[mcp_servers.X]``:   add or overwrite by server name
+
+    Preserves all unrelated keys, tables, and comments-bearing layout the
+    user already has (within the limits of TOML round-tripping).
+    """
+    _backup(target_path)
+    source = _load_toml(source_path)
+
+    try:
+        target = _load_toml(target_path)
+    except Exception as e:
+        raise ValueError(f"Invalid TOML in file: {target_path}: {e}") from e
+
+    # 1. features
+    if source.get("features"):
+        target.setdefault("features", {})
+        if not isinstance(target["features"], dict):
+            target["features"] = {}
+        for key, value in source["features"].items():
+            target["features"][key] = value
+
+    # 2. hooks (matcher-aware merge mirroring merge_claude_settings)
+    src_hooks = source.get("hooks", {})
+    if src_hooks:
+        target.setdefault("hooks", {})
+        if not isinstance(target["hooks"], dict):
+            target["hooks"] = {}
+        for event, src_groups in src_hooks.items():
+            target["hooks"].setdefault(event, [])
+            if not isinstance(target["hooks"][event], list):
+                target["hooks"][event] = []
+
+            for src_group in src_groups:
+                src_matcher = src_group.get("matcher")
+                merged = False
+
+                for tgt_group in target["hooks"][event]:
+                    if tgt_group.get("matcher") == src_matcher:
+                        tgt_group.setdefault("hooks", [])
+                        existing_commands = {
+                            h.get("command") for h in tgt_group["hooks"] if "command" in h
+                        }
+                        for hook in src_group.get("hooks", []):
+                            cmd = hook.get("command", "")
+                            if cmd not in existing_commands:
+                                tgt_group["hooks"].append(hook)
+                                existing_commands.add(cmd)
+                        merged = True
+                        break
+
+                if not merged:
+                    target["hooks"][event].append(src_group)
+
+    # 3. mcp_servers
+    src_mcp = source.get("mcp_servers", {})
+    if src_mcp:
+        target.setdefault("mcp_servers", {})
+        if not isinstance(target["mcp_servers"], dict):
+            target["mcp_servers"] = {}
+        for name, cfg in src_mcp.items():
+            target["mcp_servers"][name] = cfg
+
+    _write_toml(target_path, target)
+
+
+def unmerge_codex_config(target_path, source_path):
+    """Remove Snyk entries from Codex's config.toml. Idempotent.
+
+    For features:    deletes only the keys our source declared.
+    For hooks:       removes hook entries whose command matches ours; cleans
+                     up emptied groups and emptied event arrays.
+    For mcp_servers: removes server entries whose key matches our source.
+    """
+    if not os.path.exists(target_path):
+        return
+    source = _load_toml(source_path)
+    target = _load_toml(target_path)
+    if not target:
+        return
+
+    _backup(target_path)
+
+    # 1. features: delete keys we own
+    src_features = source.get("features", {})
+    tgt_features = target.get("features", {})
+    if src_features and tgt_features:
+        for key in src_features:
+            tgt_features.pop(key, None)
+        if not tgt_features:
+            target.pop("features", None)
+
+    # 2. hooks: matcher-aware removal mirroring unmerge_claude_settings
+    src_hooks = source.get("hooks", {})
+    tgt_hooks = target.get("hooks", {})
+    if src_hooks and tgt_hooks:
+        for event, src_groups in src_hooks.items():
+            if event not in tgt_hooks:
+                continue
+            for src_group in src_groups:
+                src_matcher = src_group.get("matcher")
+                remove_commands = {
+                    h.get("command") for h in src_group.get("hooks", []) if "command" in h
+                }
+                for tgt_group in tgt_hooks[event]:
+                    if tgt_group.get("matcher") != src_matcher:
+                        continue
+                    tgt_group["hooks"] = [
+                        h
+                        for h in tgt_group.get("hooks", [])
+                        if h.get("command") not in remove_commands
+                    ]
+            tgt_hooks[event] = [g for g in tgt_hooks[event] if g.get("hooks")]
+            if not tgt_hooks[event]:
+                del tgt_hooks[event]
+        if not tgt_hooks:
+            target.pop("hooks", None)
+
+    # 3. mcp_servers: drop our entries
+    src_mcp = source.get("mcp_servers", {})
+    tgt_mcp = target.get("mcp_servers", {})
+    if src_mcp and tgt_mcp:
+        for name in src_mcp:
+            tgt_mcp.pop(name, None)
+        if not tgt_mcp:
+            target.pop("mcp_servers", None)
+
+    if target:
+        _write_toml(target_path, target)
+    else:
+        # File would round-trip to empty — remove rather than leaving a stub.
+        try:
+            os.remove(target_path)
+        except OSError:
+            pass
+
+
+def verify_codex_config(target_path, source_path):
+    """Verify Snyk entries are present in Codex's config.toml.
+
+    Read-only. Exits with code 1 if anything from source is missing in target.
+    """
+    target = _load_toml(target_path)
+    source = _load_toml(source_path)
+
+    missing = []
+
+    # features
+    src_features = source.get("features", {})
+    tgt_features = target.get("features", {})
+    for key, expected in src_features.items():
+        if tgt_features.get(key) != expected:
+            missing.append(f"  features.{key} = {expected!r} missing from {target_path}")
+
+    # hooks (mirrors verify_claude_settings)
+    src_hooks = source.get("hooks", {})
+    tgt_hooks = target.get("hooks", {})
+    for event, src_groups in src_hooks.items():
+        if event not in tgt_hooks:
+            missing.append(f"  hook event '{event}' not found in {target_path}")
+            continue
+        for src_group in src_groups:
+            src_matcher = src_group.get("matcher")
+            tgt_group = next(
+                (g for g in tgt_hooks[event] if g.get("matcher") == src_matcher),
+                None,
+            )
+            if tgt_group is None:
+                label = f"matcher='{src_matcher}'" if src_matcher else "no matcher"
+                missing.append(f"  group ({label}) missing from hooks.{event}")
+                continue
+            existing_commands = {
+                h.get("command") for h in tgt_group.get("hooks", []) if "command" in h
+            }
+            for hook in src_group.get("hooks", []):
+                cmd = hook.get("command", "")
+                if cmd and cmd not in existing_commands:
+                    missing.append(f"  hook command missing from hooks.{event}: {cmd}")
+
+    # mcp_servers
+    src_mcp = source.get("mcp_servers", {})
+    tgt_mcp = target.get("mcp_servers", {})
+    for name in src_mcp:
+        if name not in tgt_mcp:
+            missing.append(f"  mcp_servers.{name} missing from {target_path}")
+
+    if missing:
+        for m in missing:
+            print(m, file=sys.stderr)
+        sys.exit(1)
+
+
 STRATEGIES = {
     "merge_cursor_hooks": merge_cursor_hooks,
     "merge_claude_settings": merge_claude_settings,
@@ -642,18 +875,21 @@ STRATEGIES = {
     "merge_mcp_servers": merge_mcp_servers,
     "merge_copilot_cli_mcp": merge_copilot_cli_mcp,
     "merge_vscode_mcp": merge_vscode_mcp,
+    "merge_codex_config": merge_codex_config,
     "unmerge_cursor_hooks": unmerge_cursor_hooks,
     "unmerge_claude_settings": unmerge_claude_settings,
     "unmerge_gemini_settings": unmerge_gemini_settings,
     "unmerge_mcp_servers": unmerge_mcp_servers,
     "unmerge_copilot_cli_mcp": unmerge_copilot_cli_mcp,
     "unmerge_vscode_mcp": unmerge_vscode_mcp,
+    "unmerge_codex_config": unmerge_codex_config,
     "verify_cursor_hooks": verify_cursor_hooks,
     "verify_claude_settings": verify_claude_settings,
     "verify_gemini_settings": verify_gemini_settings,
     "verify_mcp_servers": verify_mcp_servers,
     "verify_copilot_cli_mcp": verify_copilot_cli_mcp,
     "verify_vscode_mcp": verify_vscode_mcp,
+    "verify_codex_config": verify_codex_config,
 }
 
 

@@ -131,8 +131,11 @@ def collect_bundle_info(
 
     lib_dir = script_dir / "lib"
     if lib_dir.is_dir():
+        # Bundle .py files plus LICENSE files for vendored deps under lib/_vendor/.
+        # MIT-licensed third-party code must keep its license text in distributions.
+        candidates = list(lib_dir.rglob("*.py")) + list(lib_dir.rglob("LICENSE"))
         for lib_path in sorted(
-            lib_dir.rglob("*.py"),
+            candidates,
             key=lambda p: p.relative_to(lib_dir).as_posix(),
         ):
             rel = lib_path.relative_to(lib_dir)

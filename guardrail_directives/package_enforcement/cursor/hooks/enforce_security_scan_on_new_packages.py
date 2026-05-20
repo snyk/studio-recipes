@@ -59,13 +59,13 @@ COMPATIBILITY:
 - Works with npm, yarn, pnpm
 """
 
-import sys
+import hashlib
 import json
 import os
-import hashlib
+import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Any, Dict
 
 # =============================================================================
 # CONFIGURATION
@@ -105,6 +105,7 @@ SCAN_TOOL = "snyk_package_health_check"
 # UTILITY FUNCTIONS
 # =============================================================================
 
+
 def debug_log(message: str) -> None:
     """Print debug message to stderr if DEBUG is enabled."""
     if DEBUG:
@@ -125,7 +126,7 @@ def get_workspace(data: Dict[str, Any]) -> str:
     workspace_roots = data.get("workspace_roots", [])
     if workspace_roots:
         return workspace_roots[0]
-    
+
     # Fallback: try to determine from file_path
     file_path = data.get("file_path", "")
     if file_path:
@@ -136,7 +137,7 @@ def get_workspace(data: Dict[str, Any]) -> str:
                 return str(parent)
             if (parent / "package.json").exists():
                 return str(parent)
-    
+
     # Last resort: current working directory
     return os.getcwd()
 
@@ -166,7 +167,7 @@ def read_state_file(workspace: str) -> str:
     """Read and return contents of the state file."""
     state_file = get_state_file_path(workspace)
     if os.path.exists(state_file):
-        with open(state_file, "r") as f:
+        with open(state_file) as f:
             return f.read().strip()
     return ""
 
@@ -201,23 +202,24 @@ def log_to_panel(message: str) -> None:
 # HOOK HANDLERS
 # =============================================================================
 
+
 def handle_after_file_edit(data: Dict[str, Any], workspace: str) -> None:
     """
     Handler for afterFileEdit hook event.
-    
+
     Records when monitored manifest files are modified, creating a state
     that will block subsequent install commands until a scan is performed.
-    
+
     Note: afterFileEdit is "fire-and-forget" - it cannot send messages
     back to the agent or block the edit.
     """
     file_path = data.get("file_path", "")
-    
+
     if is_manifest_file(file_path):
         # Record the modification
         timestamp = datetime.now().isoformat()
         write_state_file(workspace, f"{timestamp}: {file_path}")
-        
+
         # Log to Hooks output panel
         log_to_panel("=" * 60)
         log_to_panel("DEPENDENCY MANIFEST MODIFIED")
@@ -228,7 +230,7 @@ def handle_after_file_edit(data: Dict[str, Any], workspace: str) -> None:
         log_to_panel("Install commands will be blocked until security scan.")
         log_to_panel("Run snyk_package_health_check before npm/yarn/pnpm install.")
         log_to_panel("=" * 60)
-    
+
     # Always return success (afterFileEdit cannot block)
     output_response({"exit_code": 0})
 
@@ -236,10 +238,10 @@ def handle_after_file_edit(data: Dict[str, Any], workspace: str) -> None:
 def handle_before_shell_execution(data: Dict[str, Any], workspace: str) -> None:
     """
     Handler for beforeShellExecution hook event.
-    
+
     Blocks package installation commands if manifest files were modified
     without a subsequent security scan. This enforces the security gate.
-    
+
     Uses:
     - permission: "deny" to indicate the command should be blocked
     - agent_message: to inform the AI agent why the command was blocked
@@ -247,22 +249,22 @@ def handle_before_shell_execution(data: Dict[str, Any], workspace: str) -> None:
     - exit code 2: to signal blocking to Cursor
     """
     command = data.get("command", "")
-    
+
     # Only check install commands
     if not is_install_command(command):
         debug_log(f"Command '{command[:50]}...' is not an install command, allowing")
         output_response({"exit_code": 0})
         return
-    
+
     # Check if there are pending scans
     if not state_file_exists(workspace):
         debug_log("No pending scans, allowing install command")
         output_response({"exit_code": 0})
         return
-    
+
     # BLOCK the install command
     changes = read_state_file(workspace)
-    
+
     log_to_panel("=" * 60)
     log_to_panel("INSTALL COMMAND BLOCKED")
     log_to_panel("=" * 60)
@@ -277,7 +279,7 @@ def handle_before_shell_execution(data: Dict[str, Any], workspace: str) -> None:
     log_to_panel("  2. Review and address any vulnerabilities")
     log_to_panel("  3. Retry the install command")
     log_to_panel("=" * 60)
-    
+
     # Return blocking response with messages for agent and user
     response = {
         "permission": "deny",
@@ -292,7 +294,7 @@ def handle_before_shell_execution(data: Dict[str, Any], workspace: str) -> None:
         ),
     }
     output_response(response)
-    
+
     # Exit with code 2 to block the action
     sys.exit(2)
 
@@ -300,21 +302,21 @@ def handle_before_shell_execution(data: Dict[str, Any], workspace: str) -> None:
 def handle_before_mcp_execution(data: Dict[str, Any], workspace: str) -> None:
     """
     Handler for beforeMCPExecution hook event.
-    
+
     Clears the security gate when a scan tool is invoked, allowing
     subsequent install commands to proceed.
-    
+
     Also provides warnings if non-scan MCP tools are called while
     manifest changes are pending.
     """
     tool_name = data.get("tool_name", "unknown")
-    
+
     # If calling a scan tool, clear the pending state
     if is_scan_tool(tool_name):
         if state_file_exists(workspace):
             changes = read_state_file(workspace)
             clear_state_file(workspace)
-            
+
             log_to_panel("=" * 60)
             log_to_panel("SECURITY SCAN INITIATED")
             log_to_panel("=" * 60)
@@ -323,14 +325,14 @@ def handle_before_mcp_execution(data: Dict[str, Any], workspace: str) -> None:
             log_to_panel("")
             log_to_panel("Install commands are now allowed.")
             log_to_panel("=" * 60)
-        
+
     output_response({"exit_code": 0})
 
 
 def handle_stop(data: Dict[str, Any], workspace: str) -> None:
     """
     Handler for stop hook event.
-    
+
     Provides a final reminder if the session ends with unscanned
     manifest changes. Uses followup_message which is more reliable
     than agent_message in Cursor.
@@ -338,10 +340,10 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
     if not state_file_exists(workspace):
         output_response({})
         return
-    
+
     changes = read_state_file(workspace)
     clear_state_file(workspace)
-    
+
     log_to_panel("=" * 60)
     log_to_panel("SESSION ENDED WITH UNSCANNED CHANGES")
     log_to_panel("=" * 60)
@@ -351,7 +353,7 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
     log_to_panel("")
     log_to_panel(f"Please run: snyk_package_health_check on {workspace}")
     log_to_panel("=" * 60)
-    
+
     # Use followup_message which works reliably in the stop hook
     response = {
         "followup_message": (
@@ -367,10 +369,11 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
 # MAIN ENTRY POINT
 # =============================================================================
 
+
 def main() -> None:
     """
     Main entry point for the hook script.
-    
+
     Reads JSON input from stdin, determines the hook event type,
     and dispatches to the appropriate handler.
     """
@@ -383,14 +386,14 @@ def main() -> None:
         log_to_panel(f"Error parsing hook input: {e}")
         output_response({"exit_code": 1})
         sys.exit(1)
-    
+
     # Extract hook event and workspace
     hook_event = data.get("hook_event_name", "")
     workspace = get_workspace(data)
-    
+
     debug_log(f"Hook event: {hook_event}")
     debug_log(f"Workspace: {workspace}")
-    
+
     # Dispatch to appropriate handler
     handlers = {
         "afterFileEdit": handle_after_file_edit,
@@ -398,7 +401,7 @@ def main() -> None:
         "beforeMCPExecution": handle_before_mcp_execution,
         "stop": handle_stop,
     }
-    
+
     handler = handlers.get(hook_event)
     if handler:
         handler(data, workspace)
@@ -409,4 +412,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

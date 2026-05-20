@@ -17,16 +17,18 @@ Usage:
 """
 
 import json
-import os
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 from analyze_diff import StagedChanges
 from cache import SnykCache
 from run_snyk_scan import (
-    run_sast_scan, run_sca_scan,
-    SastScanResult, ScaScanResult,
-    CodeVulnerability, DependencyVulnerability,
+    CodeVulnerability,
+    DependencyVulnerability,
+    SastScanResult,
+    ScaScanResult,
+    run_sast_scan,
+    run_sca_scan,
 )
 
 
@@ -38,25 +40,27 @@ def resolve_installed_version(package_name: str, semver_range: str) -> str:
     try:
         lock_file = Path("package-lock.json")
         if not lock_file.exists():
-            return semver_range.lstrip('^~>=<')
+            return semver_range.lstrip("^~>=<")
 
-        with open(lock_file, 'r') as f:
+        with open(lock_file) as f:
             lock_data = json.load(f)
 
         # lockfileVersion 2+
         if "packages" in lock_data:
             pkg_key = f"node_modules/{package_name}"
             if pkg_key in lock_data["packages"]:
-                return lock_data["packages"][pkg_key].get("version", semver_range.lstrip('^~>=<'))
+                return lock_data["packages"][pkg_key].get("version", semver_range.lstrip("^~>=<"))
 
         # lockfileVersion 1
         if "dependencies" in lock_data and package_name in lock_data["dependencies"]:
-            return lock_data["dependencies"][package_name].get("version", semver_range.lstrip('^~>=<'))
+            return lock_data["dependencies"][package_name].get(
+                "version", semver_range.lstrip("^~>=<")
+            )
 
     except Exception:
         pass
 
-    return semver_range.lstrip('^~>=<')
+    return semver_range.lstrip("^~>=<")
 
 
 def get_sast_with_cache(
@@ -87,16 +91,18 @@ def get_sast_with_cache(
         if cached and not no_cache:
             cache_hits += 1
             for v in cached.vulnerabilities:
-                all_vulns.append(CodeVulnerability(
-                    id=v.get("id", "unknown"),
-                    title=v.get("title", "Unknown"),
-                    severity=v.get("severity", "medium"),
-                    cwe=v.get("cwe"),
-                    file_path=file_path,
-                    start_line=v.get("start_line", 0),
-                    end_line=v.get("end_line", 0),
-                    message=v.get("message", "")
-                ))
+                all_vulns.append(
+                    CodeVulnerability(
+                        id=v.get("id", "unknown"),
+                        title=v.get("title", "Unknown"),
+                        severity=v.get("severity", "medium"),
+                        cwe=v.get("cwe"),
+                        file_path=file_path,
+                        start_line=v.get("start_line", 0),
+                        end_line=v.get("end_line", 0),
+                        message=v.get("message", ""),
+                    )
+                )
         else:
             cache_misses += 1
             uncached_files.append(file_path)
@@ -107,10 +113,12 @@ def get_sast_with_cache(
         if fresh_result.success:
             for v in fresh_result.vulnerabilities:
                 for uncached in uncached_files:
-                    if (v.file_path == uncached or
-                            v.file_path.endswith(uncached) or
-                            uncached.endswith(v.file_path) or
-                            Path(v.file_path).name == Path(uncached).name):
+                    if (
+                        v.file_path == uncached
+                        or v.file_path.endswith(uncached)
+                        or uncached.endswith(v.file_path)
+                        or Path(v.file_path).name == Path(uncached).name
+                    ):
                         all_vulns.append(v)
                         break
 
@@ -123,13 +131,15 @@ def get_sast_with_cache(
                         "cwe": v.cwe,
                         "start_line": v.start_line,
                         "end_line": v.end_line,
-                        "message": v.message
+                        "message": v.message,
                     }
                     for v in fresh_result.vulnerabilities
-                    if (v.file_path == file_path or
-                        v.file_path.endswith(file_path) or
-                        file_path.endswith(v.file_path) or
-                        Path(v.file_path).name == Path(file_path).name)
+                    if (
+                        v.file_path == file_path
+                        or v.file_path.endswith(file_path)
+                        or file_path.endswith(v.file_path)
+                        or Path(v.file_path).name == Path(file_path).name
+                    )
                 ]
                 cache.set_sast_result(file_path, file_vulns)
 
@@ -163,18 +173,20 @@ def get_sca_with_cache(
         if cached and not no_cache:
             cache_hits += 1
             for v in cached.vulnerabilities:
-                all_vulns.append(DependencyVulnerability(
-                    id=v.get("id", "unknown"),
-                    title=v.get("title", "Unknown"),
-                    severity=v.get("severity", "medium"),
-                    package_name=v.get("package_name", pkg_name),
-                    installed_version=v.get("installed_version", version),
-                    fixed_version=v.get("fixed_version"),
-                    cve=v.get("cve"),
-                    cvss_score=None,
-                    is_direct=v.get("package_name") == pkg_name,
-                    dependency_path=v.get("dependency_path", [])
-                ))
+                all_vulns.append(
+                    DependencyVulnerability(
+                        id=v.get("id", "unknown"),
+                        title=v.get("title", "Unknown"),
+                        severity=v.get("severity", "medium"),
+                        package_name=v.get("package_name", pkg_name),
+                        installed_version=v.get("installed_version", version),
+                        fixed_version=v.get("fixed_version"),
+                        cve=v.get("cve"),
+                        cvss_score=None,
+                        is_direct=v.get("package_name") == pkg_name,
+                        dependency_path=v.get("dependency_path", []),
+                    )
+                )
         else:
             cache_misses += 1
             need_fresh_scan = True
@@ -199,8 +211,8 @@ def get_sca_with_cache(
                     # dependency_path: ['snyk-test-repo@1.0.0', 'express@4.14.1', ...]
                     top_level = v.dependency_path[1]
 
-                    if '@' in top_level:
-                        parts = top_level.rsplit('@', 1)
+                    if "@" in top_level:
+                        parts = top_level.rsplit("@", 1)
                         if len(parts) == 2:
                             top_pkg_name, top_pkg_version = parts
                             key = f"{top_pkg_name}@{top_pkg_version}"
@@ -209,26 +221,30 @@ def get_sca_with_cache(
                                 packages_cached[key] = {
                                     "package": top_pkg_name,
                                     "version": top_pkg_version,
-                                    "vulnerabilities": []
+                                    "vulnerabilities": [],
                                 }
 
-                            packages_cached[key]["vulnerabilities"].append({
-                                "id": v.id,
-                                "title": v.title,
-                                "severity": v.severity,
-                                "fixed_version": v.fixed_version,
-                                "cve": v.cve,
-                                "package_name": v.package_name,
-                                "installed_version": v.installed_version,
-                                "dependency_path": v.dependency_path
-                            })
+                            packages_cached[key]["vulnerabilities"].append(
+                                {
+                                    "id": v.id,
+                                    "title": v.title,
+                                    "severity": v.severity,
+                                    "fixed_version": v.fixed_version,
+                                    "cve": v.cve,
+                                    "package_name": v.package_name,
+                                    "installed_version": v.installed_version,
+                                    "dependency_path": v.dependency_path,
+                                }
+                            )
 
             if debug:
                 print(f"Caching {len(packages_cached)} top-level packages")
                 for key in packages_cached:
-                    print(f"  {key}: {len(packages_cached[key]['vulnerabilities'])} vulnerabilities")
+                    print(
+                        f"  {key}: {len(packages_cached[key]['vulnerabilities'])} vulnerabilities"
+                    )
 
-            for key, data in packages_cached.items():
+            for _key, data in packages_cached.items():
                 cache.set_sca_result(data["package"], data["version"], data["vulnerabilities"])
 
     return ScaScanResult(success=True, vulnerabilities=all_vulns), cache_hits, cache_misses

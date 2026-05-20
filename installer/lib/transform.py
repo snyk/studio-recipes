@@ -10,7 +10,6 @@ import os
 import re
 import sys
 
-
 FRONTMATTER_RE = re.compile(r"^---\s*\n.*?\n---\s*\n", re.DOTALL)
 
 
@@ -21,7 +20,7 @@ def strip_frontmatter(content):
 
 def mdc_to_md(src_path, dest_path):
     """Convert .mdc rule file to .md by stripping YAML frontmatter."""
-    with open(src_path, "r") as f:
+    with open(src_path) as f:
         content = f.read()
 
     transformed = strip_frontmatter(content)
@@ -33,7 +32,7 @@ def mdc_to_md(src_path, dest_path):
 
 def skill_to_command(src_path, dest_path):
     """Convert SKILL.md to command .md by stripping YAML frontmatter."""
-    with open(src_path, "r") as f:
+    with open(src_path) as f:
         content = f.read()
 
     transformed = strip_frontmatter(content)

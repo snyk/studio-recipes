@@ -1,107 +1,59 @@
 # Guardrail Directives
 
-Guardrail directives are automatically injected into agent interactions. They govern agent behavior by providing persistent context, setting security policies, and enforcing compliance rules. Unlike [command directives](../command_directives/) (which are invoked on-demand), guardrails run automatically to prevent security issues from being introduced.
+**Always-on security controls for AI coding assistants.** Guardrails govern agent behavior automatically — they prevent vulnerabilities from being introduced rather than catching them after the fact.
 
-[Learn more in Snyk's documentation](https://docs.snyk.io/integrations/snyk-studio-agentic-integrations/directives#guardrail-directives)
+This is the **Secure at Inception** half of [Snyk Studio Recipes](https://snyk.io/product/studio/). For on-demand remediation of existing issues, see [Command Directives](../command_directives/).
 
-## Implementation Approaches
+[Snyk documentation: Guardrail directives →](https://docs.snyk.io/integrations/snyk-studio-agentic-integrations/directives#guardrail-directives)
 
-Guardrail directives generally follow two implementation patterns:
+---
 
-1. **Hooks** - Scripts that run at lifecycle events (deterministic)
-2. **Rules** - Instructions embedded in the AI's context (non-deterministic)
+## Available controls
 
-### Choosing an Approach
+### Secure at Inception (SAI)
 
-| Consideration | Rules | Hooks |
-|---------------|-------|-------|
-| **Enforcement** | Non-deterministic (AI may skip) | Deterministic (always runs) |
-| **Complexity** | Simple (one file) | More complex (scripts) |
-| **Flexibility** | AI can adapt to context | Fixed behavior |
-| **Setup** | Copy to rules directory | Configure hooks + scripts |
-| **Visibility** | Inline in conversation | Separate output panel |
+Automatically scans new or modified code for vulnerabilities the moment the assistant generates it — so risky code is caught and fixed before it shapes the design or lands in a commit.
 
-**Recommendation:** Use hooks when available for determinism. Combine with rules for real-time inline feedback.
+| Coding Assistant | Enforcement options |
+|---|---|
+| **[Cursor](./secure_at_inception/hooks_version/cursor/)** | Deterministic (hooks), with optional non-deterministic [rules](./secure_at_inception/rule_version/) for inline feedback |
+| **[Claude Code](./secure_at_inception/hooks_version/claude/)** | Deterministic (hooks) |
+| **[Kiro / any Git client](./secure_at_inception/kiro_hooks/)** | Deterministic (Git pre-commit + Kiro background scanning) |
 
-## Available Guardrail Directives
+### Package Enforcement
 
-### 1. Secure At Inception (SAI)
-Automatically scans new or modified code for vulnerabilities.
-
-| Implementation | Mechanism | Coding Assistant | Enforcement |
-|----------------|-----------|-----------------|-------------|
-| **[Rule Version](./secure_at_inception/rule_version/)** | Cursor Rules (`.mdc`) | Cursor | Non-deterministic |
-| **[Hooks - Cursor](./secure_at_inception/hooks_version/cursor/)** | Cursor Hooks (`stop` event) | Cursor | Deterministic |
-| **[Hooks - Claude Code](./secure_at_inception/hooks_version/claude/)** | Claude Code Hooks (`PostToolUse`) | Claude Code | Deterministic |
-| **[Kiro/Git Hooks](./secure_at_inception/kiro_hooks/)** | Git pre-commit + Kiro background scanning | Kiro / any Git client | Deterministic |
-
-### 2. Package Enforcement
 Blocks dependency installation until security scans pass.
 
-| Implementation | Mechanism | Coding Assistant | Enforcement |
-|----------------|-----------|-----------------|-------------|
-| **[Hooks](./package_enforcement/cursor/hooks/)** | Cursor Hooks (multi-event) | Cursor | Deterministic |
+| Coding Assistant | Enforcement |
+|---|---|
+| **[Cursor](./package_enforcement/cursor/)** | Deterministic (hooks) |
 
-## How Guardrails Work
+---
 
-### Rule-Based (Non-Deterministic)
-Rules are instructions embedded in the AI's context. The AI "sees" the rule and follows it as guidance.
+## Choosing the enforcement model
 
-```
-┌─────────────────────────────────────────┐
-│          AI Agent Context               │
-│                                         │
-│  Rules:                                 │
-│  - Always run snyk_code_scan for new    │
-│    code in supported languages          │
-│  - Fix any issues found                 │
-│                                         │
-│  User: Create a login function          │
-└─────────────────────────────────────────┘
-                    │
-                    ▼
-┌─────────────────────────────────────────┐
-│          AI Response                    │
-│                                         │
-│  1. Creates login function              │
-│  2. (Sees rule) Runs snyk_code_scan     │
-│  3. Finds SQL injection                 │
-│  4. Fixes the vulnerability             │
-│  5. Re-scans to confirm                 │
-└─────────────────────────────────────────┘
-```
+Guardrails come in two forms. Most teams benefit from layering both.
 
-### Hook-Based (Deterministic)
-Hooks are scripts that run at specific lifecycle events, independent of AI decision-making.
+| Consideration | Rules | Hooks |
+|---|---|---|
+| **Enforcement** | Non-deterministic — the AI may skip them | Deterministic — always run on the configured event |
+| **Setup** | Drop-in instructions the AI reads as guidance | Scripts wired to lifecycle events |
+| **Visibility** | Inline in the conversation | Separate output panel |
+| **Best for** | Real-time inline feedback during generation | Hard guarantees ("this scan must run before commit") |
 
-```
-┌─────────────────────┐
-│  AI generates code  │
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│  Hook fires at      │
-│  lifecycle event    │──▶ Prompts AI to run scans
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│  AI runs scans and  │
-│  fixes any issues   │
-└─────────────────────┘
-```
+**Recommendation:** Use hooks where available for deterministic enforcement. Add rules on top so developers see issues inline as the assistant writes code.
 
-## Getting Started
+---
 
-1. **Choose your approach** (rules vs hooks, or both)
-2. **Navigate to the appropriate subdirectory**
-3. **Follow installation instructions** in that README
-4. **Configure your IDE**
-5. **Test with a sample project**
+## Deploy
 
-## See Also
+The fastest path is the [installer](../installer/) — the `default` profile provisions Secure at Inception guardrails for every supported assistant in one command. The `minimal` profile installs guardrails plus MCP configuration only.
 
-- [Command Directives](../command_directives/) - On-demand security fixing
-- [Secure At Inception](secure_at_inception/) - Auto-scan implementations
-- [Package Enforcement](package_enforcement/) - Dependency gate implementations
+For custom deployments, or for assistants the installer does not yet cover, every directive is a plain file under [`secure_at_inception/`](./secure_at_inception/) and [`package_enforcement/`](./package_enforcement/) — copy or fork into your assistant's configuration directory.
+
+---
+
+## See also
+
+- [Command Directives](../command_directives/) — on-demand security workflows
+- [Snyk Studio](https://snyk.io/product/studio/)

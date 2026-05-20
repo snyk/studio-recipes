@@ -1,0 +1,6 @@
+# Codex CLI MCP server entry for Snyk.
+# Merged into ~/.codex/config.toml under [mcp_servers.Snyk] by the installer.
+
+[mcp_servers.Snyk]
+command = "npx"
+args = ["-y", "snyk@latest", "mcp", "-t", "stdio"]

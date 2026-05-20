@@ -33,17 +33,16 @@ LOG_FILE = ""
 SNYK_STUDIO_VERSION = "1.0.0"
 
 # Hardcoded well-known Snyk config location
-_SNYK_CONFIG_PATH = os.path.join(
-    os.path.expanduser("~"), ".config", "configstore", "snyk.json"
-)
+_SNYK_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".config", "configstore", "snyk.json")
 
 
 def _compute_cache_dir(workspace: str) -> str:
     """Derive cache directory from tempdir and workspace hash.
     The regex extraction sanitizes the hash to break taint propagation."""
     import re
+
     raw_hash = hashlib.sha256(workspace.encode()).hexdigest()[:8]
-    match = re.fullmatch(r'[a-f0-9]{1,8}', raw_hash)
+    match = re.fullmatch(r"[a-f0-9]{1,8}", raw_hash)
     if not match:
         raise ValueError("Unexpected hash output")
     clean_hash = match.group(0)
@@ -116,13 +115,12 @@ def main():
     if not os.environ.get("SNYK_TOKEN"):
         has_stored_auth = False
         try:
-            with open(_SNYK_CONFIG_PATH, "r") as f:
+            with open(_SNYK_CONFIG_PATH) as f:
                 snyk_cfg = json.load(f)
             has_stored_auth = bool(
-                snyk_cfg.get("api")
-                or snyk_cfg.get("INTERNAL_OAUTH_TOKEN_STORAGE")
+                snyk_cfg.get("api") or snyk_cfg.get("INTERNAL_OAUTH_TOKEN_STORAGE")
             )
-        except (json.JSONDecodeError, IOError, FileNotFoundError):
+        except (OSError, json.JSONDecodeError, FileNotFoundError):
             pass
 
         if not has_stored_auth:
@@ -165,13 +163,19 @@ def main():
 
     if exit_code > 1:
         combined_output = (stderr + stdout).lower()
-        if any(pattern in combined_output for pattern in [
-            "missingapitokenerror", "not authenticated",
-            "authentication required", "snyk-0005",
-        ]):
+        if any(
+            pattern in combined_output
+            for pattern in [
+                "missingapitokenerror",
+                "not authenticated",
+                "authentication required",
+                "snyk-0005",
+            ]
+        ):
             log("Snyk CLI authentication required")
-            finish("auth_required", started_at=started_at,
-                   error_detail="Snyk CLI is not authenticated")
+            finish(
+                "auth_required", started_at=started_at, error_detail="Snyk CLI is not authenticated"
+            )
             return
         log(f"Scan error: {stderr[:500]}")
         finish("error", started_at=started_at, error_detail=stderr[:500])

@@ -23,7 +23,7 @@ import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, cast
 
 from platform_utils import (
     get_detached_popen_kwargs,
@@ -196,7 +196,7 @@ def check_snyk_cli() -> Optional[str]:
     for name in get_snyk_binary_names():
         found = shutil.which(name, path=env.get("PATH", ""))
         if found:
-            return found
+            return str(found)
     return None
 
 
@@ -318,7 +318,7 @@ class _ScanChannel:
         """Read the full done-file record (status, started_at, vulnerabilities)."""
         try:
             with open(self.done_file(workspace)) as f:
-                return json.load(f)
+                return cast(Optional[Dict[str, Any]], json.load(f))
         except (OSError, json.JSONDecodeError, FileNotFoundError):
             return None
 
@@ -349,9 +349,9 @@ _sca = _ScanChannel("sca_scan.pid", "sca_scan.done", "sca_scan_worker.py", "SCA 
 
 def _do_launch(
     workspace: str,
-    is_running_fn,
-    done_file_fn,
-    pid_file_fn,
+    is_running_fn: Callable[[str], bool],
+    done_file_fn: Callable[[str], str],
+    pid_file_fn: Callable[[str], str],
     worker_script: str,
 ) -> bool:
     """Launch a worker subprocess; catches any Exception so callers get False."""
@@ -386,13 +386,13 @@ def _do_launch(
 
 def _do_wait(
     workspace: str,
-    is_complete_fn,
-    is_running_fn,
-    launch_fn,
-    read_status_fn,
+    is_complete_fn: Callable[[str], bool],
+    is_running_fn: Callable[[str], bool],
+    launch_fn: Callable[[str], bool],
+    read_status_fn: Callable[[str], Optional[str]],
     name: str,
     timeout: float,
-    log_fn,
+    log_fn: Optional[Callable[[str], None]],
 ) -> Optional[str]:
     """Poll until the scan completes, times out, or the process dies."""
 
@@ -476,7 +476,11 @@ def _read_scan_status(workspace: str) -> Optional[str]:
     return _sast._read_status(workspace)
 
 
-def wait_for_scan(workspace: str, timeout: float = SCAN_WAIT_TIMEOUT, log_fn=None) -> Optional[str]:
+def wait_for_scan(
+    workspace: str,
+    timeout: float = SCAN_WAIT_TIMEOUT,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> Optional[str]:
     """Wait for a background scan to complete. Returns the status string
     or None if the wait timed out."""
     return _do_wait(
@@ -539,7 +543,9 @@ def _read_sca_scan_status(workspace: str) -> Optional[str]:
 
 
 def wait_for_sca_scan(
-    workspace: str, timeout: float = SCAN_WAIT_TIMEOUT, log_fn=None
+    workspace: str,
+    timeout: float = SCAN_WAIT_TIMEOUT,
+    log_fn: Optional[Callable[[str], None]] = None,
 ) -> Optional[str]:
     """Wait for a background SCA scan to complete. Returns the status string
     or None if the wait timed out."""

@@ -18,7 +18,7 @@ Usage:
 
 import json
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from analyze_diff import StagedChanges
 from cache import SnykCache
@@ -49,12 +49,14 @@ def resolve_installed_version(package_name: str, semver_range: str) -> str:
         if "packages" in lock_data:
             pkg_key = f"node_modules/{package_name}"
             if pkg_key in lock_data["packages"]:
-                return lock_data["packages"][pkg_key].get("version", semver_range.lstrip("^~>=<"))
+                return str(
+                    lock_data["packages"][pkg_key].get("version", semver_range.lstrip("^~>=<"))
+                )
 
         # lockfileVersion 1
         if "dependencies" in lock_data and package_name in lock_data["dependencies"]:
-            return lock_data["dependencies"][package_name].get(
-                "version", semver_range.lstrip("^~>=<")
+            return str(
+                lock_data["dependencies"][package_name].get("version", semver_range.lstrip("^~>=<"))
             )
 
     except Exception:
@@ -204,7 +206,7 @@ def get_sca_with_cache(
             # Cache results per top-level package with their full dependency trees.
             # Group vulnerabilities by the first package in the dependency path
             # (i.e. the direct dependency of the project that pulls in the vuln).
-            packages_cached: Dict[str, Dict] = {}
+            packages_cached: Dict[str, Dict[str, Any]] = {}
 
             for v in fresh_result.vulnerabilities:
                 if len(v.dependency_path) >= 2:

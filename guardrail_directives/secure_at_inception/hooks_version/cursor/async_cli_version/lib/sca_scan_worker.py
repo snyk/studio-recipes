@@ -22,7 +22,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 WORKSPACE = ""
 CACHE_DIR = ""
@@ -34,7 +34,7 @@ LOG_FILE = ""
 SNYK_STUDIO_VERSION = "1.0.0"
 
 
-def log(msg):
+def log(msg: str) -> None:
     if not LOG_FILE:
         return
     try:
@@ -44,10 +44,15 @@ def log(msg):
         pass
 
 
-def finish(status, started_at=None, vulnerabilities=None, error_detail=None):
+def finish(
+    status: str,
+    started_at: Optional[str] = None,
+    vulnerabilities: Optional[List[Dict[str, Any]]] = None,
+    error_detail: Optional[str] = None,
+) -> None:
     if not DONE_FILE:
         return
-    done_data = {
+    done_data: Dict[str, Any] = {
         "status": status,
         "completed_at": datetime.now().isoformat(),
     }
@@ -120,7 +125,7 @@ def parse_snyk_test_results(json_output: str) -> List[Dict[str, Any]]:
     return vulnerabilities
 
 
-def main():
+def main() -> None:
     global WORKSPACE, CACHE_DIR, LIB_DIR, PID_FILE, DONE_FILE, LOG_FILE
 
     try:

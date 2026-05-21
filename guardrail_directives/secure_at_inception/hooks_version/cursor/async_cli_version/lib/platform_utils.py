@@ -19,7 +19,7 @@ import os
 import subprocess
 import sys
 from contextlib import contextmanager
-from typing import Dict, List
+from typing import Dict, Generator, Iterator, List
 
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -158,7 +158,7 @@ def get_snyk_binary_names() -> List[str]:
 
 
 @contextmanager
-def file_lock(lock_path: str):
+def file_lock(lock_path: str) -> Iterator[None]:
     """Cross-platform exclusive file lock.
 
     Uses fcntl on Unix and msvcrt on Windows.
@@ -170,22 +170,22 @@ def file_lock(lock_path: str):
         yield from _file_lock_unix(lock_path)
 
 
-def _file_lock_windows(lock_path: str):
+def _file_lock_windows(lock_path: str) -> Generator[None, None, None]:
     import msvcrt
 
     fd = open(lock_path, "w")
     try:
-        msvcrt.locking(fd.fileno(), msvcrt.LK_LOCK, 1)
+        msvcrt.locking(fd.fileno(), msvcrt.LK_LOCK, 1)  # type: ignore[attr-defined]
         yield
     finally:
         try:
-            msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
+            msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
         except OSError:
             pass
         fd.close()
 
 
-def _file_lock_unix(lock_path: str):
+def _file_lock_unix(lock_path: str) -> Generator[None, None, None]:
     try:
         import fcntl
     except ImportError:

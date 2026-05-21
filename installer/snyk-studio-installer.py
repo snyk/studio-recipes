@@ -33,8 +33,7 @@ import sys
 import tempfile
 from pathlib import Path
 from subprocess import run
-from typing import Any, Dict, Iterator, List, Optional
-from webbrowser import get
+from typing import Any, Dict, Iterator, List, Optional, cast
 
 # When set (by generated install.sh / install.ps1 / install.py), manifest and recipe sources
 # live under this directory (flat layout from the release zip).
@@ -231,7 +230,7 @@ class Manifest:
         return [r for r in all_ids if r in active and self.recipes[r].get("enabled", True)]
 
     def get_sources(self, recipe_id: str, ade: str) -> Dict[str, Any]:
-        return self.recipes.get(recipe_id, {}).get("sources", {}).get(ade, {})
+        return cast(Dict[str, Any], self.recipes.get(recipe_id, {}).get("sources", {}).get(ade, {}))
 
     def all_recipe_ids(self) -> List[str]:
         return list(self.recipes.keys())
@@ -297,14 +296,14 @@ class Manifest:
     def get_extension_settings_path(self, ade: str) -> List[Path]:
         """Get the paths to the extension settings files for the given ADE based on OS"""
         home = Path.home()
-        path_prefix = ""
+        path_prefix: Path
         settings_paths = []
 
         # set path prefix paths depending on OS
         if sys.platform == "win32":
             path_prefix = Path(os.environ.get("APPDATA", str(home / "AppData/Roaming")))
         elif sys.platform == "darwin":
-            path_prefix = home / "Library/Application Support"
+            path_prefix = Path(home / "Library/Application Support")
         else:  # Linux
             path_prefix = Path(os.environ.get("XDG_CONFIG_HOME", str(home / ".config")))
 
@@ -729,6 +728,7 @@ def check_prerequisites(auto_yes: bool) -> None:
         if reply not in ("y", "yes"):
             sys.exit(1)
 
+
 # =============================================================================
 # ADE DETECTION
 # =============================================================================
@@ -982,7 +982,7 @@ def _platform_source(strategy: str, source: Path) -> Iterator[Path]:
         try:
             import tomllib as _toml_read  # Python 3.11+
         except ImportError:  # pragma: no cover
-            import tomli as _toml_read  # type: ignore[no-redef]
+            import tomli as _toml_read
         import tomli_w as _toml_write
 
         with open(source, "rb") as f:
@@ -1296,12 +1296,12 @@ def uninstall(ades: List[str], manifest: Manifest, payload: PayloadContext, dry_
                 if dry_run:
                     print(f"    {C.dim(f'[dry-run] unmerge ({strategy}): {target}')}")
                 else:
-                    with _platform_source(
+                    with _platform_source(  # nosec B324 — source path comes from installer manifest, validated by payload.resolve_src against payload_dir
                         strategy, payload.resolve_src(cm["source"])
                     ) as resolved_path:
-                        lib_dir = str(payload.payload_dir / "lib")
-                        if lib_dir not in sys.path:
-                            sys.path.insert(0, lib_dir)
+                        merge_lib_dir = str(payload.payload_dir / "lib")
+                        if merge_lib_dir not in sys.path:
+                            sys.path.insert(0, merge_lib_dir)
                         import merge_json
 
                         if strategy in merge_json.STRATEGIES:

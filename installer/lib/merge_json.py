@@ -54,7 +54,7 @@ if _VENDOR_DIR not in sys.path:
 try:
     import tomllib as _toml_reader  # Python 3.11+
 except ImportError:  # pragma: no cover - 3.8/3.9/3.10 fallback
-    import tomli as _toml_reader  # type: ignore[no-redef]
+    import tomli as _toml_reader
 import tomli_w as _toml_writer  # noqa: E402
 
 

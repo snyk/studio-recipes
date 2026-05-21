@@ -23,7 +23,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, cast
 
 # =============================================================================
 # CONFIGURATION
@@ -272,7 +272,7 @@ def _read_scan_status(workspace: str) -> Optional[str]:
     try:
         with open(done_file) as f:
             data = json.load(f)
-        return data.get("status", "unknown")
+        return str(data.get("status", "unknown"))
     except (OSError, json.JSONDecodeError, FileNotFoundError):
         return None
 
@@ -282,12 +282,16 @@ def get_scan_completion_info(workspace: str) -> Optional[Dict[str, Any]]:
     done_file = get_scan_done_file(workspace)
     try:
         with open(done_file) as f:
-            return json.load(f)
+            return cast(dict[str, Any], json.load(f))
     except (OSError, json.JSONDecodeError, FileNotFoundError):
         return None
 
 
-def wait_for_scan(workspace: str, timeout: float = SCAN_WAIT_TIMEOUT, log_fn=None) -> Optional[str]:
+def wait_for_scan(
+    workspace: str,
+    timeout: float = SCAN_WAIT_TIMEOUT,
+    log_fn: Optional[Callable[[object], None]] = None,
+) -> Optional[str]:
     """Wait for a background scan to complete. Returns the status string
     or None if the wait timed out."""
     if log_fn is None:

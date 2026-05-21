@@ -22,6 +22,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 WORKSPACE = ""
 CACHE_DIR = ""
@@ -33,7 +34,7 @@ LOG_FILE = ""
 SNYK_STUDIO_VERSION = "1.0.0"
 
 
-def log(msg):
+def log(msg: str) -> None:
     if not LOG_FILE:
         return
     try:
@@ -43,10 +44,15 @@ def log(msg):
         pass
 
 
-def finish(status, started_at=None, vulnerabilities=None, error_detail=None):
+def finish(
+    status: str,
+    started_at: Optional[str] = None,
+    vulnerabilities: Optional[List[Dict[str, Any]]] = None,
+    error_detail: Optional[str] = None,
+) -> None:
     if not DONE_FILE:
         return
-    done_data = {
+    done_data: Dict[str, Any] = {
         "status": status,
         "completed_at": datetime.now().isoformat(),
     }
@@ -68,7 +74,7 @@ def finish(status, started_at=None, vulnerabilities=None, error_detail=None):
     log(f"Scan finished with status: {status}")
 
 
-def main():
+def main() -> None:
     global WORKSPACE, CACHE_DIR, LIB_DIR, PID_FILE, DONE_FILE, LOG_FILE
 
     try:

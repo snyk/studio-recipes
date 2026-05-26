@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.8"
+# ///
 """
 Gemini Code Hook: Snyk Secure At Inception
 ============================================

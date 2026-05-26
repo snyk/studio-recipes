@@ -23,7 +23,7 @@ etc.) and prompts for SCA scanning
 
 ## Quick Start
 
-**Prerequisites:** Python 3.8+, [Snyk CLI](https://docs.snyk.io/snyk-cli/install-the-snyk-cli) (`npm install -g snyk && snyk auth`), Claude Code with hooks support.
+**Prerequisites:** [uv](https://docs.astral.sh/uv/getting-started/installation/) (`curl -LsSf https://astral.sh/uv/install.sh | sh`), [Snyk CLI](https://docs.snyk.io/snyk-cli/install-the-snyk-cli) (`npm install -g snyk && snyk auth`), Claude Code with hooks support.
 
 **1. Copy files to your project:**
 
@@ -44,7 +44,7 @@ chmod +x .claude/hooks/snyk_secure_at_inception.py
         "hooks": [
           {
             "type": "command",
-            "command": "uv run \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/snyk_secure_at_inception.py",
+            "command": "uv run \"$HOME/.claude/hooks/snyk_secure_at_inception.py\"",
             "statusMessage": "Initializing Snyk security scanning..."
           }
         ]
@@ -56,7 +56,7 @@ chmod +x .claude/hooks/snyk_secure_at_inception.py
         "hooks": [
           {
             "type": "command",
-            "command": "uv run \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/snyk_secure_at_inception.py",
+            "command": "uv run \"$HOME/.claude/hooks/snyk_secure_at_inception.py\"",
             "statusMessage": "Tracking code changes for security scan..."
           }
         ]
@@ -67,7 +67,7 @@ chmod +x .claude/hooks/snyk_secure_at_inception.py
         "hooks": [
           {
             "type": "command",
-            "command": "uv run \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/snyk_secure_at_inception.py",
+            "command": "uv run \"$HOME/.claude/hooks/snyk_secure_at_inception.py\"",
             "statusMessage": "Evaluating security scan results..."
           }
         ]
@@ -140,7 +140,7 @@ python3 -c "import hashlib,os,tempfile; h=hashlib.sha256(os.getcwd().encode()).h
 
 ## Windows Installation / Compatibility
 
-The hook scripts use a cross-platform `lib/platform_utils.py` module that handles OS differences automatically. The Python code works on Windows without modification. However, the **hook command** in `settings.json` and the **installation steps** need adjusting.
+The hook scripts use a cross-platform `lib/platform_utils.py` module, so the Python code itself works on Windows without modification.
 
 ### Installation on Windows
 
@@ -151,55 +151,6 @@ mkdir -Force .claude\hooks\lib
 copy path\to\async_cli_version\snyk_secure_at_inception.py .claude\hooks\
 copy path\to\async_cli_version\lib\*.py .claude\hooks\lib\
 ```
-
-Note: `chmod +x` is not needed on Windows -- executability is determined by file extension.
-
-### Hook command in `settings.json`
-
-Hook commands use `uv run` with `$HOME` on Unix (install [uv](https://docs.astral.sh/uv/getting-started/installation/) and ensure it is on your PATH). On Windows, use `%USERPROFILE%` and backslashes as in the example below.
-
-**Option A -- `uv run` on Windows (matches installer output):**
-
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "uv run \"%USERPROFILE%\\.claude\\hooks\\snyk_secure_at_inception.py\""
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "uv run \"%USERPROFILE%\\.claude\\hooks\\snyk_secure_at_inception.py\""
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "uv run \"%USERPROFILE%\\.claude\\hooks\\snyk_secure_at_inception.py\""
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-**Option B -- Using `py -3` instead of `uv run`:** replace the `uv run` prefix with `py -3` if you are not using uv.
-
 
 ### Snyk CLI on Windows
 

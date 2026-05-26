@@ -947,35 +947,52 @@ def get_target_ades(
 
 
 # =============================================================================
-# PLATFORM-AWARE HOOK COMMAND REWRITING
+# HOOK-COMMAND PATH EXPANSION (install-time)
 # =============================================================================
+#
+# Hook command strings in source files use ``$HOME``/``$env:USERPROFILE``
+# placeholders for human readability. The runtime shell each ADE picks on
+# each OS varies (bash, zsh, PowerShell, cmd, Git Bash, WSL), and not all of
+# them expand the same variables — so leaving placeholders in the installed
+# file is fragile. Instead we expand placeholders to an absolute path *at
+# install time*, sidestepping every per-shell expansion difference.
+#
+# Strategies whose source file carries hook commands needing expansion:
 
-_WIN32_REWRITE_STRATEGIES: frozenset[str] = frozenset(
+_HOOK_EXPAND_STRATEGIES: frozenset[str] = frozenset(
     {"cursor_hooks", "claude_settings", "gemini_settings", "kiro_settings", "codex_config"}
 )
 
 
-@contextlib.contextmanager
-def _platform_source(strategy: str, source: Path) -> Iterator[Path]:
-    """Context manager yielding a platform-rewritten source path for Windows hook/settings strategies.
+def _should_expand_source(strategy: str) -> bool:
+    """True iff the source file for ``strategy`` carries hook commands we
+    should pre-expand before passing to the merge layer.
 
-    Source files use Unix commands (python3, $HOME) that silently fail on Windows; they must be
-    rewritten to (py -3, %USERPROFILE%). Without a temp file, merge_json (which only accepts paths)
-    would receive the original source and install the wrong commands on Windows.
-    delete=False is required because Windows cannot read a file that is still open.
-
-    Dispatches on file extension: JSON for cursor/claude sources, TOML for codex.
+    Skipped for ``unmerge_*`` strategies — those handle dual-form (raw vs
+    expanded) matching internally so they can clean up entries written by
+    older installer versions that still contain ``$HOME``.
     """
-    should_create_temp = sys.platform == "win32" and any(
-        s in strategy for s in _WIN32_REWRITE_STRATEGIES
-    )
-    if not should_create_temp:
+    if not any(s in strategy for s in _HOOK_EXPAND_STRATEGIES):
+        return False
+    return not strategy.startswith("unmerge_")
+
+
+@contextlib.contextmanager
+def _expand_source(strategy: str, source: Path) -> Iterator[Path]:
+    """Context manager yielding a path to source data with home-dir tokens expanded.
+
+    For strategies that pass ``_should_expand_source``, parses the source,
+    runs every string through ``expand_hook_command_paths``, writes the
+    result to a temp file, and yields its path. Otherwise yields ``source``
+    unchanged. ``delete=False`` is required on Windows because the file
+    cannot be read while still open.
+    """
+    if not _should_expand_source(strategy):
         yield source
         return
 
     is_toml = source.suffix.lower() == ".toml"
     if is_toml:
-        # Use vendored tomli/tomli_w from the installer's lib/ directory.
         vendor_dir = str(Path(__file__).resolve().parent / "lib" / "_vendor")
         if vendor_dir not in sys.path:
             sys.path.insert(0, vendor_dir)
@@ -991,7 +1008,12 @@ def _platform_source(strategy: str, source: Path) -> Iterator[Path]:
         with open(source) as f:
             data = json.load(f)
 
-    data = rewrite_hook_commands_for_platform(data)
+    lib_dir = str(Path(__file__).resolve().parent / "lib")
+    if lib_dir not in sys.path:
+        sys.path.insert(0, lib_dir)
+    import merge_json
+
+    data = merge_json.expand_hook_command_paths(data)
 
     suffix = ".toml" if is_toml else ".json"
     mode = "wb" if is_toml else "w"
@@ -1008,32 +1030,6 @@ def _platform_source(strategy: str, source: Path) -> Iterator[Path]:
     finally:
         with contextlib.suppress(OSError):
             tmp_path.unlink()
-
-
-def rewrite_hook_commands_for_platform(data: Dict[str, Any]) -> Dict[str, Any]:
-    """On Windows, rewrite python3/$HOME hook commands to py -3/%USERPROFILE%."""
-    if sys.platform != "win32":
-        return data
-
-    def _rewrite(cmd: str) -> str:
-        if not cmd.startswith("python3 "):
-            return cmd
-        cmd = cmd.replace("python3 ", "py -3 ", 1)
-        cmd = cmd.replace("$HOME/", "%USERPROFILE%\\", 1)
-        cmd = cmd.replace('"$HOME/', '"%USERPROFILE%\\', 1)
-        cmd = cmd.replace("/", "\\")
-        return cmd
-
-    def _walk(obj: Any) -> Any:
-        if isinstance(obj, dict):
-            return {k: _walk(v) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return [_walk(item) for item in obj]
-        if isinstance(obj, str) and obj.startswith("python3 "):
-            return _rewrite(obj)
-        return obj
-
-    return _walk(data)
 
 
 # =============================================================================
@@ -1079,7 +1075,7 @@ def merge_config(
         print(f"    {C.dim(f'[dry-run] merge ({strategy}): {target}')}")
         return
     target.parent.mkdir(parents=True, exist_ok=True)
-    with _platform_source(strategy, source) as resolved_path:
+    with _expand_source(strategy, source) as resolved_path:
         lib_dir = str(payload.payload_dir / "lib")
         if lib_dir not in sys.path:
             sys.path.insert(0, lib_dir)
@@ -1221,7 +1217,7 @@ def verify_recipe(recipe_id: str, ade: str, manifest: Manifest, payload: Payload
     if cm:
         strategy = cm["strategy"].replace("merge_", "verify_", 1)
         target = resolve_ade_path(ade, cm["target"])
-        with _platform_source(strategy, payload.resolve_src(cm["source"])) as resolved_path:
+        with _expand_source(strategy, payload.resolve_src(cm["source"])) as resolved_path:
             lib_dir = str(payload.payload_dir / "lib")
             if lib_dir not in sys.path:
                 sys.path.insert(0, lib_dir)
@@ -1296,7 +1292,7 @@ def uninstall(ades: List[str], manifest: Manifest, payload: PayloadContext, dry_
                 if dry_run:
                     print(f"    {C.dim(f'[dry-run] unmerge ({strategy}): {target}')}")
                 else:
-                    with _platform_source(  # nosec B324 — source path comes from installer manifest, validated by payload.resolve_src against payload_dir
+                    with _expand_source(  # nosec B324 — source path comes from installer manifest, validated by payload.resolve_src against payload_dir
                         strategy, payload.resolve_src(cm["source"])
                     ) as resolved_path:
                         merge_lib_dir = str(payload.payload_dir / "lib")

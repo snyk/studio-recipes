@@ -204,20 +204,20 @@ hooks = true
 [[hooks.SessionStart]]
 [[hooks.SessionStart.hooks]]
 type = "command"
-command = 'python3 "$HOME/.codex/hooks/snyk_secure_at_inception.py"'
+command = 'uv run "$HOME/.codex/hooks/snyk_secure_at_inception.py"'
 statusMessage = "Initializing Snyk security scanning..."
 
 [[hooks.PostToolUse]]
 matcher = "^(apply_patch|Edit|Write)$"
 [[hooks.PostToolUse.hooks]]
 type = "command"
-command = 'python3 "$HOME/.codex/hooks/snyk_secure_at_inception.py"'
+command = 'uv run "$HOME/.codex/hooks/snyk_secure_at_inception.py"'
 statusMessage = "Tracking code changes for security scan..."
 
 [[hooks.Stop]]
 [[hooks.Stop.hooks]]
 type = "command"
-command = 'python3 "$HOME/.codex/hooks/snyk_secure_at_inception.py"'
+command = 'uv run "$HOME/.codex/hooks/snyk_secure_at_inception.py"'
 statusMessage = "Evaluating security scan results..."
 """
 

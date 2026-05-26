@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.8"
+# ///
 """
 Codex CLI Hook: Snyk Secure At Inception
 ========================================

@@ -13,7 +13,7 @@ hooks = true
 
 [[hooks.SessionStart.hooks]]
 type = "command"
-command = 'python3 "$HOME/.codex/hooks/snyk_secure_at_inception.py"'
+command = 'uv run "$HOME/.codex/hooks/snyk_secure_at_inception.py"'
 statusMessage = "Initializing Snyk security scanning..."
 
 # --- After every file mutation: track modified lines, launch background scan ---
@@ -24,7 +24,7 @@ matcher = "^(apply_patch|Edit|Write)$"
 
 [[hooks.PostToolUse.hooks]]
 type = "command"
-command = 'python3 "$HOME/.codex/hooks/snyk_secure_at_inception.py"'
+command = 'uv run "$HOME/.codex/hooks/snyk_secure_at_inception.py"'
 statusMessage = "Tracking code changes for security scan..."
 
 # --- On stop: wait for the scan, block if new vulns were introduced ---
@@ -32,5 +32,5 @@ statusMessage = "Tracking code changes for security scan..."
 
 [[hooks.Stop.hooks]]
 type = "command"
-command = 'python3 "$HOME/.codex/hooks/snyk_secure_at_inception.py"'
+command = 'uv run "$HOME/.codex/hooks/snyk_secure_at_inception.py"'
 statusMessage = "Evaluating security scan results..."

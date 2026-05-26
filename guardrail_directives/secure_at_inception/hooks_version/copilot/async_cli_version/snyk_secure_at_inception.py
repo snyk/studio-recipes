@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.8"
+# ///
 """
 GitHub Copilot Hook: Snyk Secure At Inception
 ===============================================

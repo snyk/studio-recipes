@@ -27,7 +27,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import IO, Any, Dict, List, cast
 
 # =============================================================================
 # CONFIGURATION
@@ -80,7 +80,7 @@ MANIFEST_FILES = {
 # =============================================================================
 
 
-def safe_open_within_base(file_path: Path, base_dir: Path, mode: str = "r"):
+def safe_open_within_base(file_path: Path, base_dir: Path, mode: str = "r") -> IO[Any]:
     """
     Safely open a file after validating it's within the base directory.
 
@@ -135,14 +135,14 @@ def get_workspace_hash(workspace: str) -> str:
     return hashlib.sha256(workspace.encode()).hexdigest()[:8]
 
 
-def open_debounce_file(workspace: str, mode: str = "r"):
+def open_debounce_file(workspace: str, mode: str = "r") -> IO[Any]:
     """Get path to debounce tracking file."""
     workspace_hash = get_workspace_hash(workspace)
     workspace_path = Path(STATE_DIR) / f"snyk-debounce-{workspace_hash}.json"
     return safe_open_within_base(workspace_path, Path(STATE_DIR), mode)
 
 
-def get_debounce_file(workspace: str):
+def get_debounce_file(workspace: str) -> Path:
     """Get path to debounce tracking file."""
     workspace_hash = get_workspace_hash(workspace)
     return Path(STATE_DIR) / f"snyk-debounce-{workspace_hash}.json"
@@ -167,7 +167,7 @@ def get_workspace(data: Dict[str, Any]) -> str:
     """Extract workspace path from hook input."""
     workspace_roots = data.get("workspace_roots", [])
     if workspace_roots:
-        return workspace_roots[0]
+        return str(workspace_roots[0])
 
     # Fallback
     file_path = data.get("file_path", "")
@@ -209,7 +209,7 @@ class DebounceTracker:
         try:
             if self.state_file.exists():
                 with open_debounce_file(self.workspace) as f:
-                    return json.load(f)
+                    return cast(Dict[str, Any], json.load(f))
         except (json.JSONDecodeError, FileNotFoundError):
             pass
         return {"pending_files": {}, "pending_packages": False, "last_update": None}

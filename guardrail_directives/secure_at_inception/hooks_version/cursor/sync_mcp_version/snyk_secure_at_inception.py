@@ -63,7 +63,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, cast
 
 # =============================================================================
 # CONFIGURATION
@@ -179,7 +179,7 @@ def get_workspace(data: Dict[str, Any]) -> str:
     """Extract workspace path from hook input data."""
     workspace_roots = data.get("workspace_roots", [])
     if workspace_roots:
-        return workspace_roots[0]
+        return str(workspace_roots[0])
 
     # Fallback: try to determine from file_path
     file_path = data.get("file_path", "")
@@ -215,8 +215,8 @@ def read_state(workspace: str) -> Dict[str, Any]:
     state_file = get_state_file_path(workspace)
     try:
         if os.path.exists(state_file):
-            with open(state_file) as f:
-                return json.load(f)
+            with open(state_file) as f:  # nosec B324 — path is constructed from hook-managed workspace root, not raw user input
+                return cast(Dict[str, Any], json.load(f))
     except (OSError, json.JSONDecodeError):
         pass
     return {"code_files": [], "manifest_files": [], "last_update": None}

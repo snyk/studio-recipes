@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.8"
+# ///
 """
 Codex CLI Hook: Snyk Secure At Inception
 ========================================
@@ -32,7 +35,7 @@ import sys
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generator, List, Optional, cast
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 LIB_DIR = SCRIPT_DIR / "lib"
@@ -166,7 +169,7 @@ def get_state_file_path(workspace: str) -> str:
 
 
 def get_workspace(data: Dict[str, Any]) -> str:
-    return data.get("cwd", os.getcwd())
+    return str(data.get("cwd", os.getcwd()))
 
 
 def is_code_file(file_path: str) -> bool:
@@ -377,7 +380,7 @@ def _extract_patch_text(tool_input: Any) -> Optional[str]:
 
 
 def _normalize_path(path: str) -> str:
-    return normalize_path(path)
+    return str(normalize_path(path))
 
 
 def _paths_match(path_a: str, path_b: str) -> bool:
@@ -486,7 +489,7 @@ def _should_block_on_sca_severity(severity: str) -> bool:
 
 
 @contextmanager
-def _state_lock(workspace: str):
+def _state_lock(workspace: str) -> Generator[None, None, None]:
     """Exclusive file lock for state.json read-modify-write operations.
     Uses fcntl on Unix and msvcrt on Windows."""
     ensure_cache_dirs(workspace)
@@ -500,7 +503,7 @@ def read_state(workspace: str) -> Dict[str, Any]:
     try:
         if os.path.exists(state_file):
             with open(state_file) as f:
-                return json.load(f)
+                return cast(Dict[str, Any], json.load(f))
     except (OSError, json.JSONDecodeError):
         pass
     return {"code_files": {}, "manifest_baseline": {}, "stop_cycles": 0, "last_update": None}

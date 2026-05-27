@@ -36,7 +36,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import IO, Any, Dict, List, Optional
 
 # =============================================================================
 # CONFIGURATION
@@ -46,7 +46,7 @@ DEFAULT_TTL_HOURS = 12
 LOCK_TIMEOUT_SECONDS = 5
 
 
-def get_cache_dir(workspace: str = None) -> str:
+def get_cache_dir(workspace: Optional[str] = None) -> str:
     """
     Get cache directory for a workspace.
 
@@ -170,9 +170,9 @@ class FileLock:
     def __init__(self, lock_path: Path, timeout: float = LOCK_TIMEOUT_SECONDS):
         self.lock_path = lock_path
         self.timeout = timeout
-        self.lock_file = None
+        self.lock_file: Optional[IO[Any]] = None
 
-    def __enter__(self):
+    def __enter__(self) -> "FileLock":
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
         self.lock_file = open(self.lock_path, "w")
 
@@ -186,7 +186,7 @@ class FileLock:
                     raise TimeoutError(f"Could not acquire lock: {self.lock_path}") from None
                 time.sleep(0.1)
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         if self.lock_file:
             fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_UN)
             self.lock_file.close()
@@ -204,7 +204,7 @@ class SnykCache:
     Thread-safe via file locking.
     """
 
-    def __init__(self, cache_dir: str = None, ttl_hours: int = DEFAULT_TTL_HOURS):
+    def __init__(self, cache_dir: Optional[str] = None, ttl_hours: int = DEFAULT_TTL_HOURS):
         # Use temp directory by default
         if cache_dir is None:
             cache_dir = get_cache_dir()

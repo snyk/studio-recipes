@@ -15,6 +15,7 @@ from merge_json import (
     _load_toml,
     _write_json,
     _write_toml,
+    expand_hook_command_paths,
     main,
     merge_claude_settings,
     merge_codex_config,
@@ -36,6 +37,76 @@ from merge_json import (
 # ═══════════════════════════════════════════════════════════════════════════
 # Helper functions
 # ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestExpandHookCommandPaths:
+    """expand_hook_command_paths substitutes $HOME / $env:USERPROFILE / %USERPROFILE%."""
+
+    HOME = "/Users/test"
+
+    def test_substitutes_unix_home(self):
+        out = expand_hook_command_paths({"cmd": 'uv run "$HOME/.x/hook.py"'}, home=self.HOME)
+        assert out == {"cmd": 'uv run "/Users/test/.x/hook.py"'}
+
+    def test_substitutes_braced_unix_home(self):
+        out = expand_hook_command_paths({"cmd": 'uv run "${HOME}/.x/hook.py"'}, home=self.HOME)
+        assert out == {"cmd": 'uv run "/Users/test/.x/hook.py"'}
+
+    def test_substitutes_powershell_userprofile(self):
+        out = expand_hook_command_paths(
+            {"cmd": 'uv run "$env:USERPROFILE\\.x\\hook.py"'}, home=self.HOME
+        )
+        assert out == {"cmd": 'uv run "/Users/test\\.x\\hook.py"'}
+
+    def test_substitutes_cmd_userprofile(self):
+        out = expand_hook_command_paths(
+            {"cmd": 'uv run "%USERPROFILE%\\.x\\hook.py"'}, home=self.HOME
+        )
+        assert out == {"cmd": 'uv run "/Users/test\\.x\\hook.py"'}
+
+    def test_word_boundary_protects_lookalike(self):
+        # $HOMEY should NOT be substituted because E\b doesn't match before Y.
+        out = expand_hook_command_paths({"cmd": "echo $HOMEY"}, home=self.HOME)
+        assert out == {"cmd": "echo $HOMEY"}
+
+    def test_recursive_walk(self):
+        data = {
+            "hooks": {
+                "PostToolUse": [
+                    {"command": 'python3 "$HOME/a.py"'},
+                    {"nested": {"deeper": 'uv run "$HOME/b.py"'}},
+                ]
+            },
+            "version": 1,
+        }
+        out = expand_hook_command_paths(data, home=self.HOME)
+        assert out["hooks"]["PostToolUse"][0]["command"] == 'python3 "/Users/test/a.py"'
+        assert out["hooks"]["PostToolUse"][1]["nested"]["deeper"] == 'uv run "/Users/test/b.py"'
+        assert out["version"] == 1
+
+    def test_no_op_on_strings_without_tokens(self):
+        out = expand_hook_command_paths({"command": "eslint --fix"}, home=self.HOME)
+        assert out == {"command": "eslint --fix"}
+
+    def test_home_with_backslashes_safe(self):
+        # On Windows home is C:\Users\foo — backslashes must not be interpreted as re backrefs.
+        out = expand_hook_command_paths({"cmd": 'uv run "$HOME/x.py"'}, home="C:\\Users\\foo")
+        assert out == {"cmd": 'uv run "C:\\Users\\foo/x.py"'}
+
+    def test_default_home_uses_expanduser(self, monkeypatch):
+        monkeypatch.setenv("HOME", "/tmp/fakehome")
+        out = expand_hook_command_paths({"cmd": '"$HOME/x"'})
+        assert "/tmp/fakehome" in out["cmd"]
+
+    def test_case_insensitive_userprofile(self):
+        out = expand_hook_command_paths({"cmd": "%userprofile%\\x"}, home=self.HOME)
+        assert out == {"cmd": "/Users/test\\x"}
+
+    def test_userprofile_not_substituted_when_embedded_in_word(self):
+        # %USERPROFILE% embedded in surrounding identifier characters is not a
+        # shell-variable reference (mirrors the \b protection on $HOME).
+        out = expand_hook_command_paths({"cmd": "echo abc%USERPROFILE%def"}, home=self.HOME)
+        assert out == {"cmd": "echo abc%USERPROFILE%def"}
 
 
 class TestLoadJson:
@@ -289,6 +360,39 @@ class TestMergeCursorHooks:
         commands = [e["command"] for e in after_edit]
         assert 'cat "$HOME/.cursor/hooks/snyk_secure_at_inception.py"' in commands
         assert 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"' in commands
+
+    def test_merge_replaces_raw_home_when_source_is_expanded(self, write_json, tmp_path):
+        """Upgrade path: target was installed when source used $HOME; current source
+        ships an install-time-expanded absolute path. The two must collapse to one
+        entry (no duplicate)."""
+        home = os.path.expanduser("~")
+        expanded = f'uv run "{home}/.cursor/hooks/snyk_secure_at_inception.py"'
+        source = write_json(
+            "source/cursor_hooks.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "afterFileEdit": [{"command": expanded}],
+                    "stop": [{"command": expanded}],
+                },
+            },
+        )
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "afterFileEdit": [
+                        {"command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'}
+                    ]
+                },
+            },
+        )
+        merge_cursor_hooks(target, source)
+        after_edit = read_json(target)["hooks"]["afterFileEdit"]
+        assert len(after_edit) == 1
+        # Target should have migrated to the install-time-expanded form.
+        assert after_edit[0]["command"] == expanded
 
     def test_merge_no_backup_for_new_target(self, empty_target, snyk_cursor_source):
         merge_cursor_hooks(empty_target, snyk_cursor_source)
@@ -562,6 +666,63 @@ class TestUnmergeCursorHooks:
         result = read_json(target)
         assert result["hooks"] == original["hooks"]
 
+    def test_removes_expanded_path_form(self, write_json, snyk_cursor_source):
+        # Target carries the install-time expanded path (no $HOME). Unmerge
+        # must still recognize and remove it, matching the source by its
+        # expanded form (Q3 from the cross-platform refactor plan).
+        home = os.path.expanduser("~")
+        expanded = f'uv run "{home}/.cursor/hooks/snyk_secure_at_inception.py"'
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "afterFileEdit": [
+                        {"command": "eslint --fix"},
+                        {"command": expanded},
+                    ],
+                    "stop": [{"command": expanded}],
+                },
+            },
+        )
+        unmerge_cursor_hooks(target, snyk_cursor_source)
+        result = read_json(target)
+        assert len(result["hooks"]["afterFileEdit"]) == 1
+        assert result["hooks"]["afterFileEdit"][0]["command"] == "eslint --fix"
+        assert "stop" not in result["hooks"]
+
+    def test_removes_cross_spelling_braced_vs_unbraced(self, write_json, tmp_path):
+        # Source uses one spelling (e.g. ${HOME}); target was installed with
+        # the other (e.g. $HOME). Normalize-on-compare must collapse both
+        # to the same canonical form so the entry is still removed.
+        source = write_json(
+            "source/cursor_braced.json",
+            {
+                "hooks": {
+                    "afterFileEdit": [
+                        {"command": 'uv run "${HOME}/.cursor/hooks/snyk_secure_at_inception.py"'}
+                    ]
+                },
+            },
+        )
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "afterFileEdit": [
+                        {"command": "eslint --fix"},
+                        # Old-installer entry, unbraced spelling
+                        {"command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'},
+                    ],
+                },
+            },
+        )
+        unmerge_cursor_hooks(target, source)
+        result = read_json(target)
+        assert len(result["hooks"]["afterFileEdit"]) == 1
+        assert result["hooks"]["afterFileEdit"][0]["command"] == "eslint --fix"
+
     def test_noop_no_hooks_key(self, write_json, snyk_cursor_source):
         target = write_json("target.json", {"version": 1})
         unmerge_cursor_hooks(target, snyk_cursor_source)
@@ -748,6 +909,36 @@ class TestUnmergeClaudeSettings:
         original = read_json(existing_claude_target)
         unmerge_claude_settings(existing_claude_target, source)
         assert read_json(existing_claude_target) == original
+
+    def test_removes_expanded_path_form(self, write_json, snyk_claude_source):
+        # Target carries the install-time expanded path; unmerge must still
+        # recognize it via the dual-form match (Q3).
+        home = os.path.expanduser("~")
+        expanded = f'uv run "{home}/.claude/hooks/snyk_secure_at_inception.py"'
+        target = write_json(
+            "target.json",
+            {
+                "hooks": {
+                    "PostToolUse": [
+                        {
+                            "matcher": "Edit|Write",
+                            "hooks": [
+                                {"type": "command", "command": "prettier --write"},
+                                {"type": "command", "command": expanded},
+                            ],
+                        }
+                    ],
+                    "Stop": [{"hooks": [{"type": "command", "command": expanded}]}],
+                },
+            },
+        )
+        unmerge_claude_settings(target, snyk_claude_source)
+        result = read_json(target)
+        # Snyk entries removed; user's prettier hook preserved.
+        group = result["hooks"]["PostToolUse"][0]
+        assert len(group["hooks"]) == 1
+        assert group["hooks"][0]["command"] == "prettier --write"
+        assert "Stop" not in result["hooks"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1051,6 +1242,41 @@ class TestVerifyCursorHooks:
             verify_cursor_hooks(target, snyk_cursor_source)
         assert exc_info.value.code == 1
 
+    def test_passes_when_target_uses_raw_home_and_source_is_expanded(self, write_json):
+        """Legacy install wrote $HOME-form command; current source ships the
+        install-time-expanded absolute path. Verification must treat them as
+        equivalent (no false-negative missing-hook report)."""
+        home = os.path.expanduser("~")
+        source = write_json(
+            "source/cursor_hooks.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "afterFileEdit": [
+                        {"command": f'uv run "{home}/.cursor/hooks/snyk_secure_at_inception.py"'}
+                    ],
+                    "stop": [
+                        {"command": f'uv run "{home}/.cursor/hooks/snyk_secure_at_inception.py"'}
+                    ],
+                },
+            },
+        )
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "afterFileEdit": [
+                        {"command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'}
+                    ],
+                    "stop": [
+                        {"command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'}
+                    ],
+                },
+            },
+        )
+        verify_cursor_hooks(target, source)  # must not SystemExit
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # verify_mcp_servers
@@ -1256,6 +1482,37 @@ class TestUnmergeCodexConfig:
         data = _read_toml(existing_codex_target)
         commands = [h["command"] for h in data["hooks"]["PostToolUse"][0]["hooks"]]
         assert commands == ["echo my-own-hook"]
+
+    def test_removes_expanded_path_form(self, write_toml, snyk_codex_hooks_source):
+        # Target carries the install-time expanded path; dual-form match (Q3).
+        home = os.path.expanduser("~")
+        expanded = f'uv run "{home}/.codex/hooks/snyk_secure_at_inception.py"'
+        target = write_toml(
+            "config.toml",
+            f"""
+[features]
+hooks = true
+
+[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = '{expanded}'
+
+[[hooks.PostToolUse]]
+matcher = "^(apply_patch|Edit|Write)$"
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = '{expanded}'
+
+[[hooks.Stop]]
+[[hooks.Stop.hooks]]
+type = "command"
+command = '{expanded}'
+""",
+        )
+        unmerge_codex_config(target, snyk_codex_hooks_source)
+        # All snyk entries gone → empty hooks → file removed.
+        assert not os.path.exists(target)
 
 
 class TestVerifyCodexConfig:

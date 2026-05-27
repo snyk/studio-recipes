@@ -24,7 +24,7 @@ etc.) and prompts for SCA scanning
 
 ## Quick Start
 
-**Prerequisites:** Python 3.8+, [Snyk CLI](https://docs.snyk.io/snyk-cli/install-the-snyk-cli) (`npm install -g snyk && snyk auth`), Cursor IDE with hooks support.
+**Prerequisites:** [uv](https://docs.astral.sh/uv/getting-started/installation/) (`curl -LsSf https://astral.sh/uv/install.sh | sh`), [Snyk CLI](https://docs.snyk.io/snyk-cli/install-the-snyk-cli) (`npm install -g snyk && snyk auth`), Cursor IDE with hooks support.
 
 **1. Copy files to your project:**
 
@@ -123,7 +123,7 @@ python3 -c "import hashlib,os,tempfile; h=hashlib.sha256(os.getcwd().encode()).h
 
 ## Windows Installation / Compatibility
 
-The hook scripts use a cross-platform `lib/platform_utils.py` module that handles OS differences automatically. The Python code works on Windows without modification. However, the **hook command** in `hooks.json` and the **installation steps** need adjusting.
+The hook scripts use a cross-platform `lib/platform_utils.py` module, so the Python code itself works on Windows without modification.
 
 ### Installation on Windows
 
@@ -139,9 +139,7 @@ Note: `chmod +x` is not needed on Windows -- executability is determined by file
 
 ### Hook command in `hooks.json`
 
-Hook commands use `uv run` with `$HOME` on Unix (install [uv](https://docs.astral.sh/uv/getting-started/installation/) and ensure it is on your PATH). On Windows, use Windows-style paths and `%USERPROFILE%` as in the example below.
-
-**Option A -- `uv run` on Windows (matches installer output):**
+Cursor invokes shell-style hook commands through the system default shell -- on Windows that is whatever `%ComSpec%` points to, normally `cmd.exe`. `cmd.exe` does not expand `$HOME`, so use `%USERPROFILE%` and backslashes:
 
 ```json
 {
@@ -165,9 +163,6 @@ Hook commands use `uv run` with `$HOME` on Unix (install [uv](https://docs.astra
   }
 }
 ```
-
-**Option B -- Using `py -3` instead of `uv run`:** replace the `uv run` prefix with `py -3` if you are not using uv.
-
 
 ### Snyk CLI on Windows
 

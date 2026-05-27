@@ -22,11 +22,93 @@ Verify strategies (read-only, exit 1 if entries missing):
 
 import json
 import os
+import re
 import shlex
 import shutil
 import sys
 
 LEGACY_LAUNCHERS = frozenset({"python", "python3"})
+
+# Home-directory variable tokens we substitute at install time so that the
+# command string in the installed config no longer depends on shell expansion.
+# Order matters only for documentation; each pattern is independent.
+#
+# %USERPROFILE% uses explicit non-word lookbehind/lookahead instead of \b so
+# the token is only expanded when it isn't embedded in surrounding identifier
+# characters (matching the safety semantics of the \b anchors on the other
+# patterns; \b around %...% doesn't work because % itself is non-word).
+_HOME_PATTERNS = (
+    re.compile(r"\$\{HOME\}"),
+    re.compile(r"\$HOME\b"),
+    re.compile(r"\$env:USERPROFILE\b", re.IGNORECASE),
+    re.compile(r"(?<!\w)%USERPROFILE%(?!\w)", re.IGNORECASE),
+)
+
+
+def expand_hook_command_paths(data, home=None):
+    """Substitute home-dir variables with an absolute home path throughout ``data``.
+
+    Recursively walks dicts/lists; on each string value, replaces ``$HOME``, ``${HOME}``
+    ``$env:USERPROFILE``, and ``%USERPROFILE%`` (case-insensitive for the
+    Windows variants) with ``home``. Other strings pass through untouched.
+
+    ``home`` defaults to ``os.path.expanduser("~")``. The substituted path is
+    inserted literally — separator characters following the token are
+    preserved, so callers that ship ``$HOME/foo`` get ``<home>/foo`` even on
+    Windows. Modern shells on every platform accept forward slashes in paths.
+    """
+    if home is None:
+        home = os.path.expanduser("~")
+
+    def _expand(s):
+        for pat in _HOME_PATTERNS:
+            s = pat.sub(lambda _m: home, s)
+        return s
+
+    def _walk(obj):
+        if isinstance(obj, dict):
+            return {k: _walk(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_walk(item) for item in obj]
+        if isinstance(obj, str):
+            return _expand(obj)
+        return obj
+
+    return _walk(data)
+
+
+def _canonicalize_command(cmd):
+    """Return the canonical (home-expanded) form of a hook command string.
+
+    All known home-dir variable spellings (``$HOME``, ``${HOME}``,
+    ``$env:USERPROFILE``, ``%USERPROFILE%``) collapse to the same absolute
+    path, so two strings that differ only in variable spelling become
+    equal after canonicalization. Non-string inputs pass through.
+    """
+    if not isinstance(cmd, str):
+        return cmd
+    return expand_hook_command_paths({"_": cmd})["_"]
+
+
+def _canonical_command_set(entries, field="command"):
+    """Return the set of canonical hook command strings declared by ``entries``.
+
+    Used by ``unmerge_*`` strategies as the remove-set when normalizing-on-
+    compare: every entry in source AND every candidate in target is
+    canonicalized with ``_canonicalize_command`` before set membership is
+    checked. This cleans up entries written by older installer versions
+    regardless of which home-dir variable spelling they used.
+    """
+    out = set()
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        cmd = e.get(field)
+        canonical = _canonicalize_command(cmd)
+        if isinstance(canonical, str):
+            out.add(canonical)
+    return out
+
 
 # Tokens that start shell redirection / piping; truncate argv before these for script identity.
 _REDIR_PIPE_TOKENS = frozenset(
@@ -54,7 +136,7 @@ if _VENDOR_DIR not in sys.path:
 try:
     import tomllib as _toml_reader  # Python 3.11+
 except ImportError:  # pragma: no cover - 3.8/3.9/3.10 fallback
-    import tomli as _toml_reader  # type: ignore[no-redef]
+    import tomli as _toml_reader
 import tomli_w as _toml_writer  # noqa: E402
 
 
@@ -132,6 +214,10 @@ def _pick_script_index_and_key(effective_tokens):
     """Choose script token index and normalized path key for dedup/migration.
 
     Prefer the last token ending in ``.py`` (option 2); else last token (option 1).
+
+    The returned key is home-canonicalized so a target written by the legacy
+    installer with ``$HOME/...`` matches a source written by the current
+    installer with the already-expanded absolute path.
     """
     if not effective_tokens:
         return None, None
@@ -140,9 +226,9 @@ def _pick_script_index_and_key(effective_tokens):
     for i in range(n - 1, -1, -1):
         norm = _strip_outer_quotes(effective_tokens[i])
         if norm.lower().endswith(".py"):
-            return i, norm or None
+            return i, _canonicalize_command(norm) or None
     last = _strip_outer_quotes(effective_tokens[-1])
-    return n - 1, last or None
+    return n - 1, _canonicalize_command(last) or None
 
 
 def _command_script_key(command_str):
@@ -213,8 +299,15 @@ def _merge_command_entries(target_entries, source_entries):
             old_cmd = target_entries[idx].get("command")
             old_launcher = _command_launcher(old_cmd)
 
-            # Only migrate launcher for known legacy launchers.
-            if old_launcher in LEGACY_LAUNCHERS:
+            # Migrate by replacement when either:
+            #   - target uses a legacy launcher (python/python3), or
+            #   - target and source commands are equal once home-dir tokens are
+            #     canonicalized (same hook, differing only in $HOME-style vs
+            #     install-time-expanded absolute path).
+            same_after_canonical = isinstance(old_cmd, str) and _canonicalize_command(
+                old_cmd
+            ) == _canonicalize_command(cmd)
+            if old_launcher in LEGACY_LAUNCHERS or same_after_canonical:
                 target_entries[idx] = src_entry
 
                 if isinstance(old_cmd, str) and command_to_idx.get(old_cmd) == idx:
@@ -416,11 +509,16 @@ def unmerge_cursor_hooks(target_path, source_path):
         if event not in target["hooks"]:
             continue
 
-        # Collect commands to remove
-        remove_commands = {e.get("command") for e in entries if "command" in e}
+        # Normalize-on-compare: collapse every home-dir variable spelling
+        # (and the already-expanded absolute path) to a single canonical
+        # form on both sides, so this unmerge cleans up entries written by
+        # any installer version regardless of which spelling was used.
+        remove_commands = _canonical_command_set(entries)
 
         target["hooks"][event] = [
-            e for e in target["hooks"][event] if e.get("command") not in remove_commands
+            e
+            for e in target["hooks"][event]
+            if _canonicalize_command(e.get("command")) not in remove_commands
         ]
 
         # Clean up empty event arrays
@@ -454,16 +552,18 @@ def unmerge_claude_settings(target_path, source_path):
 
         for src_group in src_groups:
             src_matcher = src_group.get("matcher")
-            remove_commands = {
-                h.get("command") for h in src_group.get("hooks", []) if "command" in h
-            }
+            # Normalize-on-compare so every home-dir variable spelling
+            # (and the install-time expanded path) collapses to one form.
+            remove_commands = _canonical_command_set(src_group.get("hooks", []))
 
             for tgt_group in target["hooks"][event]:
                 if tgt_group.get("matcher") != src_matcher:
                     continue
 
                 tgt_group["hooks"] = [
-                    h for h in tgt_group.get("hooks", []) if h.get("command") not in remove_commands
+                    h
+                    for h in tgt_group.get("hooks", [])
+                    if _canonicalize_command(h.get("command")) not in remove_commands
                 ]
 
         # Remove groups with empty hooks
@@ -550,10 +650,12 @@ def verify_cursor_hooks(target_path, source_path):
             missing.append(f"  event '{event}' not found in {target_path}")
             continue
 
-        existing_commands = {e.get("command") for e in target_hooks[event] if "command" in e}
+        existing_commands = {
+            _canonicalize_command(e.get("command")) for e in target_hooks[event] if "command" in e
+        }
         for entry in entries:
             cmd = entry.get("command", "")
-            if cmd and cmd not in existing_commands:
+            if cmd and _canonicalize_command(cmd) not in existing_commands:
                 missing.append(f"  hook command missing from '{event}': {cmd}")
 
     if missing:
@@ -597,11 +699,13 @@ def verify_claude_settings(target_path, source_path):
                 continue
 
             existing_commands = {
-                h.get("command") for h in tgt_group.get("hooks", []) if "command" in h
+                _canonicalize_command(h.get("command"))
+                for h in tgt_group.get("hooks", [])
+                if "command" in h
             }
             for hook in src_group.get("hooks", []):
                 cmd = hook.get("command", "")
-                if cmd and cmd not in existing_commands:
+                if cmd and _canonicalize_command(cmd) not in existing_commands:
                     missing.append(f"  hook command missing from '{event}': {cmd}")
 
     if missing:
@@ -777,16 +881,16 @@ def unmerge_codex_config(target_path, source_path):
                 continue
             for src_group in src_groups:
                 src_matcher = src_group.get("matcher")
-                remove_commands = {
-                    h.get("command") for h in src_group.get("hooks", []) if "command" in h
-                }
+                # Normalize-on-compare: collapse every home-dir variable
+                # spelling to a single canonical form on both sides.
+                remove_commands = _canonical_command_set(src_group.get("hooks", []))
                 for tgt_group in tgt_hooks[event]:
                     if tgt_group.get("matcher") != src_matcher:
                         continue
                     tgt_group["hooks"] = [
                         h
                         for h in tgt_group.get("hooks", [])
-                        if h.get("command") not in remove_commands
+                        if _canonicalize_command(h.get("command")) not in remove_commands
                     ]
             tgt_hooks[event] = [g for g in tgt_hooks[event] if g.get("hooks")]
             if not tgt_hooks[event]:
@@ -848,11 +952,13 @@ def verify_codex_config(target_path, source_path):
                 missing.append(f"  group ({label}) missing from hooks.{event}")
                 continue
             existing_commands = {
-                h.get("command") for h in tgt_group.get("hooks", []) if "command" in h
+                _canonicalize_command(h.get("command"))
+                for h in tgt_group.get("hooks", [])
+                if "command" in h
             }
             for hook in src_group.get("hooks", []):
                 cmd = hook.get("command", "")
-                if cmd and cmd not in existing_commands:
+                if cmd and _canonicalize_command(cmd) not in existing_commands:
                     missing.append(f"  hook command missing from hooks.{event}: {cmd}")
 
     # mcp_servers

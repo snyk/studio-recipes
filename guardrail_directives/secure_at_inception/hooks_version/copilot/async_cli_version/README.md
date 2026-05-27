@@ -15,7 +15,7 @@ Automatically scans for security vulnerabilities as the Copilot agent writes cod
 
 ## Quick Start
 
-**Prerequisites:** Python 3.8+, [Snyk CLI](https://docs.snyk.io/snyk-cli/install-the-snyk-cli) (`npm install -g snyk && snyk auth`), GitHub Copilot with hooks support.
+**Prerequisites:** [uv](https://docs.astral.sh/uv/getting-started/installation/) (`curl -LsSf https://astral.sh/uv/install.sh | sh`), [Snyk CLI](https://docs.snyk.io/snyk-cli/install-the-snyk-cli) (`npm install -g snyk && snyk auth`), GitHub Copilot with hooks support.
 
 **1. Copy files to your project:**
 

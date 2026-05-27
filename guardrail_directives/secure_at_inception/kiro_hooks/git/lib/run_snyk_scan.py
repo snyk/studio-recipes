@@ -25,8 +25,6 @@ from typing import Dict, List, Optional
 
 SNYK_STUDIO_VERSION = "1.0.0"
 
-SNYK_STUDIO_VERSION = "1.0.0"
-
 
 @dataclass
 class CodeVulnerability:
@@ -184,7 +182,7 @@ def run_snyk_cli(args: List[str], timeout: int = 300) -> tuple[int, str, str]:
 
 def parse_sast_json(output: str) -> List[CodeVulnerability]:
     """Parse Snyk Code (SAST) JSON output into vulnerability objects."""
-    vulnerabilities = []
+    vulnerabilities: List[CodeVulnerability] = []
 
     try:
         data = json.loads(output)
@@ -252,7 +250,7 @@ def parse_sast_json(output: str) -> List[CodeVulnerability]:
 
 def parse_sca_json(output: str) -> List[DependencyVulnerability]:
     """Parse Snyk SCA JSON output into vulnerability objects."""
-    vulnerabilities = []
+    vulnerabilities: List[DependencyVulnerability] = []
 
     try:
         data = json.loads(output)
@@ -403,12 +401,12 @@ if __name__ == "__main__":
 
     if args.sca:
         print("\n=== Snyk SCA Scan ===")
-        result = run_sca_scan(args.path)
-        if not result.success:
-            print(f"Error: {result.error_message}")
+        sca_result = run_sca_scan(args.path)
+        if not sca_result.success:
+            print(f"Error: {sca_result.error_message}")
         else:
-            print(f"Found {len(result.vulnerabilities)} dependency vulnerabilities:")
-            print(f"  Critical: {result.critical_count}")
-            print(f"  High: {result.high_count}")
-            for v in result.vulnerabilities:
-                print(f"  - {v}")
+            print(f"Found {len(sca_result.vulnerabilities)} dependency vulnerabilities:")
+            print(f"  Critical: {sca_result.critical_count}")
+            print(f"  High: {sca_result.high_count}")
+            for sca_v in sca_result.vulnerabilities:
+                print(f"  - {sca_v}")

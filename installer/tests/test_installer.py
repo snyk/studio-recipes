@@ -879,103 +879,66 @@ class TestCopyFile:
 
 
 # ===========================================================================
-# TestRewriteHookCommands
+# TestExpandSource — install-time $HOME expansion via temp-file context manager
 # ===========================================================================
 
 
-class TestRewriteHookCommands:
-    def test_noop_on_unix(self, monkeypatch):
-        monkeypatch.setattr("sys.platform", "darwin")
-        data = {"hooks": {"PostToolUse": [{"command": 'python3 "$HOME/.claude/hooks/test.py"'}]}}
-        result = installer.rewrite_hook_commands_for_platform(data)
-        assert result == data
-
-    def test_rewrites_on_windows(self, monkeypatch):
-        monkeypatch.setattr("sys.platform", "win32")
-        data = {
-            "hooks": {
-                "PostToolUse": [
-                    {
-                        "matcher": "Edit|Write",
-                        "hooks": [
-                            {
-                                "type": "command",
-                                "command": 'python3 "$HOME/.claude/hooks/snyk_secure_at_inception.py"',
-                            }
-                        ],
-                    }
-                ]
-            }
-        }
-        result = installer.rewrite_hook_commands_for_platform(data)
-        cmd = result["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
-        assert cmd.startswith("py -3")
-        assert "%USERPROFILE%" in cmd
-
-    def test_ignores_non_python_commands(self, monkeypatch):
-        monkeypatch.setattr("sys.platform", "win32")
-        data = {"hooks": {"PostToolUse": [{"command": "eslint --fix"}]}}
-        result = installer.rewrite_hook_commands_for_platform(data)
-        assert result["hooks"]["PostToolUse"][0]["command"] == "eslint --fix"
-
-
-# ===========================================================================
-# TestPlatformSource
-# ===========================================================================
-
-
-class TestPlatformSource:
-    def test_non_windows_passthrough(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("sys.platform", "darwin")
+class TestExpandSource:
+    def test_matching_strategy_expands_and_cleans_up(self, tmp_path):
         source = tmp_path / "hooks.json"
-        source.write_text('{"hooks": {}}')
-        with installer._platform_source("merge_cursor_hooks", source) as resolved_path:
-            assert resolved_path == source
-
-    def test_windows_matching_strategy_rewrites_and_cleans_up(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("sys.platform", "win32")
-        source = tmp_path / "hooks.json"
-        source.write_text('{"command": "python3 $HOME/test.py"}')
+        source.write_text('{"command": "uv run \\"$HOME/test.py\\""}')
         tmp_file_path = None
-        with installer._platform_source("merge_cursor_hooks", source) as resolved_path:
+        with installer._expand_source("merge_cursor_hooks", source) as resolved_path:
             assert resolved_path != source
             tmp_file_path = resolved_path
             assert tmp_file_path.exists()
+            content = tmp_file_path.read_text()
+            assert "$HOME" not in content
+            assert os.path.expanduser("~") in content
         assert tmp_file_path is not None
         assert not tmp_file_path.exists()
 
-    def test_windows_non_matching_strategy_passthrough(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("sys.platform", "win32")
+    def test_non_matching_strategy_passthrough(self, tmp_path):
         source = tmp_path / "data.json"
         source.write_text('{"key": "value"}')
-        with installer._platform_source("copy_files", source) as resolved_path:
+        with installer._expand_source("copy_files", source) as resolved_path:
             assert resolved_path == source
 
-    def test_windows_cleans_up_on_exception(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("sys.platform", "win32")
+    def test_unmerge_strategy_passthrough(self, tmp_path):
+        # Unmerge handles dual-form (raw vs expanded) matching itself, so it
+        # must receive the raw source — not the expanded one.
+        source = tmp_path / "hooks.json"
+        source.write_text('{"command": "uv run \\"$HOME/test.py\\""}')
+        with installer._expand_source("unmerge_cursor_hooks", source) as resolved_path:
+            assert resolved_path == source
+
+    def test_verify_strategy_expands(self, tmp_path):
+        source = tmp_path / "hooks.json"
+        source.write_text('{"command": "uv run \\"$HOME/test.py\\""}')
+        with installer._expand_source("verify_cursor_hooks", source) as resolved_path:
+            assert resolved_path != source
+            assert "$HOME" not in resolved_path.read_text()
+
+    def test_cleans_up_on_exception(self, tmp_path):
         source = tmp_path / "hooks.json"
         source.write_text('{"hooks": {}}')
         tmp_file_path = None
         with pytest.raises(RuntimeError):  # noqa: PT012 — exception must propagate through context manager __exit__
-            with installer._platform_source("merge_claude_settings", source) as resolved_path:
+            with installer._expand_source("merge_claude_settings", source) as resolved_path:
                 tmp_file_path = resolved_path
                 raise RuntimeError("boom")
         assert tmp_file_path is not None
         assert not tmp_file_path.exists()
 
-    def test_windows_toml_strategy_rewrites_and_cleans_up(self, tmp_path, monkeypatch):
-        # codex_config is in _WIN32_REWRITE_STRATEGIES and sources are .toml files
-        monkeypatch.setattr("sys.platform", "win32")
+    def test_toml_strategy_expands(self, tmp_path):
         source = tmp_path / "config.toml"
-        source.write_text('[hooks]\ncommand = "python3 $HOME/.codex/hooks/test.py"\n')
-        tmp_file_path = None
-        with installer._platform_source("merge_codex_config", source) as resolved_path:
+        source.write_text('[hooks]\ncommand = "uv run \\"$HOME/.codex/hooks/test.py\\""\n')
+        with installer._expand_source("merge_codex_config", source) as resolved_path:
             assert resolved_path != source
             assert resolved_path.suffix == ".toml"
-            tmp_file_path = resolved_path
-            assert tmp_file_path.exists()
-        assert tmp_file_path is not None
-        assert not tmp_file_path.exists()
+            content = resolved_path.read_text()
+            assert "$HOME" not in content
+            assert os.path.expanduser("~") in content
 
 
 # ===========================================================================
@@ -1584,12 +1547,12 @@ class TestMacMcpLogic:
         mock_verify_strategy = MagicMock()
         monkeypatch.setitem(merge_json.STRATEGIES, "verify_mcp_servers", mock_verify_strategy)
 
-        # Mock _platform_source to just return the path (avoiding Windows rewrite logic)
+        # Mock _expand_source to just return the path (skip $HOME expansion)
         @contextlib.contextmanager
-        def mock_platform_source(strategy, source):
+        def mock_expand_source(strategy, source):
             yield source
 
-        monkeypatch.setattr(installer, "_platform_source", mock_platform_source)
+        monkeypatch.setattr(installer, "_expand_source", mock_expand_source)
 
         installer.verify_recipe("mcp-config", "cursor", manifest, payload)
 
@@ -1608,12 +1571,12 @@ class TestMacMcpLogic:
         mock_verify_strategy = MagicMock()
         monkeypatch.setitem(merge_json.STRATEGIES, "verify_mcp_servers", mock_verify_strategy)
 
-        # Mock _platform_source to just return the path
+        # Mock _expand_source to just return the path
         @contextlib.contextmanager
-        def mock_platform_source(strategy, source):
+        def mock_expand_source(strategy, source):
             yield source
 
-        monkeypatch.setattr(installer, "_platform_source", mock_platform_source)
+        monkeypatch.setattr(installer, "_expand_source", mock_expand_source)
 
         installer.verify_recipe("mcp-config", "claude", manifest, payload)
 

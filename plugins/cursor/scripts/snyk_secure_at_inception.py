@@ -23,7 +23,7 @@ import sys
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generator, List, Optional, cast
 
 try:
     import fcntl
@@ -151,7 +151,7 @@ def get_state_file_path(workspace: str) -> str:
 def get_workspace(data: Dict[str, Any]) -> str:
     workspace_roots = data.get("workspace_roots", [])
     if workspace_roots:
-        return workspace_roots[0]
+        return str(workspace_roots[0])
 
     file_path = data.get("file_path", "")
     if file_path:
@@ -320,7 +320,7 @@ def _format_vuln_table(vulns: List[Dict[str, Any]]) -> str:
 
 
 @contextmanager
-def _state_lock(workspace: str):
+def _state_lock(workspace: str) -> Generator[None, None, None]:
     """Exclusive file lock for state.json read-modify-write operations.
     Falls back to no-op on platforms without fcntl (Windows)."""
     if not _HAS_FCNTL:
@@ -342,7 +342,7 @@ def read_state(workspace: str) -> Dict[str, Any]:
     try:
         if os.path.exists(state_file):
             with open(state_file) as f:
-                return json.load(f)
+                return cast(Dict[str, Any], json.load(f))
     except (OSError, json.JSONDecodeError):
         pass
     return {"code_files": {}, "manifest_files": [], "stop_cycles": 0, "last_update": None}

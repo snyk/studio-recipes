@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.8"
+# ///
 """
 Cursor Hook: Snyk Secure At Inception
 ======================================
@@ -29,7 +32,7 @@ import sys
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generator, List, Optional, cast
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 LIB_DIR = SCRIPT_DIR / "lib"
@@ -165,7 +168,7 @@ def get_state_file_path(workspace: str) -> str:
 def get_workspace(data: Dict[str, Any]) -> str:
     workspace_roots = data.get("workspace_roots", [])
     if workspace_roots:
-        return workspace_roots[0]
+        return str(workspace_roots[0])
 
     file_path = data.get("file_path", "")
     if file_path:
@@ -245,7 +248,7 @@ def _paths_match(path_a: str, path_b: str) -> bool:
     parts_a = norm_a.split("/")
     parts_b = norm_b.split("/")
     shorter, longer = sorted([parts_a, parts_b], key=len)
-    return longer[-len(shorter) :] == shorter
+    return bool(longer[-len(shorter) :] == shorter)
 
 
 def _find_vulns_for_file(
@@ -348,7 +351,7 @@ def _format_sca_vuln_table(vulns: List[Dict[str, Any]]) -> str:
 
 
 @contextmanager
-def _state_lock(workspace: str):
+def _state_lock(workspace: str) -> Generator[None, None, None]:
     """Exclusive file lock for state.json read-modify-write operations.
     Uses fcntl on Unix and msvcrt on Windows."""
     ensure_cache_dirs(workspace)
@@ -362,7 +365,7 @@ def read_state(workspace: str) -> Dict[str, Any]:
     try:
         if os.path.exists(state_file):
             with open(state_file) as f:
-                return json.load(f)
+                return cast(Dict[str, Any], json.load(f))
     except (OSError, json.JSONDecodeError):
         pass
     return {

@@ -27,7 +27,7 @@ etc.) and prompts for SCA scanning
 
 ## Quick Start
 
-**Prerequisites:** Python 3.8+, [Snyk CLI](https://docs.snyk.io/snyk-cli/install-the-snyk-cli) (`npm install -g snyk && snyk auth`), Codex CLI with hooks support.
+**Prerequisites:** [uv](https://docs.astral.sh/uv/getting-started/installation/) (`curl -LsSf https://astral.sh/uv/install.sh | sh`), [Snyk CLI](https://docs.snyk.io/snyk-cli/install-the-snyk-cli) (`npm install -g snyk && snyk auth`), Codex CLI with hooks support.
 
 **1. Copy files to your home directory:**
 
@@ -50,7 +50,7 @@ codex_hooks = true
 
 [[hooks.SessionStart.hooks]]
 type = "command"
-command = 'python3 "$HOME/.codex/hooks/snyk_secure_at_inception.py"'
+command = 'uv run "$HOME/.codex/hooks/snyk_secure_at_inception.py"'
 statusMessage = "Initializing Snyk security scanning..."
 
 [[hooks.PostToolUse]]
@@ -58,14 +58,14 @@ matcher = "^(apply_patch|Edit|Write)$"
 
 [[hooks.PostToolUse.hooks]]
 type = "command"
-command = 'python3 "$HOME/.codex/hooks/snyk_secure_at_inception.py"'
+command = 'uv run "$HOME/.codex/hooks/snyk_secure_at_inception.py"'
 statusMessage = "Tracking code changes for security scan..."
 
 [[hooks.Stop]]
 
 [[hooks.Stop.hooks]]
 type = "command"
-command = 'python3 "$HOME/.codex/hooks/snyk_secure_at_inception.py"'
+command = 'uv run "$HOME/.codex/hooks/snyk_secure_at_inception.py"'
 statusMessage = "Evaluating security scan results..."
 ```
 
@@ -149,7 +149,7 @@ python3 -c "import hashlib,os,tempfile; h=hashlib.sha256(os.getcwd().encode()).h
 
 ## Windows Installation / Compatibility
 
-The hook scripts use a cross-platform `lib/platform_utils.py` module that handles OS differences automatically. The Python code works on Windows without modification. Only the **hook command** in `config.toml` needs adjusting.
+The hook scripts use a cross-platform `lib/platform_utils.py` module, so the Python code itself works on Windows without modification.
 
 ### Installation on Windows
 
@@ -161,20 +161,33 @@ copy path\to\async_cli_version\lib\*.py $HOME\.codex\hooks\lib\
 
 ### Hook command in `config.toml`
 
-The Unix command uses `python3` and `$HOME`, which may not work on Windows. Use the `py` launcher instead:
+Codex invokes hooks through the user's environment shell, so whether `$HOME` is expanded at hook time depends on which shell Codex picks. The shipped form (`uv run "$HOME/.codex/hooks/snyk_secure_at_inception.py"`) works in shells that expand `$HOME` -- bash, zsh, PowerShell (which exposes `$HOME` as an automatic variable), Git Bash, WSL. If Codex on your setup invokes hooks via `cmd.exe`, replace `$HOME/` with `%USERPROFILE%\` and switch the remaining forward slashes to backslashes inside the quoted path:
 
 ```toml
+[features]
+codex_hooks = true
+
+[[hooks.SessionStart]]
+
 [[hooks.SessionStart.hooks]]
 type = "command"
-command = 'py -3 "%USERPROFILE%\\.codex\\hooks\\snyk_secure_at_inception.py"'
+command = 'uv run "%USERPROFILE%\.codex\hooks\snyk_secure_at_inception.py"'
+statusMessage = "Initializing Snyk security scanning..."
+
+[[hooks.PostToolUse]]
+matcher = "^(apply_patch|Edit|Write)$"
 
 [[hooks.PostToolUse.hooks]]
 type = "command"
-command = 'py -3 "%USERPROFILE%\\.codex\\hooks\\snyk_secure_at_inception.py"'
+command = 'uv run "%USERPROFILE%\.codex\hooks\snyk_secure_at_inception.py"'
+statusMessage = "Tracking code changes for security scan..."
+
+[[hooks.Stop]]
 
 [[hooks.Stop.hooks]]
 type = "command"
-command = 'py -3 "%USERPROFILE%\\.codex\\hooks\\snyk_secure_at_inception.py"'
+command = 'uv run "%USERPROFILE%\.codex\hooks\snyk_secure_at_inception.py"'
+statusMessage = "Evaluating security scan results..."
 ```
 
 ### Snyk CLI on Windows

@@ -125,7 +125,7 @@ def get_workspace(data: Dict[str, Any]) -> str:
     """Extract workspace path from hook input data."""
     workspace_roots = data.get("workspace_roots", [])
     if workspace_roots:
-        return workspace_roots[0]
+        return str(workspace_roots[0])
 
     # Fallback: try to determine from file_path
     file_path = data.get("file_path", "")

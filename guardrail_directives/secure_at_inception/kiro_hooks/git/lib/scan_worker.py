@@ -23,7 +23,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import IO, Any, Dict
 
 # Add lib directory to path
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -45,7 +45,7 @@ LOG_DIR = os.environ.get("SNYK_HOOK_LOG_DIR", "/tmp")
 # =============================================================================
 
 
-def safe_open_within_base(file_path: Path, base_dir: Path, mode: str = "r"):
+def safe_open_within_base(file_path: Path, base_dir: Path, mode: str = "r") -> IO[Any]:
     """
     Safely open a file after validating it's within the base directory.
 

@@ -15,7 +15,8 @@
             { "src": "guardrail_directives/secure_at_inception/hooks_version/cursor/async_cli_version/snyk_secure_at_inception.py", "dest": ".cursor/hooks/snyk_secure_at_inception.py" },
             { "src": "guardrail_directives/secure_at_inception/hooks_version/cursor/async_cli_version/lib/platform_utils.py", "dest": ".cursor/hooks/lib/platform_utils.py" },
             { "src": "guardrail_directives/secure_at_inception/hooks_version/cursor/async_cli_version/lib/scan_runner.py", "dest": ".cursor/hooks/lib/scan_runner.py" },
-            { "src": "guardrail_directives/secure_at_inception/hooks_version/cursor/async_cli_version/lib/scan_worker.py", "dest": ".cursor/hooks/lib/scan_worker.py" }
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/cursor/async_cli_version/lib/scan_worker.py", "dest": ".cursor/hooks/lib/scan_worker.py" },
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/cursor/async_cli_version/lib/sca_scan_worker.py", "dest": ".cursor/hooks/lib/sca_scan_worker.py" }
           ],
           "config_merge": {
             "target": ".cursor/hooks.json",
@@ -42,7 +43,8 @@
             { "src": "guardrail_directives/secure_at_inception/hooks_version/gemini/async_cli_version/snyk_secure_at_inception.py", "dest": ".gemini/hooks/snyk_secure_at_inception.py" },
             { "src": "guardrail_directives/secure_at_inception/hooks_version/gemini/async_cli_version/lib/platform_utils.py", "dest": ".gemini/hooks/lib/platform_utils.py" },
             { "src": "guardrail_directives/secure_at_inception/hooks_version/gemini/async_cli_version/lib/scan_runner.py", "dest": ".gemini/hooks/lib/scan_runner.py" },
-            { "src": "guardrail_directives/secure_at_inception/hooks_version/gemini/async_cli_version/lib/scan_worker.py", "dest": ".gemini/hooks/lib/scan_worker.py" }
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/gemini/async_cli_version/lib/scan_worker.py", "dest": ".gemini/hooks/lib/scan_worker.py" },
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/gemini/async_cli_version/lib/sca_scan_worker.py", "dest": ".gemini/hooks/lib/sca_scan_worker.py" }
           ],
           "config_merge": {
             "target": ".gemini/settings.json",
@@ -55,7 +57,8 @@
             { "src": "guardrail_directives/secure_at_inception/hooks_version/codex/async_cli_version/snyk_secure_at_inception.py", "dest": ".codex/hooks/snyk_secure_at_inception.py" },
             { "src": "guardrail_directives/secure_at_inception/hooks_version/codex/async_cli_version/lib/platform_utils.py", "dest": ".codex/hooks/lib/platform_utils.py" },
             { "src": "guardrail_directives/secure_at_inception/hooks_version/codex/async_cli_version/lib/scan_runner.py", "dest": ".codex/hooks/lib/scan_runner.py" },
-            { "src": "guardrail_directives/secure_at_inception/hooks_version/codex/async_cli_version/lib/scan_worker.py", "dest": ".codex/hooks/lib/scan_worker.py" }
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/codex/async_cli_version/lib/scan_worker.py", "dest": ".codex/hooks/lib/scan_worker.py" },
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/codex/async_cli_version/lib/sca_scan_worker.py", "dest": ".codex/hooks/lib/sca_scan_worker.py" }
           ],
           "config_merge": {
             "target": ".codex/config.toml",

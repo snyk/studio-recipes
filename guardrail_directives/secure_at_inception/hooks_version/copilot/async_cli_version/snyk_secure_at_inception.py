@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.8"
+# ///
 """
 GitHub Copilot Hook: Snyk Secure At Inception
 ===============================================
@@ -32,7 +35,7 @@ import sys
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generator, List, Optional, cast
 
 try:
     import fcntl
@@ -183,7 +186,7 @@ def get_state_file_path(workspace: str) -> str:
 
 
 def get_workspace(data: Dict[str, Any]) -> str:
-    return data.get("cwd", os.getcwd())
+    return str(data.get("cwd", os.getcwd()))
 
 
 def is_code_file(file_path: str) -> bool:
@@ -352,7 +355,7 @@ def _format_vuln_table(vulns: List[Dict[str, Any]]) -> str:
 
 
 @contextmanager
-def _state_lock(workspace: str):
+def _state_lock(workspace: str) -> Generator[None, None, None]:
     """Exclusive file lock for state.json read-modify-write operations.
     Falls back to no-op on platforms without fcntl (Windows)."""
     if not _HAS_FCNTL:
@@ -374,7 +377,7 @@ def read_state(workspace: str) -> Dict[str, Any]:
     try:
         if os.path.exists(state_file):
             with open(state_file) as f:
-                return json.load(f)
+                return cast(Dict[str, Any], json.load(f))
     except (OSError, json.JSONDecodeError):
         pass
     return {
@@ -417,7 +420,7 @@ def has_pending_changes(state: Dict[str, Any]) -> bool:
 def _evaluate_completed_scan(
     workspace: str,
     code_files: Dict[str, Dict[str, Any]],
-) -> tuple:
+) -> tuple[list[Dict[str, Any]], list[str], list[str]]:
     """Evaluate completed scan results against tracked files.
 
     Returns: (new_vulns, clean_file_paths, dirty_file_paths)

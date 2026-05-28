@@ -26,22 +26,43 @@ import re
 import shlex
 import shutil
 import sys
+from pathlib import Path
 
 LEGACY_LAUNCHERS = frozenset({"python", "python3"})
 
 # Home-directory variable tokens we substitute at install time so that the
 # command string in the installed config no longer depends on shell expansion.
-# Order matters only for documentation; each pattern is independent.
+# Each pattern captures an optional path continuation after the token so the
+# whole path can be re-joined with the platform's native separator (see
+# expand_hook_command_paths); without that, $HOME/foo on Windows would expand
+# to e.g. ``C:\Users\me/foo`` (mixed separators).
+#
+# Path-name characters: allowed inside a single path segment. Excluded:
+#   - whitespace, quotes, common shell metas (``>``, ``<``, ``|``, ``;``,
+#     ``&``, parens): end-of-path markers
+#   - the path separators themselves (``/``, ``\``): segment boundaries
+#   - ``$``, `` ` ``, ``{``, ``}``: start a shell variable / command
+#     substitution. Stopping the continuation before these keeps a following
+#     reference like ``$HOOK_VAR`` out of the substitution span; otherwise
+#     ``$HOME/$HOOK_VAR`` on Windows would become ``C:\Users\me\$HOOK_VAR``
+#     and the leading backslash would escape the ``$`` in a POSIX shell.
+#
+# A path continuation is one or more (separator + name+) segments. ``$HOME/``
+# alone (no name chars after the separator) is intentionally NOT absorbed —
+# we want the trailing ``/`` left in place so cases like ``$HOME/$VAR`` keep
+# their forward slash for the shell to consume.
 #
 # %USERPROFILE% uses explicit non-word lookbehind/lookahead instead of \b so
 # the token is only expanded when it isn't embedded in surrounding identifier
 # characters (matching the safety semantics of the \b anchors on the other
 # patterns; \b around %...% doesn't work because % itself is non-word).
+_PATH_NAME_CHARS = r"[^\s\"'<>|;&()$`{}\\/]"
+_PATH_CONTINUATION = rf"((?:[/\\]{_PATH_NAME_CHARS}+)*)"
 _HOME_PATTERNS = (
-    re.compile(r"\$\{HOME\}"),
-    re.compile(r"\$HOME\b"),
-    re.compile(r"\$env:USERPROFILE\b", re.IGNORECASE),
-    re.compile(r"(?<!\w)%USERPROFILE%(?!\w)", re.IGNORECASE),
+    re.compile(r"\$\{HOME\}" + _PATH_CONTINUATION),
+    re.compile(r"\$HOME" + _PATH_CONTINUATION + r"(?=\W|$)"),
+    re.compile(r"\$env:USERPROFILE" + _PATH_CONTINUATION + r"(?=\W|$)", re.IGNORECASE),
+    re.compile(r"(?<!\w)%USERPROFILE%" + _PATH_CONTINUATION + r"(?!\w)", re.IGNORECASE),
 )
 
 
@@ -52,17 +73,24 @@ def expand_hook_command_paths(data, home=None):
     ``$env:USERPROFILE``, and ``%USERPROFILE%`` (case-insensitive for the
     Windows variants) with ``home``. Other strings pass through untouched.
 
-    ``home`` defaults to ``os.path.expanduser("~")``. The substituted path is
-    inserted literally — separator characters following the token are
-    preserved, so callers that ship ``$HOME/foo`` get ``<home>/foo`` even on
-    Windows. Modern shells on every platform accept forward slashes in paths.
+    ``home`` defaults to ``os.path.expanduser("~")``. The token AND its
+    immediately-following path continuation are consumed together and rejoined
+    via :class:`pathlib.Path`, so the result uses the platform-native separator
+    end-to-end (no mixed ``C:\\Users\\me/foo`` on Windows).
     """
     if home is None:
         home = os.path.expanduser("~")
 
+    def _replace(match):
+        suffix = match.group(1) or ""
+        parts = [p for p in re.split(r"[/\\]+", suffix) if p]
+        if not parts:
+            return home
+        return str(Path(home, *parts))
+
     def _expand(s):
         for pat in _HOME_PATTERNS:
-            s = pat.sub(lambda _m: home, s)
+            s = pat.sub(_replace, s)
         return s
 
     def _walk(obj):
@@ -77,17 +105,45 @@ def expand_hook_command_paths(data, home=None):
     return _walk(data)
 
 
+def _fold_path_separators_in_home_spans(s, home):
+    """Fold ``\\`` to ``/`` only within path-like spans anchored at ``home``.
+
+    Anchoring on the home prefix limits the fold to substrings that are
+    actually paths. Backslashes outside such spans — shell escapes, literal
+    arguments, regex patterns — are preserved, so two commands that differ
+    only in a non-path backslash do NOT collide on the canonical key.
+
+    The home prefix itself is matched separator-agnostically so a legacy
+    Windows entry like ``C:\\Users\\me/foo/bar.py`` (token replaced verbatim,
+    forward slashes from the source surviving) collapses to the same key as
+    a current install's native ``C:\\Users\\me\\foo\\bar.py``.
+    """
+    if not home:
+        return s
+    home_segments = re.split(r"[\\/]", home)
+    home_re = r"[\\/]".join(re.escape(seg) for seg in home_segments)
+    span_re = re.compile(home_re + rf"(?:[/\\]{_PATH_NAME_CHARS}+)*")
+    return span_re.sub(lambda m: m.group(0).replace("\\", "/"), s)
+
+
 def _canonicalize_command(cmd):
-    """Return the canonical (home-expanded) form of a hook command string.
+    """Return the canonical (home-expanded, separator-folded) form of a hook command.
 
     All known home-dir variable spellings (``$HOME``, ``${HOME}``,
     ``$env:USERPROFILE``, ``%USERPROFILE%``) collapse to the same absolute
-    path, so two strings that differ only in variable spelling become
-    equal after canonicalization. Non-string inputs pass through.
+    path. Within path spans anchored at the home prefix, separators are
+    folded (``\\`` -> ``/``) so that entries written by older installer
+    versions with mixed separators (e.g. on Windows
+    ``C:\\Users\\me/foo\\bar.py``) match entries written by the current
+    installer with native separators (``C:\\Users\\me\\foo\\bar.py``).
+    The folded form is comparison-only — on-disk writes use the native form
+    produced by ``expand_hook_command_paths``. Non-string inputs pass through.
     """
     if not isinstance(cmd, str):
         return cmd
-    return expand_hook_command_paths({"_": cmd})["_"]
+    home = os.path.expanduser("~")
+    expanded = expand_hook_command_paths({"_": cmd}, home=home)["_"]
+    return _fold_path_separators_in_home_spans(expanded, home)
 
 
 def _canonical_command_set(entries, field="command"):

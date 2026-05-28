@@ -124,6 +124,56 @@ def existing_claude_target(write_json):
 
 
 # ---------------------------------------------------------------------------
+# Copilot CLI hooks fixtures (hooks.json with `bash` field, not `command`)
+# ---------------------------------------------------------------------------
+
+SNYK_COPILOT_HOOKS = {
+    "version": 1,
+    "hooks": {
+        "sessionStart": [
+            {
+                "type": "command",
+                "bash": 'uv run "$HOME/.copilot/hooks/snyk_secure_at_inception.py" sessionStart',
+                "timeoutSec": 10,
+            }
+        ],
+        "postToolUse": [
+            {
+                "type": "command",
+                "bash": 'uv run "$HOME/.copilot/hooks/snyk_secure_at_inception.py" postToolUse',
+                "timeoutSec": 10,
+            }
+        ],
+        "agentStop": [
+            {
+                "type": "command",
+                "bash": 'uv run "$HOME/.copilot/hooks/snyk_secure_at_inception.py" agentStop',
+                "timeoutSec": 120,
+            }
+        ],
+    },
+}
+
+
+@pytest.fixture
+def snyk_copilot_source(write_json):
+    return write_json("source/copilot_hooks.json", SNYK_COPILOT_HOOKS)
+
+
+@pytest.fixture
+def existing_copilot_target(write_json):
+    return write_json(
+        "target/copilot_hooks.json",
+        {
+            "version": 1,
+            "hooks": {
+                "postToolUse": [{"type": "command", "bash": "echo user-hook", "timeoutSec": 5}],
+            },
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # MCP server fixtures
 # ---------------------------------------------------------------------------
 

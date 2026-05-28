@@ -974,12 +974,104 @@ def verify_codex_config(target_path, source_path):
         sys.exit(1)
 
 
+def merge_copilot_cli_hooks(target_path, source_path):
+    """Merge Snyk hooks into Copilot CLI's hooks.json (~/.copilot/hooks.json).
+
+    Same shape as Cursor's hooks.json ({version, hooks: {event: [entries]}}),
+    but each entry uses the `bash` field instead of `command`. Dedupes by the
+    canonicalized `bash` value so an entry previously written with one
+    home-dir variable spelling ($HOME, %USERPROFILE%, an expanded absolute
+    path, etc.) is not duplicated by a reinstall using a different spelling.
+    """
+    _backup(target_path)
+    source = _load_json(source_path)
+    try:
+        target = _load_json(target_path)
+    except Exception:
+        raise ValueError(f"Invalid JSON in file: {target_path}") from None
+
+    if "version" not in target:
+        target["version"] = source.get("version", 1)
+    if "hooks" not in target:
+        target["hooks"] = {}
+
+    for event, entries in source.get("hooks", {}).items():
+        if event not in target["hooks"]:
+            target["hooks"][event] = []
+        existing = _canonical_command_set(target["hooks"][event], field="bash")
+        for entry in entries:
+            canonical = _canonicalize_command(entry.get("bash"))
+            if isinstance(canonical, str) and canonical in existing:
+                continue
+            target["hooks"][event].append(entry)
+            if isinstance(canonical, str):
+                existing.add(canonical)
+
+    _write_json(target_path, target)
+
+
+def unmerge_copilot_cli_hooks(target_path, source_path):
+    """Remove Snyk hooks from Copilot CLI's hooks.json. Idempotent.
+
+    Compares the ``bash`` field after canonicalizing home-dir variable
+    spellings ($HOME, ${HOME}, %USERPROFILE%, $env:USERPROFILE, and the
+    already-expanded absolute path), so entries written by any installer
+    version — or by hand — get removed regardless of which spelling they
+    used.
+    """
+    target = _load_json(target_path)
+    source = _load_json(source_path)
+    source_hooks = source.get("hooks", {})
+    if not source_hooks or "hooks" not in target:
+        return
+    _backup(target_path)
+    for event, entries in source_hooks.items():
+        if event not in target["hooks"]:
+            continue
+        remove_bash = _canonical_command_set(entries, field="bash")
+        target["hooks"][event] = [
+            e
+            for e in target["hooks"][event]
+            if _canonicalize_command(e.get("bash")) not in remove_bash
+        ]
+        if not target["hooks"][event]:
+            del target["hooks"][event]
+    _write_json(target_path, target)
+
+
+def verify_copilot_cli_hooks(target_path, source_path):
+    """Verify Snyk hooks from source exist in Copilot CLI's hooks.json.
+
+    Compares the ``bash`` field after canonicalizing home-dir variable
+    spellings, so a target hooks.json written with a different spelling
+    than the source still verifies as installed.
+    """
+    target = _load_json(target_path)
+    source = _load_json(source_path)
+    missing = []
+    target_hooks = target.get("hooks", {})
+    for event, entries in source.get("hooks", {}).items():
+        if event not in target_hooks:
+            missing.append(f"  event '{event}' not found in {target_path}")
+            continue
+        existing = _canonical_command_set(target_hooks[event], field="bash")
+        for entry in entries:
+            b = entry.get("bash", "")
+            if b and _canonicalize_command(b) not in existing:
+                missing.append(f"  hook bash command missing from '{event}': {b}")
+    if missing:
+        for m in missing:
+            print(m, file=sys.stderr)
+        sys.exit(1)
+
+
 STRATEGIES = {
     "merge_cursor_hooks": merge_cursor_hooks,
     "merge_claude_settings": merge_claude_settings,
     "merge_gemini_settings": merge_gemini_settings,
     "merge_mcp_servers": merge_mcp_servers,
     "merge_copilot_cli_mcp": merge_copilot_cli_mcp,
+    "merge_copilot_cli_hooks": merge_copilot_cli_hooks,
     "merge_vscode_mcp": merge_vscode_mcp,
     "merge_codex_config": merge_codex_config,
     "unmerge_cursor_hooks": unmerge_cursor_hooks,
@@ -987,6 +1079,7 @@ STRATEGIES = {
     "unmerge_gemini_settings": unmerge_gemini_settings,
     "unmerge_mcp_servers": unmerge_mcp_servers,
     "unmerge_copilot_cli_mcp": unmerge_copilot_cli_mcp,
+    "unmerge_copilot_cli_hooks": unmerge_copilot_cli_hooks,
     "unmerge_vscode_mcp": unmerge_vscode_mcp,
     "unmerge_codex_config": unmerge_codex_config,
     "verify_cursor_hooks": verify_cursor_hooks,
@@ -994,6 +1087,7 @@ STRATEGIES = {
     "verify_gemini_settings": verify_gemini_settings,
     "verify_mcp_servers": verify_mcp_servers,
     "verify_copilot_cli_mcp": verify_copilot_cli_mcp,
+    "verify_copilot_cli_hooks": verify_copilot_cli_hooks,
     "verify_vscode_mcp": verify_vscode_mcp,
     "verify_codex_config": verify_codex_config,
 }

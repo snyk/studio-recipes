@@ -825,7 +825,14 @@ def _safe_conflict_path(ade: str, entry: Dict[str, Any]) -> Optional[Path]:
 
 
 def resolve_ade_path(ade: str, dest: str) -> Path:
-    """Resolve a manifest dest path under the appropriate home dir for the given ADE."""
+    """Resolve a manifest dest path under the appropriate home dir for the given ADE.
+
+    Special case: copilot-vscode dests that target `.copilot/...` resolve under
+    `$HOME`, not the VS Code user-data dir. Both Copilot surfaces share
+    `~/.copilot/hooks/` for SAI hook files, so the copilot-vscode SAI recipe
+    points at the same paths as copilot-cli."""
+    if ade == "copilot-vscode" and (dest == ".copilot" or dest.startswith(".copilot/")):
+        return Path.home() / dest
     base = get_ade_home(ade) if ade == "copilot-vscode" else Path.home()
     return base / dest
 

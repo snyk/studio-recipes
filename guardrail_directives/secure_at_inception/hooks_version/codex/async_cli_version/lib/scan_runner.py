@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, cast
 
 from platform_utils import (
+    file_lock,
     get_detached_popen_kwargs,
     get_snyk_binary_names,
     get_snyk_search_paths,
@@ -347,6 +348,25 @@ _sca = _ScanChannel("sca_scan.pid", "sca_scan.done", "sca_scan_worker.py", "SCA 
 # =============================================================================
 
 
+def _write_launch_failed_status(done_file: str, error: str) -> None:
+    """Persist a launch_failed marker so wait_for_scan can report a real status."""
+    try:
+        now = datetime.now().isoformat()
+        with open(done_file, "w") as f:
+            json.dump(
+                {
+                    "status": "launch_failed",
+                    "completed_at": now,
+                    "started_at": now,
+                    "vulnerabilities": [],
+                    "error_detail": error[:500],
+                },
+                f,
+            )
+    except OSError:
+        pass
+
+
 def _do_launch(
     workspace: str,
     is_running_fn: Callable[[str], bool],
@@ -354,34 +374,43 @@ def _do_launch(
     pid_file_fn: Callable[[str], str],
     worker_script: str,
 ) -> bool:
-    """Launch a worker subprocess; catches any Exception so callers get False."""
+    """Launch a worker subprocess; catches any Exception so callers get False.
+
+    The check-is-running / Popen / write-PID sequence is wrapped in a file lock
+    so two callers cannot both pass the running check and spawn duplicate
+    workers. On spawn failure, a launch_failed marker is written to the done
+    file so _do_wait can surface a real status instead of None.
+    """
     ensure_cache_dirs(workspace)
-    if is_running_fn(workspace):
-        return False
+    pid_file = pid_file_fn(workspace)
     done = done_file_fn(workspace)
-    if os.path.exists(done):
-        os.remove(done)
-    worker = str(Path(__file__).parent.resolve() / worker_script)
-    env = os.environ.copy()
-    _augment_path_for_snyk(env)
-    _ensure_snyk_token(env)
-    env["SAI_WORKSPACE"] = workspace
-    env["SAI_CACHE_DIR"] = get_cache_dir(workspace)
-    env["SAI_LIB_DIR"] = str(Path(__file__).parent.resolve())
-    try:
-        proc = subprocess.Popen(
-            [sys.executable, worker],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            cwd=workspace,
-            env=env,
-            **get_detached_popen_kwargs(),
-        )
-        with open(pid_file_fn(workspace), "w") as f:
-            f.write(str(proc.pid))
-        return True
-    except Exception:
-        return False
+    with file_lock(pid_file + ".lock"):
+        if is_running_fn(workspace):
+            return False
+        if os.path.exists(done):
+            os.remove(done)
+        worker = str(Path(__file__).parent.resolve() / worker_script)
+        env = os.environ.copy()
+        _augment_path_for_snyk(env)
+        _ensure_snyk_token(env)
+        env["SAI_WORKSPACE"] = workspace
+        env["SAI_CACHE_DIR"] = get_cache_dir(workspace)
+        env["SAI_LIB_DIR"] = str(Path(__file__).parent.resolve())
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, worker],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                cwd=workspace,
+                env=env,
+                **get_detached_popen_kwargs(),
+            )
+            with open(pid_file, "w") as f:
+                f.write(str(proc.pid))
+            return True
+        except Exception as e:
+            _write_launch_failed_status(done, str(e))
+            return False
 
 
 def _do_wait(
@@ -407,9 +436,15 @@ def _do_wait(
 
     if not is_running_fn(workspace) and not is_complete_fn(workspace):
         if not launch_fn(workspace):
+            # _do_launch returns False either because it declined (another
+            # launcher won the file lock and is already running) or because
+            # its spawn errored (in which case it wrote a launch_failed
+            # marker to the done file). Re-examine state instead of bailing.
             if is_complete_fn(workspace):
                 return read_status_fn(workspace)
-            return None
+            if not is_running_fn(workspace):
+                return "launch_failed"
+            # Concurrent worker is running — fall through to the poll loop.
 
     title = name[0].upper() + name[1:]
     log_fn(f"[SAI] Waiting for {name} to complete...")

@@ -6,39 +6,41 @@ This directory contains GitHub Copilot hook implementations for Secure At Incept
 
 | Version | Scanning Approach | Hook Events | Dependencies |
 |---------|------------------|-------------|--------------|
-| **[Async CLI](./async_cli_version/)** | Runs `snyk code test` in the background via CLI, filters results to agent-modified lines, gates git operations | `postToolUse`, `preToolUse`, `agentStop` | Python 3.8+, Snyk CLI |
+| **[Async CLI](./async_cli_version/)** | Runs `snyk code test` in the background via CLI, filters results to agent-modified lines, blocks the turn from ending until new vulns are fixed | `sessionStart`, `postToolUse`, `agentStop` | Python 3.8+ (via [uv](https://docs.astral.sh/uv/)), Snyk CLI |
 
 ## Copilot Hook Architecture
 
-Copilot hooks differ from Claude Code and Cursor in a key way: **only `preToolUse` can influence agent behavior** (approve/deny tool calls). The `agentStop` hook output is **ignored**—it is used for **audit logging only**, not to block or prompt the user.
+Copilot fires `sessionStart` when an agent session begins, `postToolUse` after each tool call (`bash`, `str_replace_editor`, `write`, etc.), and `agentStop` when the agent tries to end its turn. A hook on `agentStop` that emits `{"decision":"block","reason":"..."}` keeps the turn open and feeds `reason` back to the model as a new prompt.
 
-Enforcement is therefore split between **early notification** on ordinary `bash` commands and **hard gating** on **git** operations (commit, push, `gh pr create` / `gh pr merge`).
+The Snyk SAI hook uses this to enforce the scan/fix loop:
+
+- `sessionStart` initializes state and snapshots dependency manifest hashes.
+- `postToolUse` records which lines the agent modified on each edit and launches a background `snyk code test`.
+- `agentStop` waits for the scan, filters findings to the agent-modified ranges, and either lets the turn end (no new vulns) or blocks with a fix-it prompt (one or more new vulns).
 
 ## Authentication
 
-The async CLI hook checks **Snyk CLI authentication before starting a background scan** (`postToolUse`). If the user is not logged in, the scan is skipped and an `auth_required` status is recorded; **edits are not blocked**. When the agent later tries a **git** operation with pending tracked changes, **`preToolUse` denies** the tool call and instructs the agent to run **`snyk_auth`** and **`snyk_code_scan`** (and **`snyk_sca_scan`** when dependency manifests changed). Operators should run `snyk auth` once so scans run automatically.
+The hook checks Snyk CLI authentication before starting a background scan in `postToolUse`. If the user is not logged in, the scan is skipped and an `auth_required` status is recorded; edits are not blocked at that moment. At `agentStop` the hook then blocks with an **MCP fallback** message that prompts Copilot to use the `snyk_auth` and `snyk_code_scan` MCP tools (and `snyk_sca_scan` when dependency manifests changed). Operators should run `snyk auth` once so subsequent scans run automatically.
 
 ## How It Works
 
 ### Async CLI Version
 
 ```
+Session starts
+  -> sessionStart: initialize state, snapshot manifest hashes
+
 Agent edits a file
   -> postToolUse: track modified line ranges; if authenticated, launch background scan
      If not authenticated, skip scan (non-blocking for the agent)
 
-Agent runs a non-git bash command
-  -> preToolUse: if scan succeeded and new vulns exist, deny once per vuln fingerprint
-     with /snyk-batch-fix (subsequent bash with same fingerprint allowed)
-
-Agent runs git commit / git push / gh pr create / gh pr merge
-  -> preToolUse: wait for scan (bounded timeout)
-  -> New vulns or manifest follow-up? -> deny with /snyk-batch-fix; retry to proceed anyway
-  -> Scan timeout? -> deny, ask to retry commit
-  -> auth / CLI failure? -> deny with MCP fallback (snyk_auth, snyk_code_scan, snyk_sca_scan)
-
-Agent finishes responding
-  -> agentStop: stderr audit only (no interrupt)
+Agent tries to end the turn
+  -> agentStop: wait for the background scan (bounded timeout)
+  -> New vulns in modified ranges? -> block with /snyk-batch-fix and a vuln table
+  -> Manifest changes since session start? -> include SCA findings in the block reason
+  -> Scan timed out or never ran? -> block with the MCP fallback prompt
+  -> Loop cap reached (3 scan-fix cycles)? -> let the turn end; recorded for audit
+  -> Otherwise: let the turn end
 ```
 
 See **[async_cli_version/README.md](./async_cli_version/README.md)** for install steps, hook JSON, configuration, and troubleshooting.

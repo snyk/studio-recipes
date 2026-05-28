@@ -1,136 +1,119 @@
 # Snyk Secure at Inception -- GitHub Copilot Hooks
 
-Automatically scans for security vulnerabilities as the Copilot agent writes code. Runs `snyk code test` in the background, tracks which lines the agent modified, and gates git commit/push operations if new vulnerabilities were introduced -- giving the user the choice to fix or proceed.
+Automatically scans for security vulnerabilities as Copilot writes code. Runs `snyk code test` in the background, tracks which lines the agent modified, and blocks Copilot from finishing the turn if it introduced new vulnerabilities -- prompting it to fix them first.
+
+Applies to both **GitHub Copilot CLI** and **GitHub Copilot in VS Code** -- both surfaces read hooks from `~/.copilot/`, so a single install covers both.
 
 ## Features
-- **Background SAST scanning**: Launches `snyk code test` in the background on file edit/create when the Snyk CLI is authenticated—non-blocking at edit time; the agent keeps working
+- **Background SAST scanning**: Launches `snyk code test` in the background on every file edit/create -- non-blocking, Copilot keeps working
 - **New-only filtering**: Tracks which lines the agent modified and filters scan results to only report vulnerabilities on those lines
-- **Early bash notification**: On non-git `bash` tool calls, peeks at a completed scan and **denies once** per vulnerability set with `/snyk-batch-fix` and the original command to re-run after fixes (subsequent bash with the same result set is allowed)
-- **Notify-then-allow on git**: On the first gated git operation with vulns, denies with a detailed table; the user can fix or **retry the same commit** to proceed anyway
-- **Git operation gating**: Enforces at commit/push/PR time via `preToolUse` (`git commit`, `git push`, `gh pr create`, `gh pr merge`)
+- **Automatic fix loop**: When new vulnerabilities are found at session end, Copilot is blocked from stopping and given a detailed vuln table to fix. After fixing, the cycle repeats until clean
 - **Per-file state management**: Clean files are removed from tracking; only files with unresolved vulns stay tracked
-- **MCP fallback**: If the CLI scan fails, is missing, or auth is missing, git operations are denied with instructions to use `snyk_auth` / `snyk_code_scan` (and `snyk_sca_scan` when manifests changed)
-- **Manifest tracking**: Detects changes to dependency manifests (package.json, requirements.txt, etc.) and surfaces SCA guidance on deny paths
+- **MCP fallback**: If the CLI scan fails, times out, or auth is missing, the block message prompts Copilot to use the `snyk_auth` / `snyk_code_scan` MCP tools (and `snyk_sca_scan` when manifests changed)
+- **Manifest tracking**: Detects changes to dependency manifests (package.json, requirements.txt, etc.) and includes SCA findings in the block reason
 - **Stale scan detection**: Re-scans automatically if edits happen after the running scan started
+- **Loop prevention**: Caps scan-fix cycles at 3 to prevent infinite loops
 
 ## Quick Start
 
-**Prerequisites:** [uv](https://docs.astral.sh/uv/getting-started/installation/) (`curl -LsSf https://astral.sh/uv/install.sh | sh`), [Snyk CLI](https://docs.snyk.io/snyk-cli/install-the-snyk-cli) (`npm install -g snyk && snyk auth`), GitHub Copilot with hooks support.
+**Prerequisites:** [uv](https://docs.astral.sh/uv/getting-started/installation/) (`curl -LsSf https://astral.sh/uv/install.sh | sh`), [Snyk CLI](https://docs.snyk.io/snyk-cli/install-the-snyk-cli) (`npm install -g snyk && snyk auth`), GitHub Copilot CLI or Copilot in VS Code with hooks support.
 
-**1. Copy files to your project:**
+**1. Copy files:**
 
 ```bash
-mkdir -p .github/hooks/lib
-cp path/to/async_cli_version/snyk_secure_at_inception.py .github/hooks/
-cp path/to/async_cli_version/lib/*.py .github/hooks/lib/
-chmod +x .github/hooks/snyk_secure_at_inception.py
+mkdir -p ~/.copilot/hooks/lib
+cp path/to/async_cli_version/snyk_secure_at_inception.py ~/.copilot/hooks/
+cp path/to/async_cli_version/lib/*.py ~/.copilot/hooks/lib/
+chmod +x ~/.copilot/hooks/snyk_secure_at_inception.py
 ```
 
-**2. Add hook config to `.github/hooks/hooks.json`:**
+**2. Merge `hooks.json` into `~/.copilot/hooks.json`:**
 
 ```json
 {
   "version": 1,
   "hooks": {
-    "postToolUse": [
+    "sessionStart": [
       {
         "type": "command",
-        "bash": "uv run .github/hooks/snyk_secure_at_inception.py",
+        "bash": "uv run \"$HOME/.copilot/hooks/snyk_secure_at_inception.py\" sessionStart",
         "timeoutSec": 10
       }
     ],
-    "preToolUse": [
+    "postToolUse": [
       {
         "type": "command",
-        "bash": "uv run .github/hooks/snyk_secure_at_inception.py",
-        "timeoutSec": 30
+        "bash": "uv run \"$HOME/.copilot/hooks/snyk_secure_at_inception.py\" postToolUse",
+        "timeoutSec": 10
       }
     ],
     "agentStop": [
       {
         "type": "command",
-        "bash": "uv run .github/hooks/snyk_secure_at_inception.py",
-        "timeoutSec": 5
+        "bash": "uv run \"$HOME/.copilot/hooks/snyk_secure_at_inception.py\" agentStop",
+        "timeoutSec": 120
       }
     ]
   }
 }
 ```
 
-## Authentication (Snyk CLI)
 
-- **Before a background scan** (`postToolUse` on code edits), the hook calls `check_snyk_auth()`. If the CLI is **not** authenticated (no API key / OAuth token in the usual config), it **skips** launching `snyk code test`, writes an `auth_required` status for later hooks, and logs to stderr. **Edits are not blocked** at this stage.
-- **Git VCS `preToolUse`**: If a scan never completed successfully because of **auth** (or other failure), the hook **denies** the commit/push/PR with text that tells the agent to run **`snyk_auth`** (MCP), then **`snyk_code_scan`** on the workspace (and **`snyk_sca_scan`** if dependency manifests changed). Clear state is reset so a follow-up attempt can succeed after auth.
-- **Non-git bash** early notification only runs when `scan.done` reports **`success`**; if you are not authenticated, there is no successful scan, so you will not get the early `/snyk-batch-fix` interrupt on arbitrary bash—only the git path (or fixing auth and scanning) applies.
-
-**Prerequisite:** `npm install -g snyk` and `snyk auth` (or equivalent OAuth) so background scans run.
 
 ## How It Works
 
 ```
-Agent edits a file
-  -> postToolUse: track lines; if Snyk authenticated -> launch background scan
-     If not authenticated -> skip scan, record auth_required (still non-blocking)
+Session starts (sessionStart)
+  -> Check Snyk auth + CLI; write early status if missing
+  -> Launch cache-warming SAST + SCA scans
+  -> Snapshot manifest hashes for hash-diff SCA triggering at agentStop
+  -> On source=startup|new, clear stale state from any prior session
 
-Agent runs a non-git bash command
-  -> preToolUse: if scan finished successfully and new vulns on modified lines:
-     first time for this vuln set -> deny with /snyk-batch-fix + re-run hint (interrupts that bash)
-     same vuln set again -> allow (already notified)
+Copilot edits a file (postToolUse)
+  -> Track which lines changed
+  -> Lazily run sessionStart init if it hasn't run yet (resume / -p / hook bugs)
+  -> Peek at scan.done for cached errors (auth_required, snyk_not_found)
+     -> Error?  -> block immediately with actionable fix instructions
+     -> No error -> launch background scan, Copilot keeps working
 
-Agent runs git commit / git push / gh pr create / gh pr merge
-  -> preToolUse: wait up to ~25s for scan (see Configuration)
-  -> Filters to vulns on lines the agent modified
-  -> New vulns or manifest-only pending work? -> deny with /snyk-batch-fix; retry same op to proceed
-  -> Scan still running (timeout)? -> deny: wait and retry commit
-  -> auth_required / CLI missing / other scan failure? -> deny with MCP snyk_auth + snyk_code_scan (+ SCA if needed)
-
-Agent finishes responding
-  -> agentStop: audit log only (output ignored by Copilot — does not block or prompt)
+Copilot finishes the turn (agentStop)
+  -> Wait for scan results
+  -> Filter to only vulns on lines Copilot modified (ignores pre-existing issues)
+  -> New vulns? -> block with fix instructions (repeats up to 3 cycles)
+  -> No new vulns? -> pass silently
+  -> Scan failed? -> fall back to MCP snyk_code_scan prompt
 ```
 
-Changes to dependency manifests are included in denial reasons and MCP fallback text for **`snyk_sca_scan`**.
-
-## Enforcement Model
-
-Unlike Claude Code and Cursor, which can block at session end (`Stop`/`stop`), Copilot **ignores `agentStop` hook output**. Enforcement is **`preToolUse` on `bash` only**:
-
-| Situation | What happens |
-|-----------|----------------|
-| First **non-git** bash after vulns appear (successful scan) | That bash call is **denied** once with `/snyk-batch-fix` and the command to re-run later |
-| Later non-git bash, same vuln fingerprint | **Allowed** (already notified) |
-| First **git** op with new vulns or pending manifests | **Denied** with `/snyk-batch-fix` (+ SCA section if needed) |
-| **Retry** same git op without fixing (same vuln fingerprint) | **Allowed** (notify-then-allow) |
-| Commit after fixing / clean scan | **Allowed**; stale edits trigger re-scan |
-| Scan **timeout** on git op | **Denied**: “wait and retry” (scan still in progress) |
-| **Not authenticated** / scan failed on git op | **Denied** with MCP `snyk_auth` + `snyk_code_scan` (+ `snyk_sca_scan` if manifests changed) |
-
-This keeps insecure code out of version control unless the user explicitly retries after seeing the denial.
+Changes to dependency manifests (package.json, requirements.txt, etc.) trigger a new SCA scan, with results included in the block reason.
 
 ## Configuration
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `COPILOT_HOOK_DEBUG` env var | `0` | Set to `1` for verbose stderr logging |
-| `PRE_TOOL_SCAN_WAIT_TIMEOUT` | `25s` | How long preToolUse waits for a scan |
+| `MAX_STOP_CYCLES` | `3` | Max fix cycles before allowing stop |
+| `SCAN_WAIT_TIMEOUT` | `90s` | How long agentStop waits for a scan |
+| `SAI_MIN_BLOCK_SEVERITY` | `medium` | Minimum SCA severity that triggers a block (`critical`/`high`/`medium`/`low`) |
 
 ## Files
 
 ```
-.github/hooks/
-├── hooks.json                       # Hook configuration
-├── snyk_secure_at_inception.py      # Entry point, line tracking, vuln filtering
+~/.copilot/hooks/
+├── snyk_secure_at_inception.py   # Entry point, line tracking, vuln filtering
 └── lib/
-    ├── scan_runner.py               # Scan lifecycle, SARIF parsing
-    └── scan_worker.py               # Background subprocess
+    ├── platform_utils.py         # Cross-platform abstractions
+    ├── scan_runner.py            # Scan lifecycle, SARIF parsing
+    ├── scan_worker.py            # Background SAST subprocess
+    └── sca_scan_worker.py        # Background SCA subprocess
 ```
 
 State is kept in `{tempdir}/copilot-sai-{hash}/` (not in your project). To reset: delete that directory.
 
 ## Troubleshooting
 
-**Snyk CLI not found** — `npm install -g snyk && snyk auth`
+**Snyk CLI not found** -- `npm install -g snyk && snyk auth`
 
-**Not authenticated / git ops denied with snyk_auth** — Run `snyk auth` in a terminal (or complete OAuth in the CLI). Until then, background scans are skipped and git operations with pending changes are denied with MCP instructions instead of a SARIF-based result.
+**Hook not firing** -- Verify `~/.copilot/hooks.json` exists, the script is executable, and hooks are enabled in your Copilot version. In particular, confirm the `bash` command in `hooks.json` ends with the event name (`postToolUse` or `agentStop`) -- without that argv, the script no-ops.
 
 **Scan always times out** -- Check `{tempdir}/copilot-sai-{hash}/scan.log`. Find your path with:
 
@@ -138,6 +121,49 @@ State is kept in `{tempdir}/copilot-sai-{hash}/` (not in your project). To reset
 python3 -c "import hashlib,os,tempfile; h=hashlib.sha256(os.getcwd().encode()).hexdigest()[:8]; print(f'{tempfile.gettempdir()}/copilot-sai-{h}')"
 ```
 
-**Hook not firing** -- Verify `.github/hooks/hooks.json` exists on the default branch, script is executable, and hooks are enabled in Copilot.
-
 **Debug mode** -- `export COPILOT_HOOK_DEBUG=1` before starting a session.
+
+## Windows Installation
+
+The Python code is cross-platform; only the hook command needs adjusting.
+
+**1. Copy files:**
+
+```powershell
+mkdir -Force $env:USERPROFILE\.copilot\hooks\lib
+copy path\to\async_cli_version\snyk_secure_at_inception.py $env:USERPROFILE\.copilot\hooks\
+copy path\to\async_cli_version\lib\*.py $env:USERPROFILE\.copilot\hooks\lib\
+```
+
+**2. Hook command in `hooks.json` (Windows):**
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "uv run \"%USERPROFILE%\\.copilot\\hooks\\snyk_secure_at_inception.py\" sessionStart",
+        "timeoutSec": 10
+      }
+    ],
+    "postToolUse": [
+      {
+        "type": "command",
+        "bash": "uv run \"%USERPROFILE%\\.copilot\\hooks\\snyk_secure_at_inception.py\" postToolUse",
+        "timeoutSec": 10
+      }
+    ],
+    "agentStop": [
+      {
+        "type": "command",
+        "bash": "uv run \"%USERPROFILE%\\.copilot\\hooks\\snyk_secure_at_inception.py\" agentStop",
+        "timeoutSec": 120
+      }
+    ]
+  }
+}
+```
+
+Replace `uv run` with `py -3` if you are not using uv.

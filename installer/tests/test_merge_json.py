@@ -19,16 +19,19 @@ from merge_json import (
     main,
     merge_claude_settings,
     merge_codex_config,
+    merge_copilot_cli_hooks,
     merge_cursor_hooks,
     merge_gemini_settings,
     merge_mcp_servers,
     unmerge_claude_settings,
     unmerge_codex_config,
+    unmerge_copilot_cli_hooks,
     unmerge_cursor_hooks,
     unmerge_gemini_settings,
     unmerge_mcp_servers,
     verify_claude_settings,
     verify_codex_config,
+    verify_copilot_cli_hooks,
     verify_cursor_hooks,
     verify_gemini_settings,
     verify_mcp_servers,
@@ -1570,3 +1573,271 @@ command = "echo wrong"
             verify_codex_config(target, snyk_codex_hooks_source)
         err = capsys.readouterr().err
         assert "snyk_secure_at_inception" in err
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Copilot CLI hooks strategies (hooks.json keyed by `bash`, not `command`)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+SNYK_COPILOT_BASH = 'uv run "$HOME/.copilot/hooks/snyk_secure_at_inception.py" agentStop'
+
+
+class TestMergeCopilotCliHooks:
+    def test_merge_into_empty_target(self, empty_target, snyk_copilot_source):
+        merge_copilot_cli_hooks(empty_target, snyk_copilot_source)
+        result = read_json(empty_target)
+        assert result["version"] == 1
+        assert len(result["hooks"]["sessionStart"]) == 1
+        assert len(result["hooks"]["postToolUse"]) == 1
+        assert len(result["hooks"]["agentStop"]) == 1
+
+    def test_merge_preserves_user_hooks(self, existing_copilot_target, snyk_copilot_source):
+        merge_copilot_cli_hooks(existing_copilot_target, snyk_copilot_source)
+        result = read_json(existing_copilot_target)
+        bashes = [e["bash"] for e in result["hooks"]["postToolUse"]]
+        assert "echo user-hook" in bashes
+        assert any("snyk_secure_at_inception" in b for b in bashes)
+
+    def test_merge_is_idempotent(self, empty_target, snyk_copilot_source):
+        merge_copilot_cli_hooks(empty_target, snyk_copilot_source)
+        merge_copilot_cli_hooks(empty_target, snyk_copilot_source)
+        result = read_json(empty_target)
+        for event in ("sessionStart", "postToolUse", "agentStop"):
+            assert len(result["hooks"][event]) == 1, event
+
+    def test_merge_dedupes_by_bash_field(self, write_json, snyk_copilot_source):
+        # Same bash string already present with extra fields — should not duplicate.
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "agentStop": [{"type": "command", "bash": SNYK_COPILOT_BASH, "timeoutSec": 999}]
+                },
+            },
+        )
+        merge_copilot_cli_hooks(target, snyk_copilot_source)
+        assert len(read_json(target)["hooks"]["agentStop"]) == 1
+
+    def test_merge_dedupes_across_home_var_spellings(self, write_json, snyk_copilot_source):
+        # Source uses $HOME; target was previously written with %USERPROFILE%
+        # (or an expanded absolute path). After canonicalization both refer
+        # to the same hook, so merge must not double-register.
+        home = os.path.expanduser("~")
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "sessionStart": [
+                        {
+                            "type": "command",
+                            "bash": (
+                                'uv run "%USERPROFILE%/.copilot/hooks/'
+                                'snyk_secure_at_inception.py" sessionStart'
+                            ),
+                        }
+                    ],
+                    "postToolUse": [
+                        {
+                            "type": "command",
+                            "bash": (
+                                f'uv run "{home}/.copilot/hooks/'
+                                'snyk_secure_at_inception.py" postToolUse'
+                            ),
+                        }
+                    ],
+                },
+            },
+        )
+        merge_copilot_cli_hooks(target, snyk_copilot_source)
+        result = read_json(target)
+        # Each event still has exactly one entry — the existing stale-spelling
+        # one is preserved, no duplicate is appended.
+        assert len(result["hooks"]["sessionStart"]) == 1
+        assert len(result["hooks"]["postToolUse"]) == 1
+
+    def test_merge_creates_backup(self, existing_copilot_target, snyk_copilot_source):
+        merge_copilot_cli_hooks(existing_copilot_target, snyk_copilot_source)
+        assert os.path.isfile(existing_copilot_target + ".bak")
+
+    def test_merge_no_backup_for_new_target(self, empty_target, snyk_copilot_source):
+        merge_copilot_cli_hooks(empty_target, snyk_copilot_source)
+        assert not os.path.isfile(empty_target + ".bak")
+
+    def test_merge_fails_on_invalid_json(self, tmp_path, snyk_copilot_source):
+        target = tmp_path / "target.json"
+        target.write_text("{ invalid }")
+        with pytest.raises(ValueError, match="Invalid JSON in file"):
+            merge_copilot_cli_hooks(str(target), snyk_copilot_source)
+
+
+class TestUnmergeCopilotCliHooks:
+    def test_removes_snyk_entries(self, write_json, snyk_copilot_source):
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "postToolUse": [
+                        {"type": "command", "bash": "echo user-hook"},
+                        {
+                            "type": "command",
+                            "bash": (
+                                'uv run "$HOME/.copilot/hooks/snyk_secure_at_inception.py" '
+                                "postToolUse"
+                            ),
+                        },
+                    ],
+                    "agentStop": [{"type": "command", "bash": SNYK_COPILOT_BASH}],
+                },
+            },
+        )
+        unmerge_copilot_cli_hooks(target, snyk_copilot_source)
+        result = read_json(target)
+        assert len(result["hooks"]["postToolUse"]) == 1
+        assert result["hooks"]["postToolUse"][0]["bash"] == "echo user-hook"
+        assert "agentStop" not in result["hooks"]
+
+    def test_unmerge_is_idempotent(self, write_json, snyk_copilot_source):
+        target = write_json("target.json", {"version": 1, "hooks": {}})
+        unmerge_copilot_cli_hooks(target, snyk_copilot_source)
+        unmerge_copilot_cli_hooks(target, snyk_copilot_source)
+        assert read_json(target) == {"version": 1, "hooks": {}}
+
+    def test_noop_missing_target(self, tmp_path, snyk_copilot_source):
+        target = str(tmp_path / "nope.json")
+        unmerge_copilot_cli_hooks(target, snyk_copilot_source)
+        assert not os.path.exists(target)
+
+    def test_removes_cross_spelling_userprofile(self, write_json, snyk_copilot_source):
+        # Source uses $HOME; target was installed with %USERPROFILE% (e.g. a
+        # prior Windows install). Normalize-on-compare must collapse both to
+        # the same canonical form so the stale entry is removed.
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "agentStop": [
+                        {"type": "command", "bash": "echo user-hook"},
+                        {
+                            "type": "command",
+                            "bash": (
+                                'uv run "%USERPROFILE%/.copilot/hooks/'
+                                'snyk_secure_at_inception.py" agentStop'
+                            ),
+                        },
+                    ],
+                },
+            },
+        )
+        unmerge_copilot_cli_hooks(target, snyk_copilot_source)
+        result = read_json(target)
+        assert len(result["hooks"]["agentStop"]) == 1
+        assert result["hooks"]["agentStop"][0]["bash"] == "echo user-hook"
+
+    def test_removes_absolute_path_written_by_newer_installer(
+        self, write_json, snyk_copilot_source
+    ):
+        # Newer installer expands $HOME to an absolute path at install time.
+        # An old uninstaller (source still uses $HOME) must still remove it.
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "agentStop": [
+                        {
+                            "type": "command",
+                            "bash": (
+                                f'uv run "{os.path.expanduser("~")}/.copilot/hooks/'
+                                'snyk_secure_at_inception.py" agentStop'
+                            ),
+                        },
+                    ],
+                },
+            },
+        )
+        unmerge_copilot_cli_hooks(target, snyk_copilot_source)
+        result = read_json(target)
+        assert "agentStop" not in result["hooks"]
+
+
+class TestVerifyCopilotCliHooks:
+    def test_passes_after_merge(self, empty_target, snyk_copilot_source):
+        merge_copilot_cli_hooks(empty_target, snyk_copilot_source)
+        verify_copilot_cli_hooks(empty_target, snyk_copilot_source)
+
+    def test_fails_when_event_missing(self, write_json, snyk_copilot_source):
+        target = write_json("target.json", {"version": 1, "hooks": {}})
+        with pytest.raises(SystemExit) as exc_info:
+            verify_copilot_cli_hooks(target, snyk_copilot_source)
+        assert exc_info.value.code == 1
+
+    def test_fails_when_bash_entry_missing(self, write_json, snyk_copilot_source, capsys):
+        # Has the events but with foreign bash commands only.
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "sessionStart": [{"type": "command", "bash": "echo other"}],
+                    "postToolUse": [{"type": "command", "bash": "echo other"}],
+                    "agentStop": [{"type": "command", "bash": "echo other"}],
+                },
+            },
+        )
+        with pytest.raises(SystemExit):
+            verify_copilot_cli_hooks(target, snyk_copilot_source)
+        err = capsys.readouterr().err
+        assert "snyk_secure_at_inception" in err
+
+    def test_strategies_registered(self):
+        assert "merge_copilot_cli_hooks" in STRATEGIES
+        assert "unmerge_copilot_cli_hooks" in STRATEGIES
+        assert "verify_copilot_cli_hooks" in STRATEGIES
+
+    def test_passes_when_target_uses_different_home_spelling(self, write_json, snyk_copilot_source):
+        # Source ships with $HOME, target was installed by a newer installer
+        # that expanded $HOME to the absolute path. verify must canonicalize
+        # both sides and report no missing hooks.
+        home = os.path.expanduser("~")
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "sessionStart": [
+                        {
+                            "type": "command",
+                            "bash": (
+                                f'uv run "{home}/.copilot/hooks/'
+                                'snyk_secure_at_inception.py" sessionStart'
+                            ),
+                        }
+                    ],
+                    "postToolUse": [
+                        {
+                            "type": "command",
+                            "bash": (
+                                f'uv run "{home}/.copilot/hooks/'
+                                'snyk_secure_at_inception.py" postToolUse'
+                            ),
+                        }
+                    ],
+                    "agentStop": [
+                        {
+                            "type": "command",
+                            "bash": (
+                                f'uv run "{home}/.copilot/hooks/'
+                                'snyk_secure_at_inception.py" agentStop'
+                            ),
+                        }
+                    ],
+                },
+            },
+        )
+        # Should not raise SystemExit
+        verify_copilot_cli_hooks(target, snyk_copilot_source)

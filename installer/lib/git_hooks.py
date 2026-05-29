@@ -133,24 +133,51 @@ def _precommit_yaml_path(workspace: Path) -> Optional[Path]:
     return None
 
 
-def _precommit_block(spec: HookSpec) -> str:
+_REPOS_ITEM_RE = re.compile(r"^(?P<indent>[ \t]*)-[ \t]+repo:", re.MULTILINE)
+
+
+def _detect_repos_indent(text: str) -> str:
+    """Return the leading whitespace used by ``- repo:`` items in *text*.
+
+    YAML block sequences require every item to share an indent level. A
+    file written with two-space-indented items under ``repos:`` (the
+    common style produced by ``pre-commit autoupdate`` and most
+    templates) will refuse to load if a new item is appended at column 0
+    — pre-commit raises ``InvalidConfigError`` with "did not find expected
+    key" pointing at our marker, because the parser stops treating the
+    new line as part of the sequence and starts looking for a sibling
+    mapping key. Sniffing the indent off the file's existing items lets
+    the appended SAC block line up with whichever style the user has.
+
+    Returns the leading whitespace of the first ``- repo:`` line found,
+    or ``""`` when none exists (e.g. an empty ``repos:`` list — in that
+    case the canonical zero-indent form is a safe default).
+    """
+    match = _REPOS_ITEM_RE.search(text)
+    return match.group("indent") if match else ""
+
+
+def _precommit_block(spec: HookSpec, indent: str = "") -> str:
     """Return the YAML fragment to append under ``repos:``.
 
-    The fragment is one ``local`` repo entry with a single hook whose ``entry``
-    is the SAC command line. Indentation matches the most common
-    `pre-commit-config.yaml` layout (no indent on list items, two spaces on
-    their child mappings).
+    The fragment is one ``local`` repo entry with a single hook whose
+    ``entry`` is the SAC command line. ``indent`` is the leading
+    whitespace prepended to every body line so the appended block lines
+    up with the user's existing ``- repo:`` items — pass the result of
+    ``_detect_repos_indent`` against the current file contents.
     """
-    body = (
-        "- repo: local\n"
-        "  hooks:\n"
-        f"  - id: {spec.tag}\n"
-        "    name: Snyk Secure At Commit\n"
-        f"    entry: {spec.command}\n"
-        "    language: system\n"
-        "    pass_filenames: false\n"
-        "    always_run: true\n"
-        "    stages: [pre-commit]"
+    body = "\n".join(
+        [
+            f"{indent}- repo: local",
+            f"{indent}  hooks:",
+            f"{indent}  - id: {spec.tag}",
+            f"{indent}    name: Snyk Secure At Commit",
+            f"{indent}    entry: {spec.command}",
+            f"{indent}    language: system",
+            f"{indent}    pass_filenames: false",
+            f"{indent}    always_run: true",
+            f"{indent}    stages: [pre-commit]",
+        ]
     )
     return _wrap_block(spec, body)
 
@@ -160,16 +187,25 @@ def install_precommit_framework(workspace: Path, spec: HookSpec) -> Tuple[bool, 
 
     Returns ``(installed, path_str)``. ``installed`` is False if the block was
     already present and the file was left untouched.
+
+    The indent of the appended ``- repo:`` block is sniffed off the file
+    so it matches whichever style the user already has (canonical
+    zero-indent vs the very common two-space style). The sniff runs
+    against the file with any prior SAC block stripped, so a previous
+    install that wrote at the wrong column doesn't poison the next one
+    — the new install reads the user's actual ``- repo:`` items and
+    self-corrects.
     """
     yaml_path = _precommit_yaml_path(workspace)
     if yaml_path is None:
         raise FileNotFoundError(".pre-commit-config.yaml not found")
 
     text = _normalize_existing(_read_text(yaml_path))
-    block = _precommit_block(spec)
+    cleaned = _strip_block(text, spec)
+    indent = _detect_repos_indent(cleaned)
+    block = _precommit_block(spec, indent)
     if block.strip() in text:
         return False, str(yaml_path)
-    cleaned = _strip_block(text, spec)
     if not cleaned.endswith("\n"):
         cleaned += "\n"
     yaml_path.write_text(cleaned + block, encoding="utf-8")

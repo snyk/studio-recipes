@@ -540,6 +540,134 @@ class TestPreCommitFramework:
         assert original.strip() in after
 
 
+class TestPreCommitIndentSniff:
+    """Reported bug: appending a zero-indent ``- repo:`` block to a config
+    whose existing items sit at two-space indent triggers pre-commit's
+    ``InvalidConfigError: did not find expected key`` because the new
+    item parses as a top-level construct rather than a continuation of
+    ``repos:``. We now sniff the existing items' indent and match it."""
+
+    def test_detect_zero_indent(self):
+        text = "repos:\n- repo: https://x\n  rev: 1\n"
+        assert git_hooks._detect_repos_indent(text) == ""
+
+    def test_detect_two_space_indent(self):
+        text = "repos:\n  - repo: https://x\n    rev: 1\n"
+        assert git_hooks._detect_repos_indent(text) == "  "
+
+    def test_detect_four_space_indent(self):
+        text = "repos:\n    - repo: https://x\n      rev: 1\n"
+        assert git_hooks._detect_repos_indent(text) == "    "
+
+    def test_detect_empty_repos_returns_empty_string(self):
+        """An empty ``repos:`` list has no items to sniff; default to
+        zero indent (the canonical pre-commit form)."""
+        assert git_hooks._detect_repos_indent("repos:\n") == ""
+
+    def test_detect_picks_first_item_when_multiple_present(self):
+        """Sniff picks the *first* match deterministically. In a
+        well-formed config every item shares an indent level, so any
+        choice would be the same; in a malformed file the first-match
+        rule keeps behaviour predictable."""
+        text = "repos:\n  - repo: https://a\n  - repo: https://b\n"
+        assert git_hooks._detect_repos_indent(text) == "  "
+
+    def test_detect_tabs_preserved(self):
+        """If the user's file uses tabs, match that. We don't translate
+        between spaces and tabs — YAML treats them differently."""
+        text = "repos:\n\t- repo: https://x\n"
+        assert git_hooks._detect_repos_indent(text) == "\t"
+
+    def test_block_body_uses_supplied_indent(self):
+        spec = git_hooks.HookSpec(tag="snyk-secure-at-commit", command="fake")
+        block = git_hooks._precommit_block(spec, indent="  ")
+        # Every body line either starts with the indent + content or is
+        # a marker comment (markers stay at column 0 so they're visible
+        # at a glance regardless of file style).
+        body_lines = block.split("\n")
+        sequence_line = next(line for line in body_lines if line.lstrip().startswith("- repo:"))
+        assert sequence_line == "  - repo: local"
+        # The hook id line lands at the matching deeper indent.
+        assert f"  - id: {spec.tag}" in block
+
+    def test_install_into_two_space_indented_config_matches_existing_indent(self, workspace):
+        """The exact shape reported by the affected user: items under
+        ``repos:`` are two-space indented. The installed SAC block must
+        land at the same level so YAML parses without complaint."""
+        path = workspace / ".pre-commit-config.yaml"
+        path.write_text(
+            "repos:\n"
+            "  - repo: https://github.com/astral-sh/ruff-pre-commit\n"
+            "    rev: v0.15.12\n"
+            "    hooks:\n"
+            "      - id: ruff\n"
+            "        args: [--fix]\n"
+            "      - id: ruff-format\n"
+        )
+        manager, installed, _ = git_hooks.install_hook(workspace, SPEC)
+        assert manager == "pre-commit"
+        assert installed is True
+        text = path.read_text()
+        # The new sequence item lands at column 3 (after two spaces).
+        assert "  - repo: local" in text
+        # And the buggy zero-indent form is absent — that was the cause
+        # of "did not find expected key".
+        assert "\n- repo: local" not in text
+
+    def test_install_into_two_space_indented_config_is_idempotent(self, workspace):
+        """Second install must detect the existing (correctly indented)
+        block and skip writing — otherwise we'd grow the file every
+        time the installer ran."""
+        path = workspace / ".pre-commit-config.yaml"
+        path.write_text(
+            "repos:\n"
+            "  - repo: https://github.com/astral-sh/ruff-pre-commit\n"
+            "    rev: v0.15.12\n"
+            "    hooks:\n"
+            "      - id: ruff\n"
+        )
+        git_hooks.install_hook(workspace, SPEC)
+        _, second_installed, _ = git_hooks.install_hook(workspace, SPEC)
+        assert second_installed is False
+
+    def test_reinstall_self_corrects_previously_bad_indent(self, workspace):
+        """If a previous (pre-fix) install wrote the block at column 0
+        and the user has 2-space items, re-running the installer should
+        clean up the bad block and re-emit it at the correct indent."""
+        path = workspace / ".pre-commit-config.yaml"
+        bad = (
+            "repos:\n"
+            "  - repo: https://github.com/astral-sh/ruff-pre-commit\n"
+            "    rev: v0.15.12\n"
+            "    hooks:\n"
+            "      - id: ruff\n"
+            f"{SPEC.begin_marker}\n"
+            "- repo: local\n"  # column 0 — the bug
+            "  hooks:\n"
+            f"  - id: {SPEC.tag}\n"
+            f"    entry: {SPEC.command}\n"
+            f"{SPEC.end_marker}\n"
+        )
+        path.write_text(bad)
+        _, installed, _ = git_hooks.install_hook(workspace, SPEC)
+        assert installed is True
+        text = path.read_text()
+        # New block is at the correct two-space indent.
+        assert "  - repo: local" in text
+        # The buggy zero-indent line is gone.
+        assert "\n- repo: local" not in text
+
+    def test_install_into_empty_repos_uses_default_zero_indent(self, workspace):
+        """Empty ``repos:`` list — no items to sniff. Default to zero
+        indent, which is the canonical pre-commit form."""
+        path = workspace / ".pre-commit-config.yaml"
+        path.write_text("repos:\n")
+        _, installed, _ = git_hooks.install_hook(workspace, SPEC)
+        assert installed is True
+        # `- repo: local` at column 0 follows the default.
+        assert "\n- repo: local" in path.read_text()
+
+
 # ============================================================================
 # 3. End-to-end installer behaviour
 # ============================================================================

@@ -1055,7 +1055,7 @@ class TestLifecycle:
                 assert installer.verify_recipe(recipe_id, ade, manifest, payload)
 
         # Uninstall
-        installer.uninstall(ades, manifest, payload, dry_run=False)
+        installer.uninstall(ades, manifest, payload, workspace=None, dry_run=False)
 
         # Verify files removed
         assert not (fake_home / ".claude" / "hooks" / "snyk_secure_at_inception.py").exists()
@@ -1086,7 +1086,7 @@ class TestLifecycle:
             for recipe_id in recipes:
                 assert installer.verify_recipe(recipe_id, ade, manifest, payload)
 
-        installer.uninstall(ades, manifest, payload, dry_run=False)
+        installer.uninstall(ades, manifest, payload, workspace=None, dry_run=False)
 
         assert not (fake_home / ".gemini" / "hooks" / "snyk_secure_at_inception.py").exists()
         assert not (fake_home / ".gemini" / "commands" / "snyk-fix.md").exists()
@@ -1125,7 +1125,7 @@ class TestLifecycle:
                 # verify_recipe will return True for sai-hooks-async because it has no sources for kiro
                 assert installer.verify_recipe(recipe_id, ade, manifest, payload)
 
-        installer.uninstall(ades, manifest, payload, dry_run=False)
+        installer.uninstall(ades, manifest, payload, workspace=None, dry_run=False)
 
         assert not (fake_home / ".kiro" / "steering" / "snyk-fix.md").exists()
 
@@ -1173,7 +1173,7 @@ class TestLifecycle:
             assert installer.verify_recipe(recipe_id, "codex", manifest, payload)
 
         # Uninstall removes our entries; user content (none here) is preserved
-        installer.uninstall(["codex"], manifest, payload, dry_run=False)
+        installer.uninstall(["codex"], manifest, payload, workspace=None, dry_run=False)
         assert not (tmp_path / ".codex" / "hooks" / "snyk_secure_at_inception.py").exists()
         # config.toml itself is removed when only Snyk content was present
         assert not (tmp_path / ".codex" / "config.toml").exists()
@@ -1203,7 +1203,7 @@ class TestLifecycle:
         for recipe_id in recipes:
             assert installer.verify_recipe(recipe_id, "copilot-cli", manifest, payload)
 
-        installer.uninstall(["copilot-cli"], manifest, payload, dry_run=False)
+        installer.uninstall(["copilot-cli"], manifest, payload, workspace=None, dry_run=False)
         assert not (tmp_path / ".copilot" / "skills" / "snyk-fix" / "SKILL.md").exists()
         assert not (tmp_path / ".copilot" / "hooks" / "snyk_secure_at_inception.py").exists()
 
@@ -1230,7 +1230,7 @@ class TestLifecycle:
 
         assert installer.verify_recipe("sai-hooks-async", "copilot-vscode", manifest, payload)
 
-        installer.uninstall(["copilot-vscode"], manifest, payload, dry_run=False)
+        installer.uninstall(["copilot-vscode"], manifest, payload, workspace=None, dry_run=False)
         assert not (tmp_path / ".copilot" / "hooks" / "snyk_secure_at_inception.py").exists()
 
     def test_install_verify_uninstall_windsurf(self, tmp_path, payload, manifest, monkeypatch):
@@ -1260,7 +1260,7 @@ class TestLifecycle:
         for recipe_id in recipes:
             assert installer.verify_recipe(recipe_id, "windsurf", manifest, payload)
 
-        installer.uninstall(["windsurf"], manifest, payload, dry_run=False)
+        installer.uninstall(["windsurf"], manifest, payload, workspace=None, dry_run=False)
 
         assert not (
             tmp_path / ".codeium" / "windsurf" / "global_workflows" / "snyk-fix.md"

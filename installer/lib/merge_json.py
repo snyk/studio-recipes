@@ -26,22 +26,43 @@ import re
 import shlex
 import shutil
 import sys
+from pathlib import Path
 
 LEGACY_LAUNCHERS = frozenset({"python", "python3"})
 
 # Home-directory variable tokens we substitute at install time so that the
 # command string in the installed config no longer depends on shell expansion.
-# Order matters only for documentation; each pattern is independent.
+# Each pattern captures an optional path continuation after the token so the
+# whole path can be re-joined with the platform's native separator (see
+# expand_hook_command_paths); without that, $HOME/foo on Windows would expand
+# to e.g. ``C:\Users\me/foo`` (mixed separators).
+#
+# Path-name characters: allowed inside a single path segment. Excluded:
+#   - whitespace, quotes, common shell metas (``>``, ``<``, ``|``, ``;``,
+#     ``&``, parens): end-of-path markers
+#   - the path separators themselves (``/``, ``\``): segment boundaries
+#   - ``$``, `` ` ``, ``{``, ``}``: start a shell variable / command
+#     substitution. Stopping the continuation before these keeps a following
+#     reference like ``$HOOK_VAR`` out of the substitution span; otherwise
+#     ``$HOME/$HOOK_VAR`` on Windows would become ``C:\Users\me\$HOOK_VAR``
+#     and the leading backslash would escape the ``$`` in a POSIX shell.
+#
+# A path continuation is one or more (separator + name+) segments. ``$HOME/``
+# alone (no name chars after the separator) is intentionally NOT absorbed —
+# we want the trailing ``/`` left in place so cases like ``$HOME/$VAR`` keep
+# their forward slash for the shell to consume.
 #
 # %USERPROFILE% uses explicit non-word lookbehind/lookahead instead of \b so
 # the token is only expanded when it isn't embedded in surrounding identifier
 # characters (matching the safety semantics of the \b anchors on the other
 # patterns; \b around %...% doesn't work because % itself is non-word).
+_PATH_NAME_CHARS = r"[^\s\"'<>|;&()$`{}\\/]"
+_PATH_CONTINUATION = rf"((?:[/\\]{_PATH_NAME_CHARS}+)*)"
 _HOME_PATTERNS = (
-    re.compile(r"\$\{HOME\}"),
-    re.compile(r"\$HOME\b"),
-    re.compile(r"\$env:USERPROFILE\b", re.IGNORECASE),
-    re.compile(r"(?<!\w)%USERPROFILE%(?!\w)", re.IGNORECASE),
+    re.compile(r"\$\{HOME\}" + _PATH_CONTINUATION),
+    re.compile(r"\$HOME" + _PATH_CONTINUATION + r"(?=\W|$)"),
+    re.compile(r"\$env:USERPROFILE" + _PATH_CONTINUATION + r"(?=\W|$)", re.IGNORECASE),
+    re.compile(r"(?<!\w)%USERPROFILE%" + _PATH_CONTINUATION + r"(?!\w)", re.IGNORECASE),
 )
 
 
@@ -52,17 +73,24 @@ def expand_hook_command_paths(data, home=None):
     ``$env:USERPROFILE``, and ``%USERPROFILE%`` (case-insensitive for the
     Windows variants) with ``home``. Other strings pass through untouched.
 
-    ``home`` defaults to ``os.path.expanduser("~")``. The substituted path is
-    inserted literally — separator characters following the token are
-    preserved, so callers that ship ``$HOME/foo`` get ``<home>/foo`` even on
-    Windows. Modern shells on every platform accept forward slashes in paths.
+    ``home`` defaults to ``os.path.expanduser("~")``. The token AND its
+    immediately-following path continuation are consumed together and rejoined
+    via :class:`pathlib.Path`, so the result uses the platform-native separator
+    end-to-end (no mixed ``C:\\Users\\me/foo`` on Windows).
     """
     if home is None:
         home = os.path.expanduser("~")
 
+    def _replace(match):
+        suffix = match.group(1) or ""
+        parts = [p for p in re.split(r"[/\\]+", suffix) if p]
+        if not parts:
+            return home
+        return str(Path(home, *parts))
+
     def _expand(s):
         for pat in _HOME_PATTERNS:
-            s = pat.sub(lambda _m: home, s)
+            s = pat.sub(_replace, s)
         return s
 
     def _walk(obj):
@@ -77,17 +105,45 @@ def expand_hook_command_paths(data, home=None):
     return _walk(data)
 
 
+def _fold_path_separators_in_home_spans(s, home):
+    """Fold ``\\`` to ``/`` only within path-like spans anchored at ``home``.
+
+    Anchoring on the home prefix limits the fold to substrings that are
+    actually paths. Backslashes outside such spans — shell escapes, literal
+    arguments, regex patterns — are preserved, so two commands that differ
+    only in a non-path backslash do NOT collide on the canonical key.
+
+    The home prefix itself is matched separator-agnostically so a legacy
+    Windows entry like ``C:\\Users\\me/foo/bar.py`` (token replaced verbatim,
+    forward slashes from the source surviving) collapses to the same key as
+    a current install's native ``C:\\Users\\me\\foo\\bar.py``.
+    """
+    if not home:
+        return s
+    home_segments = re.split(r"[\\/]", home)
+    home_re = r"[\\/]".join(re.escape(seg) for seg in home_segments)
+    span_re = re.compile(home_re + rf"(?:[/\\]{_PATH_NAME_CHARS}+)*")
+    return span_re.sub(lambda m: m.group(0).replace("\\", "/"), s)
+
+
 def _canonicalize_command(cmd):
-    """Return the canonical (home-expanded) form of a hook command string.
+    """Return the canonical (home-expanded, separator-folded) form of a hook command.
 
     All known home-dir variable spellings (``$HOME``, ``${HOME}``,
     ``$env:USERPROFILE``, ``%USERPROFILE%``) collapse to the same absolute
-    path, so two strings that differ only in variable spelling become
-    equal after canonicalization. Non-string inputs pass through.
+    path. Within path spans anchored at the home prefix, separators are
+    folded (``\\`` -> ``/``) so that entries written by older installer
+    versions with mixed separators (e.g. on Windows
+    ``C:\\Users\\me/foo\\bar.py``) match entries written by the current
+    installer with native separators (``C:\\Users\\me\\foo\\bar.py``).
+    The folded form is comparison-only — on-disk writes use the native form
+    produced by ``expand_hook_command_paths``. Non-string inputs pass through.
     """
     if not isinstance(cmd, str):
         return cmd
-    return expand_hook_command_paths({"_": cmd})["_"]
+    home = os.path.expanduser("~")
+    expanded = expand_hook_command_paths({"_": cmd}, home=home)["_"]
+    return _fold_path_separators_in_home_spans(expanded, home)
 
 
 def _canonical_command_set(entries, field="command"):
@@ -974,12 +1030,104 @@ def verify_codex_config(target_path, source_path):
         sys.exit(1)
 
 
+def merge_copilot_cli_hooks(target_path, source_path):
+    """Merge Snyk hooks into Copilot CLI's hooks.json (~/.copilot/hooks.json).
+
+    Same shape as Cursor's hooks.json ({version, hooks: {event: [entries]}}),
+    but each entry uses the `bash` field instead of `command`. Dedupes by the
+    canonicalized `bash` value so an entry previously written with one
+    home-dir variable spelling ($HOME, %USERPROFILE%, an expanded absolute
+    path, etc.) is not duplicated by a reinstall using a different spelling.
+    """
+    _backup(target_path)
+    source = _load_json(source_path)
+    try:
+        target = _load_json(target_path)
+    except Exception:
+        raise ValueError(f"Invalid JSON in file: {target_path}") from None
+
+    if "version" not in target:
+        target["version"] = source.get("version", 1)
+    if "hooks" not in target:
+        target["hooks"] = {}
+
+    for event, entries in source.get("hooks", {}).items():
+        if event not in target["hooks"]:
+            target["hooks"][event] = []
+        existing = _canonical_command_set(target["hooks"][event], field="bash")
+        for entry in entries:
+            canonical = _canonicalize_command(entry.get("bash"))
+            if isinstance(canonical, str) and canonical in existing:
+                continue
+            target["hooks"][event].append(entry)
+            if isinstance(canonical, str):
+                existing.add(canonical)
+
+    _write_json(target_path, target)
+
+
+def unmerge_copilot_cli_hooks(target_path, source_path):
+    """Remove Snyk hooks from Copilot CLI's hooks.json. Idempotent.
+
+    Compares the ``bash`` field after canonicalizing home-dir variable
+    spellings ($HOME, ${HOME}, %USERPROFILE%, $env:USERPROFILE, and the
+    already-expanded absolute path), so entries written by any installer
+    version — or by hand — get removed regardless of which spelling they
+    used.
+    """
+    target = _load_json(target_path)
+    source = _load_json(source_path)
+    source_hooks = source.get("hooks", {})
+    if not source_hooks or "hooks" not in target:
+        return
+    _backup(target_path)
+    for event, entries in source_hooks.items():
+        if event not in target["hooks"]:
+            continue
+        remove_bash = _canonical_command_set(entries, field="bash")
+        target["hooks"][event] = [
+            e
+            for e in target["hooks"][event]
+            if _canonicalize_command(e.get("bash")) not in remove_bash
+        ]
+        if not target["hooks"][event]:
+            del target["hooks"][event]
+    _write_json(target_path, target)
+
+
+def verify_copilot_cli_hooks(target_path, source_path):
+    """Verify Snyk hooks from source exist in Copilot CLI's hooks.json.
+
+    Compares the ``bash`` field after canonicalizing home-dir variable
+    spellings, so a target hooks.json written with a different spelling
+    than the source still verifies as installed.
+    """
+    target = _load_json(target_path)
+    source = _load_json(source_path)
+    missing = []
+    target_hooks = target.get("hooks", {})
+    for event, entries in source.get("hooks", {}).items():
+        if event not in target_hooks:
+            missing.append(f"  event '{event}' not found in {target_path}")
+            continue
+        existing = _canonical_command_set(target_hooks[event], field="bash")
+        for entry in entries:
+            b = entry.get("bash", "")
+            if b and _canonicalize_command(b) not in existing:
+                missing.append(f"  hook bash command missing from '{event}': {b}")
+    if missing:
+        for m in missing:
+            print(m, file=sys.stderr)
+        sys.exit(1)
+
+
 STRATEGIES = {
     "merge_cursor_hooks": merge_cursor_hooks,
     "merge_claude_settings": merge_claude_settings,
     "merge_gemini_settings": merge_gemini_settings,
     "merge_mcp_servers": merge_mcp_servers,
     "merge_copilot_cli_mcp": merge_copilot_cli_mcp,
+    "merge_copilot_cli_hooks": merge_copilot_cli_hooks,
     "merge_vscode_mcp": merge_vscode_mcp,
     "merge_codex_config": merge_codex_config,
     "unmerge_cursor_hooks": unmerge_cursor_hooks,
@@ -987,6 +1135,7 @@ STRATEGIES = {
     "unmerge_gemini_settings": unmerge_gemini_settings,
     "unmerge_mcp_servers": unmerge_mcp_servers,
     "unmerge_copilot_cli_mcp": unmerge_copilot_cli_mcp,
+    "unmerge_copilot_cli_hooks": unmerge_copilot_cli_hooks,
     "unmerge_vscode_mcp": unmerge_vscode_mcp,
     "unmerge_codex_config": unmerge_codex_config,
     "verify_cursor_hooks": verify_cursor_hooks,
@@ -994,6 +1143,7 @@ STRATEGIES = {
     "verify_gemini_settings": verify_gemini_settings,
     "verify_mcp_servers": verify_mcp_servers,
     "verify_copilot_cli_mcp": verify_copilot_cli_mcp,
+    "verify_copilot_cli_hooks": verify_copilot_cli_hooks,
     "verify_vscode_mcp": verify_vscode_mcp,
     "verify_codex_config": verify_codex_config,
 }

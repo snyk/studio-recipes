@@ -19,16 +19,19 @@ from merge_json import (
     main,
     merge_claude_settings,
     merge_codex_config,
+    merge_copilot_cli_hooks,
     merge_cursor_hooks,
     merge_gemini_settings,
     merge_mcp_servers,
     unmerge_claude_settings,
     unmerge_codex_config,
+    unmerge_copilot_cli_hooks,
     unmerge_cursor_hooks,
     unmerge_gemini_settings,
     unmerge_mcp_servers,
     verify_claude_settings,
     verify_codex_config,
+    verify_copilot_cli_hooks,
     verify_cursor_hooks,
     verify_gemini_settings,
     verify_mcp_servers,
@@ -53,16 +56,18 @@ class TestExpandHookCommandPaths:
         assert out == {"cmd": 'uv run "/Users/test/.x/hook.py"'}
 
     def test_substitutes_powershell_userprofile(self):
+        # Backslash path continuation is rejoined with the platform separator
+        # (forward slashes on POSIX, where the tests run).
         out = expand_hook_command_paths(
             {"cmd": 'uv run "$env:USERPROFILE\\.x\\hook.py"'}, home=self.HOME
         )
-        assert out == {"cmd": 'uv run "/Users/test\\.x\\hook.py"'}
+        assert out == {"cmd": 'uv run "/Users/test/.x/hook.py"'}
 
     def test_substitutes_cmd_userprofile(self):
         out = expand_hook_command_paths(
             {"cmd": 'uv run "%USERPROFILE%\\.x\\hook.py"'}, home=self.HOME
         )
-        assert out == {"cmd": 'uv run "/Users/test\\.x\\hook.py"'}
+        assert out == {"cmd": 'uv run "/Users/test/.x/hook.py"'}
 
     def test_word_boundary_protects_lookalike(self):
         # $HOMEY should NOT be substituted because E\b doesn't match before Y.
@@ -100,13 +105,145 @@ class TestExpandHookCommandPaths:
 
     def test_case_insensitive_userprofile(self):
         out = expand_hook_command_paths({"cmd": "%userprofile%\\x"}, home=self.HOME)
-        assert out == {"cmd": "/Users/test\\x"}
+        assert out == {"cmd": "/Users/test/x"}
+
+    def test_path_continuation_uses_native_separator(self):
+        # $HOME/foo/bar.py: the continuation is consumed together with the
+        # token and rejoined via pathlib so the result has no mixed separators.
+        # On POSIX the joiner produces forward slashes throughout.
+        out = expand_hook_command_paths(
+            {"cmd": 'python3 "$HOME/.snyk/hook.py"'}, home="/Users/test"
+        )
+        assert out == {"cmd": 'python3 "/Users/test/.snyk/hook.py"'}
+
+    def test_path_continuation_normalizes_mixed_separators(self):
+        # Source string mixes / and \ in the continuation. Both are absorbed
+        # into Path components and rejoined with the native separator.
+        out = expand_hook_command_paths(
+            {"cmd": 'python3 "$HOME/.snyk\\hook.py"'}, home="/Users/test"
+        )
+        assert out == {"cmd": 'python3 "/Users/test/.snyk/hook.py"'}
+
+    def test_path_continuation_stops_at_quote(self):
+        # The optional continuation must not eat past a closing quote.
+        out = expand_hook_command_paths({"cmd": 'echo "$HOME/foo" bar'}, home="/Users/test")
+        assert out == {"cmd": 'echo "/Users/test/foo" bar'}
+
+    def test_path_continuation_stops_at_space(self):
+        # Bare (unquoted) token followed by whitespace: continuation ends at space.
+        out = expand_hook_command_paths({"cmd": "echo $HOME/foo bar"}, home="/Users/test")
+        assert out == {"cmd": "echo /Users/test/foo bar"}
+
+    def test_path_continuation_stops_at_shell_meta(self):
+        # Shell metas like '|' terminate the continuation.
+        out = expand_hook_command_paths({"cmd": "cat $HOME/foo|wc -l"}, home="/Users/test")
+        assert out == {"cmd": "cat /Users/test/foo|wc -l"}
+
+    def test_path_continuation_preserves_following_unbraced_shell_variable(self):
+        # $HOME/$HOOK_VAR/script.py: the continuation must NOT absorb the
+        # following shell variable as a path component. If it did, Path
+        # joining on Windows would yield C:\Users\me\$HOOK_VAR\script.py and
+        # the leading backslash would escape the $ in a POSIX shell — breaking
+        # variable expansion at runtime.
+        out = expand_hook_command_paths(
+            {"cmd": 'uv run "$HOME/$HOOK_VAR/script.py"'}, home="/Users/test"
+        )
+        assert out == {"cmd": 'uv run "/Users/test/$HOOK_VAR/script.py"'}
+
+    def test_path_continuation_preserves_following_braced_shell_variable(self):
+        # ${VAR} expansion: continuation must stop at the opening brace.
+        out = expand_hook_command_paths(
+            {"cmd": 'uv run "$HOME/${HOOK_VAR}/script.py"'}, home="/Users/test"
+        )
+        assert out == {"cmd": 'uv run "/Users/test/${HOOK_VAR}/script.py"'}
+
+    def test_path_continuation_stops_at_partial_segment_with_variable(self):
+        # $HOME/foo${VAR}/bar — only /foo is absorbed; the rest is left for
+        # the shell to expand. The slash before $ is preserved as forward slash.
+        out = expand_hook_command_paths({"cmd": 'uv run "$HOME/foo${VAR}/bar"'}, home="/Users/test")
+        assert out == {"cmd": 'uv run "/Users/test/foo${VAR}/bar"'}
+
+    def test_path_continuation_stops_at_backtick(self):
+        # Backtick starts a command substitution — must not be absorbed.
+        out = expand_hook_command_paths({"cmd": "echo $HOME/`date +%s`"}, home="/Users/test")
+        assert out == {"cmd": "echo /Users/test/`date +%s`"}
 
     def test_userprofile_not_substituted_when_embedded_in_word(self):
         # %USERPROFILE% embedded in surrounding identifier characters is not a
         # shell-variable reference (mirrors the \b protection on $HOME).
         out = expand_hook_command_paths({"cmd": "echo abc%USERPROFILE%def"}, home=self.HOME)
         assert out == {"cmd": "echo abc%USERPROFILE%def"}
+
+
+class TestCanonicalizeCommand:
+    """_canonicalize_command must collapse all spellings of the same hook to
+    a single comparison key. The four spellings the installer has produced or
+    encountered over time:
+      1. raw $HOME (or sibling token, before install-time expansion)
+      2. install-time expanded with mixed separators (legacy Windows bug)
+      3. install-time expanded with all-forward-slash separators
+      4. install-time expanded with all-native (backslash on Windows) separators
+
+    All four must map to the same key, or upgrade/uninstall will leave
+    duplicate or orphan entries on disk.
+    """
+
+    def test_all_separator_variants_collapse_to_same_key(self, monkeypatch):
+        # Simulate a Windows home — POSIX expanduser honors $HOME, so this
+        # lets the test exercise backslash handling without needing Windows.
+        monkeypatch.setenv("HOME", "C:\\Users\\me")
+        from merge_json import _canonicalize_command
+
+        raw_token = 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
+        mixed_sep = 'uv run "C:\\Users\\me/.cursor/hooks/snyk_secure_at_inception.py"'
+        forward_slash = 'uv run "C:/Users/me/.cursor/hooks/snyk_secure_at_inception.py"'
+        native_backslash = 'uv run "C:\\Users\\me\\.cursor\\hooks\\snyk_secure_at_inception.py"'
+
+        keys = {
+            _canonicalize_command(raw_token),
+            _canonicalize_command(mixed_sep),
+            _canonicalize_command(forward_slash),
+            _canonicalize_command(native_backslash),
+        }
+        assert len(keys) == 1, f"expected one key, got {keys}"
+
+    def test_cross_spelling_tokens_collapse_to_same_key(self, monkeypatch):
+        monkeypatch.setenv("HOME", "/Users/me")
+        from merge_json import _canonicalize_command
+
+        keys = {
+            _canonicalize_command('uv run "$HOME/x.py"'),
+            _canonicalize_command('uv run "${HOME}/x.py"'),
+            _canonicalize_command('uv run "/Users/me/x.py"'),
+        }
+        assert len(keys) == 1, f"expected one key, got {keys}"
+
+    def test_non_path_backslashes_outside_home_span_are_preserved(self, monkeypatch):
+        # Two commands that differ only by a non-path backslash (vs forward
+        # slash) in an argument must NOT collide on the canonical key. The
+        # fold is anchored at the home prefix so backslashes elsewhere (shell
+        # escapes, literal arguments, regex patterns) are untouched.
+        monkeypatch.setenv("HOME", "/Users/me")
+        from merge_json import _canonicalize_command
+
+        with_backslash = 'python3 "$HOME/foo.py" --pattern "a\\b"'
+        with_forward = 'python3 "$HOME/foo.py" --pattern "a/b"'
+        assert _canonicalize_command(with_backslash) != _canonicalize_command(with_forward)
+        # The backslash in the argument is preserved verbatim.
+        assert "a\\b" in _canonicalize_command(with_backslash)
+
+    def test_path_span_folds_while_arg_backslashes_preserved(self, monkeypatch):
+        # The path under home folds (\ -> /) but a backslash in a sibling
+        # argument is left alone. Two entries that differ only in path
+        # separator should match; the non-path arg differentiates other pairs.
+        monkeypatch.setenv("HOME", "C:\\Users\\me")
+        from merge_json import _canonicalize_command
+
+        raw = 'python3 "$HOME/foo/bar.py" --regex "x\\y"'
+        native = 'python3 "C:\\Users\\me\\foo\\bar.py" --regex "x\\y"'
+        assert _canonicalize_command(raw) == _canonicalize_command(native)
+        # The non-path backslash in --regex is NOT folded.
+        assert "x\\y" in _canonicalize_command(raw)
 
 
 class TestLoadJson:
@@ -393,6 +530,76 @@ class TestMergeCursorHooks:
         assert len(after_edit) == 1
         # Target should have migrated to the install-time-expanded form.
         assert after_edit[0]["command"] == expanded
+
+    def test_merge_dedupes_mixed_separator_legacy_entry(self, write_json, monkeypatch):
+        """Upgrade path: a Windows install of a previous installer version wrote
+        the home-expanded path with mixed separators (the $HOME token was
+        replaced literally so forward slashes from the source survived next to
+        the backslashes from the home prefix). The current installer writes
+        all-native-separator paths via Path. Merge must recognize the legacy
+        mixed-separator entry as the same hook and replace it — never append a
+        duplicate."""
+        # Simulate a Windows home so canonicalization anchors at the same
+        # prefix the test data uses. POSIX expanduser honors $HOME.
+        monkeypatch.setenv("HOME", "C:\\Users\\me")
+        # Mixed-separator legacy form (what a Windows install of the old
+        # installer produced).
+        legacy_mixed = 'uv run "C:\\Users\\me/.cursor/hooks/snyk_secure_at_inception.py"'
+        # Native-separator form (what a Windows install of the new installer
+        # produces). Constructed explicitly so the test does not depend on the
+        # platform running the test.
+        new_native = 'uv run "C:\\Users\\me\\.cursor\\hooks\\snyk_secure_at_inception.py"'
+        source = write_json(
+            "source/cursor_hooks.json",
+            {"version": 1, "hooks": {"afterFileEdit": [{"command": new_native}]}},
+        )
+        target = write_json(
+            "target.json",
+            {"version": 1, "hooks": {"afterFileEdit": [{"command": legacy_mixed}]}},
+        )
+        merge_cursor_hooks(target, source)
+        after_edit = read_json(target)["hooks"]["afterFileEdit"]
+        assert len(after_edit) == 1
+        assert after_edit[0]["command"] == new_native
+
+    def test_merge_dedupes_forward_slash_when_source_is_native(self, write_json, monkeypatch):
+        """Upgrade path variant: target carries an all-forward-slash expanded
+        path (e.g. a Windows install that always used '/' in the past), source
+        is the new all-backslash native form. Single entry after merge."""
+        monkeypatch.setenv("HOME", "C:\\Users\\me")
+        forward_slash = 'uv run "C:/Users/me/.cursor/hooks/snyk_secure_at_inception.py"'
+        new_native = 'uv run "C:\\Users\\me\\.cursor\\hooks\\snyk_secure_at_inception.py"'
+        source = write_json(
+            "source/cursor_hooks.json",
+            {"version": 1, "hooks": {"afterFileEdit": [{"command": new_native}]}},
+        )
+        target = write_json(
+            "target.json",
+            {"version": 1, "hooks": {"afterFileEdit": [{"command": forward_slash}]}},
+        )
+        merge_cursor_hooks(target, source)
+        after_edit = read_json(target)["hooks"]["afterFileEdit"]
+        assert len(after_edit) == 1
+        assert after_edit[0]["command"] == new_native
+
+    def test_merge_is_idempotent_for_native_separator_source(self, write_json, monkeypatch):
+        """Re-running merge with the same native-separator source must not
+        accumulate duplicate entries — the second pass must dedupe by canonical
+        comparison even though the on-disk form has backslashes."""
+        monkeypatch.setenv("HOME", "C:\\Users\\me")
+        new_native = 'uv run "C:\\Users\\me\\.cursor\\hooks\\snyk_secure_at_inception.py"'
+        source = write_json(
+            "source/cursor_hooks.json",
+            {"version": 1, "hooks": {"afterFileEdit": [{"command": new_native}]}},
+        )
+        target = write_json(
+            "target.json",
+            {"version": 1, "hooks": {"afterFileEdit": []}},
+        )
+        merge_cursor_hooks(target, source)
+        merge_cursor_hooks(target, source)
+        after_edit = read_json(target)["hooks"]["afterFileEdit"]
+        assert len(after_edit) == 1
 
     def test_merge_no_backup_for_new_target(self, empty_target, snyk_cursor_source):
         merge_cursor_hooks(empty_target, snyk_cursor_source)
@@ -691,6 +898,61 @@ class TestUnmergeCursorHooks:
         assert result["hooks"]["afterFileEdit"][0]["command"] == "eslint --fix"
         assert "stop" not in result["hooks"]
 
+    def test_removes_mixed_separator_legacy_entry(self, write_json, monkeypatch):
+        """Uninstall on Windows must clear out entries written by the legacy
+        installer with mixed separators (token replaced verbatim, slashes
+        from the source survived next to the home prefix's backslashes).
+        Canonicalization folds separators so the entry is recognized."""
+        monkeypatch.setenv("HOME", "C:\\Users\\me")
+        # Source ships the new all-native form (what the new installer would
+        # write after expansion via Path).
+        new_native = 'uv run "C:\\Users\\me\\.cursor\\hooks\\snyk_secure_at_inception.py"'
+        source = write_json(
+            "source/cursor_hooks.json",
+            {"version": 1, "hooks": {"afterFileEdit": [{"command": new_native}]}},
+        )
+        # Target was written by an older installer: mixed separators.
+        legacy_mixed = 'uv run "C:\\Users\\me/.cursor/hooks/snyk_secure_at_inception.py"'
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "afterFileEdit": [
+                        {"command": "eslint --fix"},
+                        {"command": legacy_mixed},
+                    ],
+                },
+            },
+        )
+        unmerge_cursor_hooks(target, source)
+        after_edit = read_json(target)["hooks"]["afterFileEdit"]
+        assert len(after_edit) == 1
+        assert after_edit[0]["command"] == "eslint --fix"
+
+    def test_removes_forward_slash_legacy_entry_when_source_is_native(
+        self, write_json, monkeypatch
+    ):
+        """Inverse direction: target carries a forward-slash form; source ships
+        the native-backslash form. Folding-on-compare matches both ways."""
+        monkeypatch.setenv("HOME", "C:\\Users\\me")
+        forward_slash = 'uv run "C:/Users/me/.cursor/hooks/snyk_secure_at_inception.py"'
+        new_native = 'uv run "C:\\Users\\me\\.cursor\\hooks\\snyk_secure_at_inception.py"'
+        source = write_json(
+            "source/cursor_hooks.json",
+            {"version": 1, "hooks": {"afterFileEdit": [{"command": new_native}]}},
+        )
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {"afterFileEdit": [{"command": forward_slash}]},
+            },
+        )
+        unmerge_cursor_hooks(target, source)
+        # Whole event array should be cleaned up since the only entry matched.
+        assert "afterFileEdit" not in read_json(target).get("hooks", {})
+
     def test_removes_cross_spelling_braced_vs_unbraced(self, write_json, tmp_path):
         # Source uses one spelling (e.g. ${HOME}); target was installed with
         # the other (e.g. $HOME). Normalize-on-compare must collapse both
@@ -939,6 +1201,46 @@ class TestUnmergeClaudeSettings:
         assert len(group["hooks"]) == 1
         assert group["hooks"][0]["command"] == "prettier --write"
         assert "Stop" not in result["hooks"]
+
+    def test_removes_mixed_separator_legacy_entry(self, write_json, monkeypatch):
+        """Uninstall on Windows must clean up legacy mixed-separator entries
+        (token replaced verbatim by an older installer)."""
+        monkeypatch.setenv("HOME", "C:\\Users\\me")
+        legacy_mixed = 'uv run "C:\\Users\\me/.claude/hooks/snyk_secure_at_inception.py"'
+        new_native = 'uv run "C:\\Users\\me\\.claude\\hooks\\snyk_secure_at_inception.py"'
+        source = write_json(
+            "source/claude_settings.json",
+            {
+                "hooks": {
+                    "PostToolUse": [
+                        {
+                            "matcher": "Edit|Write",
+                            "hooks": [{"type": "command", "command": new_native}],
+                        }
+                    ],
+                },
+            },
+        )
+        target = write_json(
+            "target.json",
+            {
+                "hooks": {
+                    "PostToolUse": [
+                        {
+                            "matcher": "Edit|Write",
+                            "hooks": [
+                                {"type": "command", "command": "prettier --write"},
+                                {"type": "command", "command": legacy_mixed},
+                            ],
+                        }
+                    ],
+                },
+            },
+        )
+        unmerge_claude_settings(target, source)
+        group = read_json(target)["hooks"]["PostToolUse"][0]
+        assert len(group["hooks"]) == 1
+        assert group["hooks"][0]["command"] == "prettier --write"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1570,3 +1872,271 @@ command = "echo wrong"
             verify_codex_config(target, snyk_codex_hooks_source)
         err = capsys.readouterr().err
         assert "snyk_secure_at_inception" in err
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Copilot CLI hooks strategies (hooks.json keyed by `bash`, not `command`)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+SNYK_COPILOT_BASH = 'uv run "$HOME/.copilot/hooks/snyk_secure_at_inception.py" agentStop'
+
+
+class TestMergeCopilotCliHooks:
+    def test_merge_into_empty_target(self, empty_target, snyk_copilot_source):
+        merge_copilot_cli_hooks(empty_target, snyk_copilot_source)
+        result = read_json(empty_target)
+        assert result["version"] == 1
+        assert len(result["hooks"]["sessionStart"]) == 1
+        assert len(result["hooks"]["postToolUse"]) == 1
+        assert len(result["hooks"]["agentStop"]) == 1
+
+    def test_merge_preserves_user_hooks(self, existing_copilot_target, snyk_copilot_source):
+        merge_copilot_cli_hooks(existing_copilot_target, snyk_copilot_source)
+        result = read_json(existing_copilot_target)
+        bashes = [e["bash"] for e in result["hooks"]["postToolUse"]]
+        assert "echo user-hook" in bashes
+        assert any("snyk_secure_at_inception" in b for b in bashes)
+
+    def test_merge_is_idempotent(self, empty_target, snyk_copilot_source):
+        merge_copilot_cli_hooks(empty_target, snyk_copilot_source)
+        merge_copilot_cli_hooks(empty_target, snyk_copilot_source)
+        result = read_json(empty_target)
+        for event in ("sessionStart", "postToolUse", "agentStop"):
+            assert len(result["hooks"][event]) == 1, event
+
+    def test_merge_dedupes_by_bash_field(self, write_json, snyk_copilot_source):
+        # Same bash string already present with extra fields — should not duplicate.
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "agentStop": [{"type": "command", "bash": SNYK_COPILOT_BASH, "timeoutSec": 999}]
+                },
+            },
+        )
+        merge_copilot_cli_hooks(target, snyk_copilot_source)
+        assert len(read_json(target)["hooks"]["agentStop"]) == 1
+
+    def test_merge_dedupes_across_home_var_spellings(self, write_json, snyk_copilot_source):
+        # Source uses $HOME; target was previously written with %USERPROFILE%
+        # (or an expanded absolute path). After canonicalization both refer
+        # to the same hook, so merge must not double-register.
+        home = os.path.expanduser("~")
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "sessionStart": [
+                        {
+                            "type": "command",
+                            "bash": (
+                                'uv run "%USERPROFILE%/.copilot/hooks/'
+                                'snyk_secure_at_inception.py" sessionStart'
+                            ),
+                        }
+                    ],
+                    "postToolUse": [
+                        {
+                            "type": "command",
+                            "bash": (
+                                f'uv run "{home}/.copilot/hooks/'
+                                'snyk_secure_at_inception.py" postToolUse'
+                            ),
+                        }
+                    ],
+                },
+            },
+        )
+        merge_copilot_cli_hooks(target, snyk_copilot_source)
+        result = read_json(target)
+        # Each event still has exactly one entry — the existing stale-spelling
+        # one is preserved, no duplicate is appended.
+        assert len(result["hooks"]["sessionStart"]) == 1
+        assert len(result["hooks"]["postToolUse"]) == 1
+
+    def test_merge_creates_backup(self, existing_copilot_target, snyk_copilot_source):
+        merge_copilot_cli_hooks(existing_copilot_target, snyk_copilot_source)
+        assert os.path.isfile(existing_copilot_target + ".bak")
+
+    def test_merge_no_backup_for_new_target(self, empty_target, snyk_copilot_source):
+        merge_copilot_cli_hooks(empty_target, snyk_copilot_source)
+        assert not os.path.isfile(empty_target + ".bak")
+
+    def test_merge_fails_on_invalid_json(self, tmp_path, snyk_copilot_source):
+        target = tmp_path / "target.json"
+        target.write_text("{ invalid }")
+        with pytest.raises(ValueError, match="Invalid JSON in file"):
+            merge_copilot_cli_hooks(str(target), snyk_copilot_source)
+
+
+class TestUnmergeCopilotCliHooks:
+    def test_removes_snyk_entries(self, write_json, snyk_copilot_source):
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "postToolUse": [
+                        {"type": "command", "bash": "echo user-hook"},
+                        {
+                            "type": "command",
+                            "bash": (
+                                'uv run "$HOME/.copilot/hooks/snyk_secure_at_inception.py" '
+                                "postToolUse"
+                            ),
+                        },
+                    ],
+                    "agentStop": [{"type": "command", "bash": SNYK_COPILOT_BASH}],
+                },
+            },
+        )
+        unmerge_copilot_cli_hooks(target, snyk_copilot_source)
+        result = read_json(target)
+        assert len(result["hooks"]["postToolUse"]) == 1
+        assert result["hooks"]["postToolUse"][0]["bash"] == "echo user-hook"
+        assert "agentStop" not in result["hooks"]
+
+    def test_unmerge_is_idempotent(self, write_json, snyk_copilot_source):
+        target = write_json("target.json", {"version": 1, "hooks": {}})
+        unmerge_copilot_cli_hooks(target, snyk_copilot_source)
+        unmerge_copilot_cli_hooks(target, snyk_copilot_source)
+        assert read_json(target) == {"version": 1, "hooks": {}}
+
+    def test_noop_missing_target(self, tmp_path, snyk_copilot_source):
+        target = str(tmp_path / "nope.json")
+        unmerge_copilot_cli_hooks(target, snyk_copilot_source)
+        assert not os.path.exists(target)
+
+    def test_removes_cross_spelling_userprofile(self, write_json, snyk_copilot_source):
+        # Source uses $HOME; target was installed with %USERPROFILE% (e.g. a
+        # prior Windows install). Normalize-on-compare must collapse both to
+        # the same canonical form so the stale entry is removed.
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "agentStop": [
+                        {"type": "command", "bash": "echo user-hook"},
+                        {
+                            "type": "command",
+                            "bash": (
+                                'uv run "%USERPROFILE%/.copilot/hooks/'
+                                'snyk_secure_at_inception.py" agentStop'
+                            ),
+                        },
+                    ],
+                },
+            },
+        )
+        unmerge_copilot_cli_hooks(target, snyk_copilot_source)
+        result = read_json(target)
+        assert len(result["hooks"]["agentStop"]) == 1
+        assert result["hooks"]["agentStop"][0]["bash"] == "echo user-hook"
+
+    def test_removes_absolute_path_written_by_newer_installer(
+        self, write_json, snyk_copilot_source
+    ):
+        # Newer installer expands $HOME to an absolute path at install time.
+        # An old uninstaller (source still uses $HOME) must still remove it.
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "agentStop": [
+                        {
+                            "type": "command",
+                            "bash": (
+                                f'uv run "{os.path.expanduser("~")}/.copilot/hooks/'
+                                'snyk_secure_at_inception.py" agentStop'
+                            ),
+                        },
+                    ],
+                },
+            },
+        )
+        unmerge_copilot_cli_hooks(target, snyk_copilot_source)
+        result = read_json(target)
+        assert "agentStop" not in result["hooks"]
+
+
+class TestVerifyCopilotCliHooks:
+    def test_passes_after_merge(self, empty_target, snyk_copilot_source):
+        merge_copilot_cli_hooks(empty_target, snyk_copilot_source)
+        verify_copilot_cli_hooks(empty_target, snyk_copilot_source)
+
+    def test_fails_when_event_missing(self, write_json, snyk_copilot_source):
+        target = write_json("target.json", {"version": 1, "hooks": {}})
+        with pytest.raises(SystemExit) as exc_info:
+            verify_copilot_cli_hooks(target, snyk_copilot_source)
+        assert exc_info.value.code == 1
+
+    def test_fails_when_bash_entry_missing(self, write_json, snyk_copilot_source, capsys):
+        # Has the events but with foreign bash commands only.
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "sessionStart": [{"type": "command", "bash": "echo other"}],
+                    "postToolUse": [{"type": "command", "bash": "echo other"}],
+                    "agentStop": [{"type": "command", "bash": "echo other"}],
+                },
+            },
+        )
+        with pytest.raises(SystemExit):
+            verify_copilot_cli_hooks(target, snyk_copilot_source)
+        err = capsys.readouterr().err
+        assert "snyk_secure_at_inception" in err
+
+    def test_strategies_registered(self):
+        assert "merge_copilot_cli_hooks" in STRATEGIES
+        assert "unmerge_copilot_cli_hooks" in STRATEGIES
+        assert "verify_copilot_cli_hooks" in STRATEGIES
+
+    def test_passes_when_target_uses_different_home_spelling(self, write_json, snyk_copilot_source):
+        # Source ships with $HOME, target was installed by a newer installer
+        # that expanded $HOME to the absolute path. verify must canonicalize
+        # both sides and report no missing hooks.
+        home = os.path.expanduser("~")
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "sessionStart": [
+                        {
+                            "type": "command",
+                            "bash": (
+                                f'uv run "{home}/.copilot/hooks/'
+                                'snyk_secure_at_inception.py" sessionStart'
+                            ),
+                        }
+                    ],
+                    "postToolUse": [
+                        {
+                            "type": "command",
+                            "bash": (
+                                f'uv run "{home}/.copilot/hooks/'
+                                'snyk_secure_at_inception.py" postToolUse'
+                            ),
+                        }
+                    ],
+                    "agentStop": [
+                        {
+                            "type": "command",
+                            "bash": (
+                                f'uv run "{home}/.copilot/hooks/'
+                                'snyk_secure_at_inception.py" agentStop'
+                            ),
+                        }
+                    ],
+                },
+            },
+        )
+        # Should not raise SystemExit
+        verify_copilot_cli_hooks(target, snyk_copilot_source)

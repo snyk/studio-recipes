@@ -1055,7 +1055,7 @@ class TestLifecycle:
                 assert installer.verify_recipe(recipe_id, ade, manifest, payload)
 
         # Uninstall
-        installer.uninstall(ades, manifest, payload, dry_run=False)
+        installer.uninstall(ades, manifest, payload, workspace=None, dry_run=False)
 
         # Verify files removed
         assert not (fake_home / ".claude" / "hooks" / "snyk_secure_at_inception.py").exists()
@@ -1086,7 +1086,7 @@ class TestLifecycle:
             for recipe_id in recipes:
                 assert installer.verify_recipe(recipe_id, ade, manifest, payload)
 
-        installer.uninstall(ades, manifest, payload, dry_run=False)
+        installer.uninstall(ades, manifest, payload, workspace=None, dry_run=False)
 
         assert not (fake_home / ".gemini" / "hooks" / "snyk_secure_at_inception.py").exists()
         assert not (fake_home / ".gemini" / "commands" / "snyk-fix.md").exists()
@@ -1125,7 +1125,7 @@ class TestLifecycle:
                 # verify_recipe will return True for sai-hooks-async because it has no sources for kiro
                 assert installer.verify_recipe(recipe_id, ade, manifest, payload)
 
-        installer.uninstall(ades, manifest, payload, dry_run=False)
+        installer.uninstall(ades, manifest, payload, workspace=None, dry_run=False)
 
         assert not (fake_home / ".kiro" / "steering" / "snyk-fix.md").exists()
 
@@ -1173,7 +1173,7 @@ class TestLifecycle:
             assert installer.verify_recipe(recipe_id, "codex", manifest, payload)
 
         # Uninstall removes our entries; user content (none here) is preserved
-        installer.uninstall(["codex"], manifest, payload, dry_run=False)
+        installer.uninstall(["codex"], manifest, payload, workspace=None, dry_run=False)
         assert not (tmp_path / ".codex" / "hooks" / "snyk_secure_at_inception.py").exists()
         # config.toml itself is removed when only Snyk content was present
         assert not (tmp_path / ".codex" / "config.toml").exists()
@@ -1191,12 +1191,47 @@ class TestLifecycle:
             tmp_path / ".copilot" / "skills" / "secure-dependency-health-check" / "SKILL.md"
         ).exists()
         assert (tmp_path / ".copilot" / "skills" / "snyk-fix" / "SKILL.md").exists()
+        # sai-hooks-async should drop scripts and merge ~/.copilot/hooks.json
+        assert (tmp_path / ".copilot" / "hooks" / "snyk_secure_at_inception.py").exists()
+        assert (tmp_path / ".copilot" / "hooks" / "lib" / "scan_runner.py").exists()
+        hooks_cfg = json.loads((tmp_path / ".copilot" / "hooks.json").read_text())
+        for event in ("sessionStart", "postToolUse", "agentStop"):
+            assert any(
+                "snyk_secure_at_inception" in e.get("bash", "") for e in hooks_cfg["hooks"][event]
+            ), event
 
         for recipe_id in recipes:
             assert installer.verify_recipe(recipe_id, "copilot-cli", manifest, payload)
 
-        installer.uninstall(["copilot-cli"], manifest, payload, dry_run=False)
+        installer.uninstall(["copilot-cli"], manifest, payload, workspace=None, dry_run=False)
         assert not (tmp_path / ".copilot" / "skills" / "snyk-fix" / "SKILL.md").exists()
+        assert not (tmp_path / ".copilot" / "hooks" / "snyk_secure_at_inception.py").exists()
+
+    def test_copilot_vscode_sai_installs_under_dot_copilot(
+        self, tmp_path, payload, manifest, monkeypatch
+    ):
+        """copilot-vscode SAI files must land in ~/.copilot/hooks/ (shared with the
+        CLI), not in the VS Code user-data dir — that's what resolve_ade_path's
+        special case enables."""
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        # Point the VS Code user dir somewhere distinct from $HOME so we can
+        # tell whether the SAI files leaked there.
+        vscode_user = tmp_path / "vscode-userdata" / "Code"
+        monkeypatch.setattr(installer, "_vscode_user_dir", lambda: vscode_user)
+
+        installer.install_recipe(
+            "sai-hooks-async", "copilot-vscode", manifest, payload, dry_run=False
+        )
+
+        # SAI hooks live under $HOME/.copilot/, not under the VS Code user dir.
+        assert (tmp_path / ".copilot" / "hooks" / "snyk_secure_at_inception.py").exists()
+        assert (tmp_path / ".copilot" / "hooks.json").exists()
+        assert not (vscode_user / "User" / ".copilot").exists()
+
+        assert installer.verify_recipe("sai-hooks-async", "copilot-vscode", manifest, payload)
+
+        installer.uninstall(["copilot-vscode"], manifest, payload, workspace=None, dry_run=False)
+        assert not (tmp_path / ".copilot" / "hooks" / "snyk_secure_at_inception.py").exists()
 
     def test_install_verify_uninstall_windsurf(self, tmp_path, payload, manifest, monkeypatch):
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
@@ -1225,7 +1260,7 @@ class TestLifecycle:
         for recipe_id in recipes:
             assert installer.verify_recipe(recipe_id, "windsurf", manifest, payload)
 
-        installer.uninstall(["windsurf"], manifest, payload, dry_run=False)
+        installer.uninstall(["windsurf"], manifest, payload, workspace=None, dry_run=False)
 
         assert not (
             tmp_path / ".codeium" / "windsurf" / "global_workflows" / "snyk-fix.md"
@@ -1233,6 +1268,51 @@ class TestLifecycle:
         assert "Snyk" not in json.loads(mcp_config.read_text()).get("mcpServers", {}), (
             "unmerge_mcp_servers should remove the Snyk MCP server from mcp_config.json"
         )
+
+
+# ===========================================================================
+# TestResolveAdePath
+# ===========================================================================
+
+
+class TestResolveAdePath:
+    def test_home_based_ade(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        assert installer.resolve_ade_path("claude", ".claude/hooks/x.py") == (
+            tmp_path / ".claude/hooks/x.py"
+        )
+
+    def test_copilot_vscode_non_copilot_path_uses_vscode_user_dir(self, tmp_path, monkeypatch):
+        vscode_user = tmp_path / "vscode-userdata" / "Code"
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr(installer, "_vscode_user_dir", lambda: vscode_user)
+        # Non-.copilot dest resolves under the VS Code user-data dir (User subdir).
+        assert installer.resolve_ade_path("copilot-vscode", "prompts/snyk-fix.prompt.md") == (
+            vscode_user / "User" / "prompts" / "snyk-fix.prompt.md"
+        )
+
+    def test_copilot_vscode_dot_copilot_path_uses_home(self, tmp_path, monkeypatch):
+        vscode_user = tmp_path / "vscode-userdata" / "Code"
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr(installer, "_vscode_user_dir", lambda: vscode_user)
+        # .copilot/... dest is special-cased to resolve under $HOME so SAI files
+        # land where Copilot CLI also reads them from.
+        assert installer.resolve_ade_path(
+            "copilot-vscode", ".copilot/hooks/snyk_secure_at_inception.py"
+        ) == (tmp_path / ".copilot" / "hooks" / "snyk_secure_at_inception.py")
+        assert installer.resolve_ade_path("copilot-vscode", ".copilot/hooks.json") == (
+            tmp_path / ".copilot" / "hooks.json"
+        )
+
+    def test_copilot_vscode_lookalike_prefix_not_matched(self, tmp_path, monkeypatch):
+        """A dest that merely starts with the literal string `.copilot` (e.g.
+        `.copilot-other/...`) should NOT trigger the special case."""
+        vscode_user = tmp_path / "vscode-userdata" / "Code"
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr(installer, "_vscode_user_dir", lambda: vscode_user)
+        result = installer.resolve_ade_path("copilot-vscode", ".copilot-other/x.json")
+        # Should resolve under the VS Code user dir, not $HOME
+        assert result == vscode_user / "User" / ".copilot-other" / "x.json"
 
 
 # ===========================================================================

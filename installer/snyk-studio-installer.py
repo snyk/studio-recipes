@@ -11,8 +11,10 @@ Usage:
     python snyk-studio-installer.py [options]
 
 Options:
-    --profile <name>                           Installation profile (default, minimal)
+    --profile <name>                           Installation profile (default, minimal, experimental)
     --ade <cursor|claude|gemini|windsurf|kiro> Target specific ADE (auto-detect if omitted)
+    --workspace <path>                         Workspace root for workspace-scoped recipes
+                                               (defaults to the enclosing git repo; skipped if neither)
     --dry-run                                  Show what would be installed without making changes
     --uninstall                                Remove Snyk recipes from detected ADEs
     --verify                                   Verify installed files and merged configs match manifest
@@ -33,7 +35,7 @@ import sys
 import tempfile
 from pathlib import Path
 from subprocess import run
-from typing import Any, Dict, Iterator, List, Optional, cast
+from typing import Any, Dict, Iterator, List, Optional, Tuple, cast
 
 # When set (by generated install.sh / install.ps1 / install.py), manifest and recipe sources
 # live under this directory (flat layout from the release zip).
@@ -143,6 +145,16 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--list", action="store_true", dest="list_mode", help="List available recipes and profiles"
     )
     parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompts")
+    parser.add_argument(
+        "--workspace",
+        default=None,
+        help=(
+            "Workspace root for workspace-scoped recipes (e.g. sac-hooks). "
+            "If omitted, the installer walks up from the current directory looking "
+            "for a git repository; if none is found, workspace-scoped recipes are "
+            "skipped."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -227,13 +239,65 @@ class Manifest:
         all_ids = list(self.recipes.keys())
 
         active = set(all_ids) if "*" in profile_recipes else set(profile_recipes)
-        return [r for r in all_ids if r in active and self.recipes[r].get("enabled", True)]
+        active = {r for r in active if self.recipes[r].get("enabled", True)}
+
+        # Honour each enabled recipe's `conflicts_with` list. Iterating in
+        # manifest declaration order (rather than set iteration order, which
+        # is non-deterministic) makes conflict resolution stable: when a
+        # later-declared recipe lists an earlier-declared one as a conflict,
+        # the later recipe wins. This lets a profile add an override recipe
+        # by simply declaring it after the one it replaces.
+        for rid in all_ids:
+            if rid not in active:
+                continue
+            for conflict in self.recipes.get(rid, {}).get("conflicts_with", []):
+                if conflict in active:
+                    print(f"  {C.yellow('NOTE')} skipping {conflict}: incompatible with {rid}")
+                active.discard(conflict)
+
+        return [r for r in all_ids if r in active]
+
+    def is_workspace_scoped(self, recipe_id: str) -> bool:
+        return bool(self.recipes.get(recipe_id, {}).get("scope") == "workspace")
 
     def get_sources(self, recipe_id: str, ade: str) -> Dict[str, Any]:
         return cast(Dict[str, Any], self.recipes.get(recipe_id, {}).get("sources", {}).get(ade, {}))
 
     def all_recipe_ids(self) -> List[str]:
         return list(self.recipes.keys())
+
+    def detect_stale_conflicts(self, active_recipes: List[str]) -> List[Tuple[str, str, str]]:
+        """Return ``(active, conflicted, ade)`` triples for stale on-disk installs.
+
+        ``conflicts_with`` is normally a build-time concern: it just keeps a
+        profile from listing two incompatible recipes at once. But if a user
+        previously installed the conflicted recipe (e.g. via
+        ``--profile default`` installing ``sai-hooks-async``) and then runs
+        the experimental profile (which installs ``sac-hooks`` declaring a
+        conflict with SAI), the old files stay on disk and double-fire
+        alongside the new install. This walks every ADE the conflicted
+        recipe ships sources for and reports the ones whose first file is
+        actually present, so the installer can surface a warning + offer to
+        clean up before the new install proceeds.
+        """
+        stale: List[Tuple[str, str, str]] = []
+        for active_rid in active_recipes:
+            conflicts = self.recipes.get(active_rid, {}).get("conflicts_with", [])
+            for conflicted_rid in conflicts:
+                # Workspace-scoped conflicted recipes would need a different
+                # path resolver; today the only declared conflict is sac
+                # against sai (ADE-scoped) so we only handle that case.
+                if self.is_workspace_scoped(conflicted_rid):
+                    continue
+                # Check every ADE the conflicted recipe ships sources for —
+                # SAI installed across several ADEs needs to be surfaced on
+                # each one so a user with multi-ADE installs sees the full
+                # cleanup picture, not just the first match.
+                for ade in self.recipes.get(conflicted_rid, {}).get("sources", {}):
+                    files = self.get_sources(conflicted_rid, ade).get("files", [])
+                    if any(resolve_ade_path(ade, f["dest"]).exists() for f in files):
+                        stale.append((active_rid, conflicted_rid, ade))
+        return stale
 
     def list_recipes(self) -> None:
         print("  Available Recipes:")
@@ -824,8 +888,118 @@ def _safe_conflict_path(ade: str, entry: Dict[str, Any]) -> Optional[Path]:
     return candidate
 
 
+def find_git_root(start: Path) -> Optional[Path]:
+    """Walk up from *start* looking for a ``.git`` entry (dir or worktree file).
+
+    Returns the first ancestor that contains ``.git``, or None when none does.
+    """
+    try:
+        cur = start.resolve()
+    except OSError:
+        return None
+    for parent in [cur, *cur.parents]:
+        if (parent / ".git").exists():
+            return parent
+    return None
+
+
+def resolve_workspace(workspace_arg: Optional[str]) -> Optional[Path]:
+    """Resolve the workspace root used for workspace-scoped recipes.
+
+    Priority:
+      1. ``--workspace <path>`` if supplied — must exist and be a directory.
+      2. Otherwise the enclosing git repo (walked up from cwd).
+      3. Otherwise None, meaning workspace-scoped recipes get skipped.
+
+    Exits with a clear error when ``--workspace`` is supplied but invalid;
+    falling back silently in that case would install into the wrong place.
+    """
+    if workspace_arg:
+        path = Path(workspace_arg).expanduser()
+        if not path.exists():
+            print(
+                f"  {C.red('ERROR')} --workspace path does not exist: {path}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if not path.is_dir():
+            print(
+                f"  {C.red('ERROR')} --workspace path is not a directory: {path}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        return path.resolve()
+
+    return find_git_root(Path.cwd())
+
+
+def resolve_install_path(workspace: Path, dest: str) -> Path:
+    """Resolve a manifest ``dest`` path under *workspace* with a containment check.
+
+    The dest comes from a trusted manifest entry, but we still verify the
+    composed path stays inside the resolved workspace root before returning
+    it. That serves two purposes:
+      1. defends against accidental escape via odd manifest entries (e.g. a
+         dest starting with ``../``)
+      2. acts as an explicit sanitizer for static analysis — *workspace* may
+         have arrived via ``--workspace`` (CLI input), and the
+         ``relative_to`` check launders the taint for downstream file ops.
+    """
+    rel = Path(dest)
+    if rel.is_absolute():
+        print(
+            f"  {C.red('ERROR')} manifest dest must be workspace-relative: {dest!r}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    base = workspace.resolve()
+    candidate = (base / rel).resolve()
+    try:
+        candidate.relative_to(base)
+    except ValueError:
+        print(
+            f"  {C.red('ERROR')} manifest dest escapes workspace: {dest!r}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return candidate
+
+
+def _display_path(p: Path, workspace: Path) -> str:
+    """Render *p* relative to *workspace* when *p* lives inside, else absolute.
+
+    Keeps post-install verification output compact for the entries that
+    actually belong to the workspace.
+    """
+    try:
+        return str(p.resolve().relative_to(workspace.resolve()))
+    except (OSError, ValueError):
+        return str(p)
+
+
+def expand_install_tokens(s: str, workspace: Path) -> str:
+    """Replace ``$WORKSPACE`` with the absolute workspace path.
+
+    Used when materialising a ``pre_commit_integration.command`` string so the
+    shim doesn't depend on shell variable expansion at git-hook time. The SAC
+    recipe doesn't use ``$WORKSPACE`` (its command is workspace-relative so
+    the resulting `.pre-commit-config.yaml` / `.husky/pre-commit` stays
+    portable when committed), but the helper is kept for any future recipe
+    that needs an absolute path baked in.
+    """
+    return s.replace("$WORKSPACE", str(workspace.resolve()))
+
+
 def resolve_ade_path(ade: str, dest: str) -> Path:
-    """Resolve a manifest dest path under the appropriate home dir for the given ADE."""
+    """Resolve a manifest dest path under the appropriate home dir for the given ADE.
+
+    Special case: copilot-vscode dests that target `.copilot/...` resolve under
+    `$HOME`, not the VS Code user-data dir. Both Copilot surfaces share
+    `~/.copilot/hooks/` for SAI hook files, so the copilot-vscode SAI recipe
+    points at the same paths as copilot-cli."""
+    if ade == "copilot-vscode" and (dest == ".copilot" or dest.startswith(".copilot/")):
+        return Path.home() / dest
     base = get_ade_home(ade) if ade == "copilot-vscode" else Path.home()
     return base / dest
 
@@ -1150,6 +1324,171 @@ def chmod_python_files(ade_home: Path, dry_run: bool) -> None:
 # =============================================================================
 
 
+def _load_git_hooks(payload: PayloadContext) -> Any:
+    """Import the installer's ``git_hooks`` module from the payload ``lib/``."""
+    lib_dir = str(payload.payload_dir / "lib")
+    if lib_dir not in sys.path:
+        sys.path.insert(0, lib_dir)
+    import git_hooks
+
+    return git_hooks
+
+
+def install_workspace_recipe(
+    recipe_id: str,
+    manifest: Manifest,
+    payload: PayloadContext,
+    workspace: Path,
+    dry_run: bool,
+) -> None:
+    """Install a recipe whose sources live under the synthetic ``workspace`` key.
+
+    Files are copied relative to *workspace* and any ``pre_commit_integration``
+    block is wired up via the detected hook manager (pre-commit framework,
+    Husky, or git native).
+    """
+    sources = manifest.recipes.get(recipe_id, {}).get("sources", {}).get("workspace", {})
+    if not sources:
+        return
+
+    print(f"  {C.bold(f'[workspace] {recipe_id}')} -> {workspace}/")
+
+    for f in sources.get("files", []):
+        src = payload.resolve_src(f["src"])
+        dest = resolve_install_path(workspace, f["dest"])
+        copy_file(src, dest, dry_run)
+
+    for t in sources.get("transforms", []):
+        src = payload.resolve_src(t["src"])
+        dest = resolve_install_path(workspace, t["dest"])
+        apply_transform(t["type"], src, dest, payload, dry_run)
+
+    pci = sources.get("pre_commit_integration")
+    if pci:
+        command = expand_install_tokens(pci["command"], workspace)
+        tag = pci.get("tag", "snyk-secure-at-commit")
+        if dry_run:
+            print(f"    {C.dim(f'[dry-run] pre-commit integrate ({tag}): {command}')}")
+        else:
+            git_hooks = _load_git_hooks(payload)
+            spec = git_hooks.HookSpec(tag=tag, command=command)
+            try:
+                manager, installed, path = git_hooks.install_hook(workspace, spec)
+            except FileNotFoundError as e:
+                print(f"    {C.red('ERROR')} pre-commit integration skipped: {e}")
+            else:
+                label = f"{manager} -> {path}"
+                if installed:
+                    print(f"    {C.green('hook installed')} {label}")
+                else:
+                    print(f"    {C.dim('hook unchanged: ' + label)}")
+
+    # chmod +x on Python files (covers both workspace-local and user-data dests)
+    for f in sources.get("files", []):
+        dest = resolve_install_path(workspace, f["dest"])
+        if dest.suffix == ".py" and dest.exists() and sys.platform != "win32" and not dry_run:
+            try:
+                dest.chmod(0o755)
+            except OSError:
+                pass
+
+
+def verify_workspace_recipe(
+    recipe_id: str,
+    manifest: Manifest,
+    payload: PayloadContext,
+    workspace: Path,
+) -> bool:
+    sources = manifest.recipes.get(recipe_id, {}).get("sources", {}).get("workspace", {})
+    if not sources:
+        return True
+
+    print(f"  {C.bold(f'[workspace] {recipe_id}')}")
+    ok = True
+
+    for f in sources.get("files", []):
+        dest = resolve_install_path(workspace, f["dest"])
+        label = _display_path(dest, workspace)
+        if dest.exists():
+            print(f"    {C.green('OK')} {label}")
+        else:
+            print(f"    {C.red('MISSING')} {label}")
+            ok = False
+
+    pci = sources.get("pre_commit_integration")
+    if pci:
+        git_hooks = _load_git_hooks(payload)
+        command = expand_install_tokens(pci["command"], workspace)
+        spec = git_hooks.HookSpec(tag=pci.get("tag", "snyk-secure-at-commit"), command=command)
+        manager, found, path = git_hooks.verify_hook(workspace, spec)
+        if found:
+            shim_label = _display_path(Path(path), workspace)
+            print(f"    {C.green('OK')} pre-commit shim present ({manager}: {shim_label})")
+        else:
+            print(f"    {C.red('MISSING')} pre-commit shim ({manager})")
+            ok = False
+    return ok
+
+
+def uninstall_workspace_recipe(
+    recipe_id: str,
+    manifest: Manifest,
+    payload: PayloadContext,
+    workspace: Path,
+    dry_run: bool,
+) -> None:
+    """Uninstall a workspace-scoped recipe symmetrically.
+
+    Removes the pre-commit integration plus every workspace-local file the
+    recipe installed, then cleans up `__pycache__` directories and empty
+    parents under each top-level install root.
+    """
+    sources = manifest.recipes.get(recipe_id, {}).get("sources", {}).get("workspace", {})
+    if not sources:
+        return
+
+    print(f"  {C.bold(f'[workspace] {recipe_id}')}")
+
+    pci = sources.get("pre_commit_integration")
+    if pci:
+        tag = pci.get("tag", "snyk-secure-at-commit")
+        if dry_run:
+            print(f"    {C.dim(f'[dry-run] pre-commit unintegrate ({tag})')}")
+        else:
+            git_hooks = _load_git_hooks(payload)
+            command = expand_install_tokens(pci["command"], workspace)
+            spec = git_hooks.HookSpec(tag=tag, command=command)
+            manager, removed, path = git_hooks.uninstall_hook(workspace, spec)
+            if removed:
+                print(f"    {C.green('hook removed:')} {manager} -> {path}")
+
+    files = sources.get("files", [])
+    transforms = sources.get("transforms", [])
+
+    for f in files:
+        remove_file(resolve_install_path(workspace, f["dest"]), dry_run)
+    for t in transforms:
+        remove_file(resolve_install_path(workspace, t["dest"]), dry_run)
+
+    # Remove pycache + empty parents under each top-level install root within
+    # the workspace.
+    install_roots = set()
+    for f in files:
+        dest = resolve_install_path(workspace, f["dest"])
+        try:
+            rel = dest.relative_to(workspace.resolve())
+        except ValueError:
+            continue
+        if rel.parts:
+            install_roots.add(workspace / rel.parts[0])
+    for root in install_roots:
+        if root.is_dir():
+            remove_pycache_under(root, dry_run)
+    for f in files:
+        dest = resolve_install_path(workspace, f["dest"])
+        remove_empty_parents(dest.parent, workspace, dry_run)
+
+
 def install_recipe(
     recipe_id: str, ade: str, manifest: Manifest, payload: PayloadContext, dry_run: bool
 ) -> None:
@@ -1245,7 +1584,74 @@ def verify_recipe(recipe_id: str, ade: str, manifest: Manifest, payload: Payload
     return ok
 
 
-def uninstall(ades: List[str], manifest: Manifest, payload: PayloadContext, dry_run: bool) -> None:
+def uninstall_ade_recipe(
+    recipe_id: str,
+    ade: str,
+    manifest: Manifest,
+    payload: PayloadContext,
+    dry_run: bool,
+) -> None:
+    """Uninstall a single ADE-scoped recipe for a single ADE.
+
+    Extracted from ``uninstall()`` so a stale-conflict cleanup step (the
+    fix for the "dirty install" PR feedback) can target a single
+    ``(recipe, ADE)`` pair without sweeping the full ADE list. Skips
+    workspace-scoped recipes — those need ``uninstall_workspace_recipe``.
+    """
+    sources = manifest.get_sources(recipe_id, ade)
+    if not sources:
+        return
+
+    ade_home = get_ade_home(ade)
+    print(f"  {C.bold(f'[{ade}] {recipe_id}')}")
+
+    for f in sources.get("files", []):
+        remove_file(resolve_ade_path(ade, f["dest"]), dry_run)
+
+    for t in sources.get("transforms", []):
+        remove_file(resolve_ade_path(ade, t["dest"]), dry_run)
+
+    hooks_dir = ade_home / "hooks"
+    if hooks_dir.is_dir():
+        remove_pycache_under(hooks_dir, dry_run)
+        lib_dir = hooks_dir / "lib"
+        if lib_dir.is_dir():
+            remove_pycache_under(lib_dir, dry_run)
+
+    for f in sources.get("files", []):
+        dest = resolve_ade_path(ade, f["dest"])
+        remove_empty_parents(dest.parent, ade_home, dry_run)
+    for t in sources.get("transforms", []):
+        dest = resolve_ade_path(ade, t["dest"])
+        remove_empty_parents(dest.parent, ade_home, dry_run)
+
+    cm = sources.get("config_merge")
+    if cm:
+        strategy = cm["strategy"].replace("merge_", "unmerge_", 1)
+        target = resolve_ade_path(ade, cm["target"])
+        if dry_run:
+            print(f"    {C.dim(f'[dry-run] unmerge ({strategy}): {target}')}")
+        else:
+            with _expand_source(  # nosec B324 — manifest-supplied source path validated by payload.resolve_src
+                strategy, payload.resolve_src(cm["source"])
+            ) as resolved_path:
+                merge_lib_dir = str(payload.payload_dir / "lib")
+                if merge_lib_dir not in sys.path:
+                    sys.path.insert(0, merge_lib_dir)
+                import merge_json
+
+                if strategy in merge_json.STRATEGIES:
+                    merge_json.STRATEGIES[strategy](str(target), str(resolved_path))
+                    print(f"    {C.green('unmerged:')} {target}")
+
+
+def uninstall(
+    ades: List[str],
+    manifest: Manifest,
+    payload: PayloadContext,
+    workspace: Optional[Path],
+    dry_run: bool,
+) -> None:
     print(f"  {C.bold('Uninstalling Snyk recipes...')}")
     print()
 
@@ -1254,57 +1660,30 @@ def uninstall(ades: List[str], manifest: Manifest, payload: PayloadContext, dry_
         print(f"  {C.bold(ade)} ({ade_home}/):")
 
         for recipe_id in manifest.all_recipe_ids():
-            sources = manifest.get_sources(recipe_id, ade)
-            if not sources:
+            if manifest.is_workspace_scoped(recipe_id):
                 continue
-
-            print(f"  {C.bold(f'[{ade}] {recipe_id}')}")
-
-            # Remove files
-            for f in sources.get("files", []):
-                remove_file(resolve_ade_path(ade, f["dest"]), dry_run)
-
-            # Remove transformed files
-            for t in sources.get("transforms", []):
-                remove_file(resolve_ade_path(ade, t["dest"]), dry_run)
-
-            # Remove pycache
-            hooks_dir = ade_home / "hooks"
-            if hooks_dir.is_dir():
-                remove_pycache_under(hooks_dir, dry_run)
-                lib_dir = hooks_dir / "lib"
-                if lib_dir.is_dir():
-                    remove_pycache_under(lib_dir, dry_run)
-
-            # Clean up empty directories
-            for f in sources.get("files", []):
-                dest = resolve_ade_path(ade, f["dest"])
-                remove_empty_parents(dest.parent, ade_home, dry_run)
-            for t in sources.get("transforms", []):
-                dest = resolve_ade_path(ade, t["dest"])
-                remove_empty_parents(dest.parent, ade_home, dry_run)
-
-            # Unmerge config
-            cm = sources.get("config_merge")
-            if cm:
-                strategy = cm["strategy"].replace("merge_", "unmerge_", 1)
-                target = resolve_ade_path(ade, cm["target"])
-                if dry_run:
-                    print(f"    {C.dim(f'[dry-run] unmerge ({strategy}): {target}')}")
-                else:
-                    with _expand_source(  # nosec B324 — source path comes from installer manifest, validated by payload.resolve_src against payload_dir
-                        strategy, payload.resolve_src(cm["source"])
-                    ) as resolved_path:
-                        merge_lib_dir = str(payload.payload_dir / "lib")
-                        if merge_lib_dir not in sys.path:
-                            sys.path.insert(0, merge_lib_dir)
-                        import merge_json
-
-                        if strategy in merge_json.STRATEGIES:
-                            merge_json.STRATEGIES[strategy](str(target), str(resolved_path))
-                            print(f"    {C.green('unmerged:')} {target}")
+            uninstall_ade_recipe(recipe_id, ade, manifest, payload, dry_run)
 
         print()
+
+    # Workspace-scoped recipes are installed once per workspace regardless of
+    # how many ADEs were targeted, so uninstall them once too — after the
+    # per-ADE pass so a single ADE picked at install time is enough to clean up.
+    workspace_recipes = [
+        rid for rid in manifest.all_recipe_ids() if manifest.is_workspace_scoped(rid)
+    ]
+    if workspace_recipes:
+        if workspace is None:
+            print(
+                f"  {C.yellow('NOTE')} no workspace resolved "
+                "(pass --workspace or run inside a git repo); "
+                f"skipping workspace-scoped recipes: {', '.join(workspace_recipes)}"
+            )
+        else:
+            print(f"  {C.bold('workspace')} ({workspace}/):")
+            for recipe_id in workspace_recipes:
+                uninstall_workspace_recipe(recipe_id, manifest, payload, workspace, dry_run)
+            print()
 
 
 # =============================================================================
@@ -1320,11 +1699,19 @@ def print_banner() -> None:
     print()
 
 
-def show_plan(ades: List[str], recipes: List[str], profile: str, manifest: Manifest) -> None:
+def show_plan(
+    ades: List[str],
+    recipes: List[str],
+    profile: str,
+    manifest: Manifest,
+    workspace: Optional[Path],
+) -> None:
     print(f"  {C.bold('Installation Plan')}")
     print("  " + "\u2500" * 54)
     print(f"  Profile:  {C.cyan(profile)}")
     print(f"  ADEs:     {C.cyan(' '.join(ades))}")
+    if workspace is not None:
+        print(f"  Workspace:{C.cyan(' ' + str(workspace))}")
     print()
 
     for ade in ades:
@@ -1332,11 +1719,30 @@ def show_plan(ades: List[str], recipes: List[str], profile: str, manifest: Manif
         print(f"  {C.bold(ade)} -> {ade_home}/")
 
         for recipe_id in recipes:
+            if manifest.is_workspace_scoped(recipe_id):
+                continue
             sources = manifest.get_sources(recipe_id, ade)
             if sources.get("files") or sources.get("config_merge") or sources.get("transforms"):
                 desc = manifest.recipes[recipe_id]["description"]
                 print(f"    * {C.green(recipe_id)}: {desc}")
         print()
+
+    workspace_recipes = [r for r in recipes if manifest.is_workspace_scoped(r)]
+    if not workspace_recipes:
+        return
+    if workspace is None:
+        print(
+            f"  {C.yellow('NOTE')} no workspace resolved "
+            "(pass --workspace or run inside a git repo); "
+            f"skipping workspace-scoped recipes: {', '.join(workspace_recipes)}"
+        )
+        print()
+        return
+    print(f"  {C.bold('workspace')} -> {workspace}/")
+    for recipe_id in workspace_recipes:
+        desc = manifest.recipes[recipe_id]["description"]
+        print(f"    * {C.green(recipe_id)}: {desc}")
+    print()
 
 
 def print_summary(ades: List[str], recipes: List[str], dry_run: bool) -> None:
@@ -1375,9 +1781,15 @@ def main() -> None:
     # ADE detection
     ades = get_target_ades(args.ade, args.yes)
 
+    # Workspace resolution for workspace-scoped recipes (e.g. sac-hooks).
+    # Explicit --workspace overrides everything; otherwise walk up from cwd
+    # looking for a git repo; otherwise None (we'll skip workspace recipes
+    # with a visible notice rather than guessing).
+    workspace = resolve_workspace(args.workspace)
+
     # Uninstall mode
     if args.uninstall:
-        uninstall(ades, manifest, payload, args.dry_run)
+        uninstall(ades, manifest, payload, workspace, args.dry_run)
         print(f"  {C.green('Uninstall complete.')}")
         return
 
@@ -1413,8 +1825,21 @@ def main() -> None:
         all_ok = True
         for ade in ades:
             for recipe_id in recipes:
+                if manifest.is_workspace_scoped(recipe_id):
+                    continue
                 if not verify_recipe(recipe_id, ade, manifest, payload):
                     all_ok = False
+        for recipe_id in recipes:
+            if not manifest.is_workspace_scoped(recipe_id):
+                continue
+            if workspace is None:
+                print(
+                    f"  {C.yellow('NOTE')} skipping workspace-scoped {recipe_id}: "
+                    "no workspace (pass --workspace or run inside a git repo)"
+                )
+                continue
+            if not verify_workspace_recipe(recipe_id, manifest, payload, workspace):
+                all_ok = False
         if all_ok:
             print(f"\n  {C.green('All checks passed.')}")
         else:
@@ -1424,7 +1849,35 @@ def main() -> None:
 
     # Normal installation
     recipes = manifest.resolve_recipes(args.profile)
-    show_plan(ades, recipes, args.profile, manifest)
+    show_plan(ades, recipes, args.profile, manifest, workspace)
+
+    # Detect stale on-disk installs of recipes that are mutually exclusive
+    # with what's about to be installed. Without this check, switching
+    # profiles (e.g. default → experimental) would leave the old SAI files
+    # behind so both SAI and SAC fire at once. Warn before the user commits
+    # to the install so they can opt into cleanup with one prompt.
+    stale_conflicts = manifest.detect_stale_conflicts(recipes)
+    if stale_conflicts:
+        print()
+        print(f"  {C.yellow('WARNING')} Conflicting recipes are still installed on disk:")
+        for active, conflicted, ade in stale_conflicts:
+            print(f"    - [{ade}] {conflicted} conflicts with {active}")
+        print("    Leaving them in place will cause both systems to fire at once.")
+        clean_stale = False
+        if args.dry_run:
+            print(f"    {C.dim('[dry-run] would prompt to uninstall conflicting recipes')}")
+        elif args.yes:
+            clean_stale = True
+        else:
+            reply = (
+                input("  Uninstall conflicting recipes before installing? (y/n) ").strip().lower()
+            )
+            clean_stale = reply in ("y", "yes")
+        if clean_stale:
+            print()
+            for _active, conflicted, ade in stale_conflicts:
+                uninstall_ade_recipe(conflicted, ade, manifest, payload, args.dry_run)
+        print()
 
     if not args.yes and not args.dry_run:
         reply = input("  Proceed with installation? (y/n) ").strip().lower()
@@ -1470,7 +1923,16 @@ def main() -> None:
     # Install
     for ade in ades:
         for recipe_id in recipes:
+            if manifest.is_workspace_scoped(recipe_id):
+                continue
             install_recipe(recipe_id, ade, manifest, payload, args.dry_run)
+    for recipe_id in recipes:
+        if not manifest.is_workspace_scoped(recipe_id):
+            continue
+        if workspace is None:
+            # show_plan already printed the skip notice; don't repeat it here.
+            continue
+        install_workspace_recipe(recipe_id, manifest, payload, workspace, args.dry_run)
 
     # Post-install verification
     if not args.dry_run:
@@ -1479,8 +1941,17 @@ def main() -> None:
         all_ok = True
         for ade in ades:
             for recipe_id in recipes:
+                if manifest.is_workspace_scoped(recipe_id):
+                    continue
                 if not verify_recipe(recipe_id, ade, manifest, payload):
                     all_ok = False
+        for recipe_id in recipes:
+            if not manifest.is_workspace_scoped(recipe_id):
+                continue
+            if workspace is None:
+                continue
+            if not verify_workspace_recipe(recipe_id, manifest, payload, workspace):
+                all_ok = False
         if not all_ok:
             print(f"\n  {C.yellow('Some verifications failed. Check output above.')}")
 

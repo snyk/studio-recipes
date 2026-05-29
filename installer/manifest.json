@@ -65,6 +65,36 @@
             "source": "guardrail_directives/secure_at_inception/hooks_version/codex/async_cli_version/config.toml",
             "strategy": "merge_codex_config"
           }
+        },
+        "copilot-cli": {
+          "comment": "Installs to ~/.copilot/hooks/ — applies to BOTH GitHub Copilot CLI and GitHub Copilot in VS Code, which share this directory.",
+          "files": [
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/copilot/async_cli_version/snyk_secure_at_inception.py", "dest": ".copilot/hooks/snyk_secure_at_inception.py" },
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/copilot/async_cli_version/lib/platform_utils.py", "dest": ".copilot/hooks/lib/platform_utils.py" },
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/copilot/async_cli_version/lib/scan_runner.py", "dest": ".copilot/hooks/lib/scan_runner.py" },
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/copilot/async_cli_version/lib/scan_worker.py", "dest": ".copilot/hooks/lib/scan_worker.py" },
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/copilot/async_cli_version/lib/sca_scan_worker.py", "dest": ".copilot/hooks/lib/sca_scan_worker.py" }
+          ],
+          "config_merge": {
+            "target": ".copilot/hooks.json",
+            "source": "guardrail_directives/secure_at_inception/hooks_version/copilot/async_cli_version/hooks.json",
+            "strategy": "merge_copilot_cli_hooks"
+          }
+        },
+        "copilot-vscode": {
+          "comment": "Mirrors the copilot-cli entry: dests target ~/.copilot/hooks/ (special-cased in resolve_ade_path) so VS Code Copilot installs the SAI hooks at the same location Copilot CLI reads them from.",
+          "files": [
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/copilot/async_cli_version/snyk_secure_at_inception.py", "dest": ".copilot/hooks/snyk_secure_at_inception.py" },
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/copilot/async_cli_version/lib/platform_utils.py", "dest": ".copilot/hooks/lib/platform_utils.py" },
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/copilot/async_cli_version/lib/scan_runner.py", "dest": ".copilot/hooks/lib/scan_runner.py" },
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/copilot/async_cli_version/lib/scan_worker.py", "dest": ".copilot/hooks/lib/scan_worker.py" },
+            { "src": "guardrail_directives/secure_at_inception/hooks_version/copilot/async_cli_version/lib/sca_scan_worker.py", "dest": ".copilot/hooks/lib/sca_scan_worker.py" }
+          ],
+          "config_merge": {
+            "target": ".copilot/hooks.json",
+            "source": "guardrail_directives/secure_at_inception/hooks_version/copilot/async_cli_version/hooks.json",
+            "strategy": "merge_copilot_cli_hooks"
+          }
         }
       }
     },
@@ -225,6 +255,24 @@
         }
       }
     },
+    "sac-hooks": {
+      "type": "hooks",
+      "scope": "workspace",
+      "description": "Secure At Commit pre-commit hook (CLI version)",
+      "enabled": true,
+      "conflicts_with": ["sai-hooks-async"],
+      "sources": {
+        "workspace": {
+          "files": [
+            { "src": "guardrail_directives/secure_at_commit/snyk_secure_at_commit.py", "dest": ".snyk/studio/components/scripts/snyk_secure_at_commit.py" }
+          ],
+          "pre_commit_integration": {
+            "tag": "snyk-secure-at-commit",
+            "command": "uv run .snyk/studio/components/scripts/snyk_secure_at_commit.py --staged"
+          }
+        }
+      }
+    },
     "secure-dependency-health-check-skill": {
       "type": "skill",
       "description": "Secure dependency health check skill",
@@ -334,6 +382,16 @@
     "minimal": {
       "recipes": [
         "sai-hooks-async",
+        "mcp-config"
+      ]
+    },
+    "experimental": {
+      "recipes": [
+        "sac-hooks",
+        "snyk-fix-command",
+        "snyk-batch-fix-command",
+        "snyk-fix-skill",
+        "secure-dependency-health-check-skill",
         "mcp-config"
       ]
     }

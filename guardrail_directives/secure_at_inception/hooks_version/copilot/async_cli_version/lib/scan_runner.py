@@ -6,14 +6,13 @@ Scan Runner Module
 Manages background Snyk CLI scans: launching the scan_worker.py subprocess,
 polling for completion, SARIF result parsing, and reading results.
 
-The postToolUse hook calls launch_background_scan() to start a scan.
+The PostToolUse hook calls launch_background_scan() to start a scan.
 Throttling is natural: is_scan_running() prevents duplicate launches.
 
-The preToolUse hook calls wait_for_scan() which polls for the completion marker,
+The Stop hook calls wait_for_scan() which polls for the completion marker,
 then reads results (including parsed vulnerabilities) from scan.done.
 """
 
-import glob
 import hashlib
 import json
 import os
@@ -22,12 +21,18 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, cast
+from typing import Any, Callable, Dict, List, Optional, Set, cast
 
-# Hardcoded well-known Snyk config location
-_SNYK_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".config", "configstore", "snyk.json")
-
+from platform_utils import (
+    file_lock,
+    get_detached_popen_kwargs,
+    get_snyk_binary_names,
+    get_snyk_config_path,
+    get_snyk_search_paths,
+    is_pid_alive,
+)
 
 # =============================================================================
 # CONFIGURATION
@@ -53,55 +58,6 @@ def ensure_cache_dirs(workspace: str) -> str:
     cache_dir = get_cache_dir(workspace)
     os.makedirs(cache_dir, exist_ok=True)
     return cache_dir
-
-
-# =============================================================================
-# SCAN STATE MANAGEMENT
-# =============================================================================
-
-
-def get_scan_pid_file(workspace: str) -> str:
-    return os.path.join(get_cache_dir(workspace), "scan.pid")
-
-
-def get_scan_done_file(workspace: str) -> str:
-    return os.path.join(get_cache_dir(workspace), "scan.done")
-
-
-def is_scan_running(workspace: str) -> bool:
-    pid_file = get_scan_pid_file(workspace)
-    if not os.path.exists(pid_file):
-        return False
-
-    try:
-        age = time.time() - os.path.getmtime(pid_file)
-        if age > PID_STALENESS_TIMEOUT:
-            _cleanup_pid_file(workspace)
-            return False
-    except OSError:
-        pass
-
-    try:
-        with open(pid_file) as f:
-            pid = int(f.read().strip())
-        os.kill(pid, 0)
-        return True
-    except (ValueError, ProcessLookupError, OSError):
-        _cleanup_pid_file(workspace)
-        return False
-
-
-def is_scan_complete(workspace: str) -> bool:
-    return os.path.exists(get_scan_done_file(workspace))
-
-
-def _cleanup_pid_file(workspace: str) -> None:
-    pid_file = get_scan_pid_file(workspace)
-    if os.path.exists(pid_file):
-        try:
-            os.remove(pid_file)
-        except OSError:
-            pass
 
 
 # =============================================================================
@@ -176,24 +132,14 @@ def _augment_path_for_snyk(env: Dict[str, str]) -> None:
     if shutil.which("snyk", path=env.get("PATH", "")):
         return
 
-    candidates: List[str] = []
-
-    nvm_dir = env.get("NVM_DIR", os.path.expanduser("~/.nvm"))
-    nvm_node_bins = sorted(
-        glob.glob(os.path.join(nvm_dir, "versions", "node", "*", "bin")),
-        reverse=True,
-    )
-    candidates.extend(nvm_node_bins)
-
-    volta_bin = os.path.expanduser("~/.volta/bin")
-    candidates.append(volta_bin)
-
-    candidates.extend(["/usr/local/bin", "/opt/homebrew/bin"])
+    candidates = get_snyk_search_paths(env)
+    binary_names = get_snyk_binary_names()
 
     for bin_dir in candidates:
-        if os.path.isfile(os.path.join(bin_dir, "snyk")):
-            env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
-            return
+        for name in binary_names:
+            if os.path.isfile(os.path.join(bin_dir, name)):
+                env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+                return
 
 
 # =============================================================================
@@ -208,19 +154,16 @@ def check_snyk_auth() -> Optional[str]:
     Checks SNYK_TOKEN env var first, then the Snyk CLI config file
     for API key or OAuth token storage.
     """
-    # Check env var first
     token = os.environ.get("SNYK_TOKEN")
     if token:
         return token
 
-    # Check Snyk config file
     try:
-        with open(_SNYK_CONFIG_PATH) as f:
+        with open(get_snyk_config_path()) as f:
             config = json.load(f)
         api_key = config.get("api")
         if api_key and isinstance(api_key, str):
             return api_key
-        # OAuth tokens are read natively by CLI from the config file
         if config.get("INTERNAL_OAUTH_TOKEN_STORAGE"):
             return "__oauth__"
     except (OSError, json.JSONDecodeError, FileNotFoundError):
@@ -229,14 +172,31 @@ def check_snyk_auth() -> Optional[str]:
     return None
 
 
-def write_early_status(workspace: str, status: str, error_detail: str = "") -> None:
-    """Write an early scan.done marker without launching a scan.
+def check_snyk_cli() -> Optional[str]:
+    """Check if the Snyk CLI binary is discoverable on PATH.
 
-    Used to short-circuit when preconditions fail (e.g. auth missing)
-    so preToolUse doesn't wait for a scan that will never complete.
+    Probes the current PATH and common install locations (nvm, Volta,
+    Homebrew, Scoop, etc.) via platform_utils helpers.
+
+    Returns the path to the binary if found, None otherwise.
     """
-    from datetime import datetime
+    env = os.environ.copy()
+    _augment_path_for_snyk(env)
 
+    for name in get_snyk_binary_names():
+        found = shutil.which(name, path=env.get("PATH", ""))
+        if found:
+            return str(found)
+    return None
+
+
+def write_early_status(workspace: str, status: str, error_detail: str = "") -> None:
+    """Write a scan.done marker without launching a scan.
+
+    Used to short-circuit when preconditions fail (e.g. auth missing,
+    CLI not found) so the Stop handler doesn't wait for a scan that
+    will never complete.
+    """
     ensure_cache_dirs(workspace)
     done_file = get_scan_done_file(workspace)
     done_data = {
@@ -263,7 +223,7 @@ def _ensure_snyk_token(env: Dict[str, str]) -> None:
         return
 
     try:
-        with open(_SNYK_CONFIG_PATH) as f:
+        with open(get_snyk_config_path()) as f:
             config = json.load(f)
         api_key = config.get("api")
         if api_key and isinstance(api_key, str):
@@ -273,120 +233,426 @@ def _ensure_snyk_token(env: Dict[str, str]) -> None:
 
 
 # =============================================================================
-# BACKGROUND SCAN LAUNCHER
+# SCAN CHANNEL
 # =============================================================================
 
 
-def launch_background_scan(workspace: str) -> bool:
-    """Launch a background Snyk code scan as a detached subprocess.
-    PID file is written by the launcher to close the race window."""
-    ensure_cache_dirs(workspace)
+class _ScanChannel:
+    """Generic background scan channel (SAST or SCA).
 
-    if is_scan_running(workspace):
-        return False
+    Encapsulates all PID/done-file state management, subprocess launching,
+    polling, and result reading for one scan type.  Parameterised by
+    filenames, worker script, and a display name used in log messages.
+    """
 
-    done_file = get_scan_done_file(workspace)
-    if os.path.exists(done_file):
-        os.remove(done_file)
+    def __init__(
+        self,
+        pid_filename: str,
+        done_filename: str,
+        worker_script: str,
+        name: str,
+    ) -> None:
+        self._pid_filename = pid_filename
+        self._done_filename = done_filename
+        self._worker_script = worker_script
+        self._name = name  # e.g. "scan" or "SCA scan"
 
-    worker_script = str(Path(__file__).parent.resolve() / "scan_worker.py")
-    env = os.environ.copy()
-    _augment_path_for_snyk(env)
-    _ensure_snyk_token(env)
-    env["SAI_WORKSPACE"] = workspace
-    env["SAI_CACHE_DIR"] = get_cache_dir(workspace)
-    env["SAI_LIB_DIR"] = str(Path(__file__).parent.resolve())
+    # --- File paths ---
 
-    try:
-        proc = subprocess.Popen(
-            [sys.executable, worker_script],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-            cwd=workspace,
-            env=env,
-        )
-        pid_file = get_scan_pid_file(workspace)
-        with open(pid_file, "w") as f:
-            f.write(str(proc.pid))
-        return True
-    except Exception:
-        return False
+    def pid_file(self, workspace: str) -> str:
+        return os.path.join(get_cache_dir(workspace), self._pid_filename)
 
+    def done_file(self, workspace: str) -> str:
+        return os.path.join(get_cache_dir(workspace), self._done_filename)
 
-# =============================================================================
-# SCAN COMPLETION
-# =============================================================================
+    # --- State helpers ---
 
+    def _cleanup_pid(self, workspace: str) -> None:
+        path = self.pid_file(workspace)
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
-def _read_scan_status(workspace: str) -> Optional[str]:
-    done_file = get_scan_done_file(workspace)
-    try:
-        with open(done_file) as f:
-            data = json.load(f)
-        return str(data.get("status", "unknown"))
-    except (OSError, json.JSONDecodeError, FileNotFoundError):
-        return None
+    def is_running(self, workspace: str) -> bool:
+        pid_file = self.pid_file(workspace)
+        if not os.path.exists(pid_file):
+            return False
 
-
-def get_scan_completion_info(workspace: str) -> Optional[Dict[str, Any]]:
-    """Read the full scan.done record (status, started_at, vulnerabilities)."""
-    done_file = get_scan_done_file(workspace)
-    try:
-        with open(done_file) as f:
-            return cast(Dict[str, Any], json.load(f))
-    except (OSError, json.JSONDecodeError, FileNotFoundError):
-        return None
-
-
-def wait_for_scan(
-    workspace: str,
-    timeout: float = SCAN_WAIT_TIMEOUT,
-    log_fn: Optional[Callable[[object], None]] = None,
-) -> Optional[str]:
-    """Wait for a background scan to complete. Returns the status string
-    or None if the wait timed out."""
-    if log_fn is None:
-
-        def log_fn(msg: object) -> None:
+        try:
+            age = time.time() - os.path.getmtime(pid_file)
+            if age > PID_STALENESS_TIMEOUT:
+                self._cleanup_pid(workspace)
+                return False
+        except OSError:
             pass
 
-    if is_scan_complete(workspace):
-        return _read_scan_status(workspace)
+        try:
+            with open(pid_file) as f:
+                pid = int(f.read().strip())
+            if is_pid_alive(pid):
+                return True
+            self._cleanup_pid(workspace)
+            return False
+        except (ValueError, OSError):
+            self._cleanup_pid(workspace)
+            return False
 
-    if not is_scan_running(workspace) and not is_scan_complete(workspace):
-        if not launch_background_scan(workspace):
-            if is_scan_complete(workspace):
-                return _read_scan_status(workspace)
+    def is_complete(self, workspace: str) -> bool:
+        return os.path.exists(self.done_file(workspace))
+
+    # --- Results ---
+
+    def get_completion_info(self, workspace: str) -> Optional[Dict[str, Any]]:
+        """Read the full done-file record (status, started_at, vulnerabilities)."""
+        try:
+            with open(self.done_file(workspace)) as f:
+                return cast(Optional[Dict[str, Any]], json.load(f))
+        except (OSError, json.JSONDecodeError, FileNotFoundError):
             return None
 
-    log_fn("[SAI] Waiting for security scan to complete...")
+    def _read_status(self, workspace: str) -> Optional[str]:
+        info = self.get_completion_info(workspace)
+        return str(info.get("status", "unknown")) if info else None
+
+    # --- Cleanup ---
+
+    def clear_state(self, workspace: str) -> None:
+        """Remove PID and done marker files."""
+        for path in [self.pid_file(workspace), self.done_file(workspace)]:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+
+_sast = _ScanChannel("scan.pid", "scan.done", "scan_worker.py", "scan")
+_sca = _ScanChannel("sca_scan.pid", "sca_scan.done", "sca_scan_worker.py", "SCA scan")
+
+
+# =============================================================================
+# LAUNCH / WAIT HELPERS (module-level so patches on public API functions apply)
+# =============================================================================
+
+
+def _write_launch_failed_status(done_file: str, error: str) -> None:
+    """Persist a launch_failed marker so wait_for_scan can report a real status."""
+    try:
+        now = datetime.now().isoformat()
+        with open(done_file, "w") as f:
+            json.dump(
+                {
+                    "status": "launch_failed",
+                    "completed_at": now,
+                    "started_at": now,
+                    "vulnerabilities": [],
+                    "error_detail": error[:500],
+                },
+                f,
+            )
+    except OSError:
+        pass
+
+
+def _do_launch(
+    workspace: str,
+    is_running_fn: Callable[[str], bool],
+    done_file_fn: Callable[[str], str],
+    pid_file_fn: Callable[[str], str],
+    worker_script: str,
+) -> bool:
+    """Launch a worker subprocess; catches any Exception so callers get False.
+
+    The check-is-running / Popen / write-PID sequence is wrapped in a file lock
+    so two callers cannot both pass the running check and spawn duplicate
+    workers. On spawn failure, a launch_failed marker is written to the done
+    file so _do_wait can surface a real status instead of None.
+    """
+    ensure_cache_dirs(workspace)
+    pid_file = pid_file_fn(workspace)
+    done = done_file_fn(workspace)
+    with file_lock(pid_file + ".lock"):
+        if is_running_fn(workspace):
+            return False
+        if os.path.exists(done):
+            os.remove(done)
+        worker = str(Path(__file__).parent.resolve() / worker_script)
+        env = os.environ.copy()
+        _augment_path_for_snyk(env)
+        _ensure_snyk_token(env)
+        env["SAI_WORKSPACE"] = workspace
+        env["SAI_CACHE_DIR"] = get_cache_dir(workspace)
+        env["SAI_LIB_DIR"] = str(Path(__file__).parent.resolve())
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, worker],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                cwd=workspace,
+                env=env,
+                **get_detached_popen_kwargs(),
+            )
+            with open(pid_file, "w") as f:
+                f.write(str(proc.pid))
+            return True
+        except Exception as e:
+            _write_launch_failed_status(done, str(e))
+            return False
+
+
+def _do_wait(
+    workspace: str,
+    is_complete_fn: Callable[[str], bool],
+    is_running_fn: Callable[[str], bool],
+    launch_fn: Callable[[str], bool],
+    read_status_fn: Callable[[str], Optional[str]],
+    name: str,
+    timeout: float,
+    log_fn: Optional[Callable[[str], None]],
+) -> Optional[str]:
+    """Poll until the scan completes, times out, or the process dies."""
+
+    def _noop(_msg: str) -> None:
+        pass
+
+    if log_fn is None:
+        log_fn = _noop
+
+    if is_complete_fn(workspace):
+        return read_status_fn(workspace)
+
+    if not is_running_fn(workspace) and not is_complete_fn(workspace):
+        if not launch_fn(workspace):
+            # _do_launch returns False either because it declined (another
+            # launcher won the file lock and is already running) or because
+            # its spawn errored (in which case it wrote a launch_failed
+            # marker to the done file). Re-examine state instead of bailing.
+            if is_complete_fn(workspace):
+                return read_status_fn(workspace)
+            if not is_running_fn(workspace):
+                return "launch_failed"
+            # Concurrent worker is running — fall through to the poll loop.
+
+    title = name[0].upper() + name[1:]
+    log_fn(f"[SAI] Waiting for {name} to complete...")
 
     start_time = time.time()
     poll_interval = POLL_INTERVAL_INITIAL
 
     while (time.time() - start_time) < timeout:
-        if is_scan_complete(workspace):
+        if is_complete_fn(workspace):
             elapsed = time.time() - start_time
-            log_fn(f"[SAI] Scan completed ({elapsed:.1f}s)")
-            return _read_scan_status(workspace)
+            log_fn(f"[SAI] {title} completed ({elapsed:.1f}s)")
+            return read_status_fn(workspace)
 
-        if not is_scan_running(workspace) and not is_scan_complete(workspace):
-            log_fn("[SAI] Scan process terminated unexpectedly")
+        if not is_running_fn(workspace) and not is_complete_fn(workspace):
+            log_fn(f"[SAI] {title} process terminated unexpectedly")
             return None
 
         time.sleep(poll_interval)
         poll_interval = min(poll_interval * 1.5, POLL_INTERVAL_MAX)
 
-    log_fn(f"[SAI] Scan timed out after {timeout:.0f}s")
+    log_fn(f"[SAI] {title} timed out after {timeout:.0f}s")
     return None
+
+
+# =============================================================================
+# SCAN STATE MANAGEMENT — public API (SAST)
+# =============================================================================
+
+
+def get_scan_pid_file(workspace: str) -> str:
+    return _sast.pid_file(workspace)
+
+
+def get_scan_done_file(workspace: str) -> str:
+    return _sast.done_file(workspace)
+
+
+def is_scan_running(workspace: str) -> bool:
+    return _sast.is_running(workspace)
+
+
+def is_scan_complete(workspace: str) -> bool:
+    return _sast.is_complete(workspace)
+
+
+def _cleanup_pid_file(workspace: str) -> None:
+    _sast._cleanup_pid(workspace)
+
+
+def launch_background_scan(workspace: str) -> bool:
+    """Launch a background Snyk code scan as a detached subprocess.
+    PID file is written by the launcher to close the race window."""
+    return _do_launch(
+        workspace, is_scan_running, get_scan_done_file, get_scan_pid_file, "scan_worker.py"
+    )
+
+
+def get_scan_completion_info(workspace: str) -> Optional[Dict[str, Any]]:
+    """Read the full scan.done record (status, started_at, vulnerabilities)."""
+    return _sast.get_completion_info(workspace)
+
+
+def _read_scan_status(workspace: str) -> Optional[str]:
+    return _sast._read_status(workspace)
+
+
+def wait_for_scan(
+    workspace: str,
+    timeout: float = SCAN_WAIT_TIMEOUT,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> Optional[str]:
+    """Wait for a background scan to complete. Returns the status string
+    or None if the wait timed out."""
+    return _do_wait(
+        workspace,
+        is_scan_complete,
+        is_scan_running,
+        launch_background_scan,
+        _read_scan_status,
+        "scan",
+        timeout,
+        log_fn,
+    )
 
 
 def clear_scan_state(workspace: str) -> None:
     """Clear scan state files (PID, done marker)."""
-    for file_path in [get_scan_pid_file(workspace), get_scan_done_file(workspace)]:
-        if os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-            except OSError:
-                pass
+    _sast.clear_state(workspace)
+
+
+# =============================================================================
+# SCAN STATE MANAGEMENT — public API (SCA)
+# =============================================================================
+
+
+def get_sca_pid_file(workspace: str) -> str:
+    return _sca.pid_file(workspace)
+
+
+def get_sca_done_file(workspace: str) -> str:
+    return _sca.done_file(workspace)
+
+
+def is_sca_scan_running(workspace: str) -> bool:
+    return _sca.is_running(workspace)
+
+
+def is_sca_scan_complete(workspace: str) -> bool:
+    return _sca.is_complete(workspace)
+
+
+def _cleanup_sca_pid_file(workspace: str) -> None:
+    _sca._cleanup_pid(workspace)
+
+
+def launch_background_sca_scan(workspace: str) -> bool:
+    """Launch a background Snyk SCA scan as a detached subprocess.
+    PID file is written by the launcher to close the race window."""
+    return _do_launch(
+        workspace, is_sca_scan_running, get_sca_done_file, get_sca_pid_file, "sca_scan_worker.py"
+    )
+
+
+def get_sca_completion_info(workspace: str) -> Optional[Dict[str, Any]]:
+    """Read the full sca_scan.done record (status, started_at, vulnerabilities)."""
+    return _sca.get_completion_info(workspace)
+
+
+def _read_sca_scan_status(workspace: str) -> Optional[str]:
+    return _sca._read_status(workspace)
+
+
+def wait_for_sca_scan(
+    workspace: str,
+    timeout: float = SCAN_WAIT_TIMEOUT,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> Optional[str]:
+    """Wait for a background SCA scan to complete. Returns the status string
+    or None if the wait timed out."""
+    return _do_wait(
+        workspace,
+        is_sca_scan_complete,
+        is_sca_scan_running,
+        launch_background_sca_scan,
+        _read_sca_scan_status,
+        "SCA scan",
+        timeout,
+        log_fn,
+    )
+
+
+def clear_sca_scan_state(workspace: str) -> None:
+    """Clear SCA scan state files (PID, done marker)."""
+    _sca.clear_state(workspace)
+
+
+# =============================================================================
+# MANIFEST HASH UTILITIES
+# =============================================================================
+
+_MANIFEST_EXCLUSION_DIRS = frozenset(
+    {
+        "node_modules",
+        ".git",
+        ".venv",
+        "__pycache__",
+        "target",
+        "vendor",
+        ".gradle",
+        "build",
+        "dist",
+        ".tox",
+        ".eggs",
+        ".mypy_cache",
+        ".ruff_cache",
+        "pytest_cache",
+    }
+)
+
+
+def snapshot_manifest_hashes(
+    workspace: str,
+    manifest_files: Set[str],
+    manifest_suffixes: Set[str],
+) -> Dict[str, str]:
+    """Walk workspace and return SHA-256 hex digests for matching manifest files."""
+    hashes: Dict[str, str] = {}
+    for dirpath, dirnames, filenames in os.walk(workspace, followlinks=False):
+        dirnames[:] = [d for d in dirnames if d not in _MANIFEST_EXCLUSION_DIRS]
+        for filename in filenames:
+            if filename in manifest_files or Path(filename).suffix.lower() in manifest_suffixes:
+                abs_path = os.path.join(dirpath, filename)
+                try:
+                    with open(abs_path, "rb") as f:
+                        digest = hashlib.sha256(f.read()).hexdigest()
+                    hashes[abs_path] = digest
+                except OSError:
+                    pass
+    return hashes
+
+
+def detect_manifest_changes(
+    workspace: str,
+    baseline: Dict[str, str],
+    manifest_files: Set[str],
+    manifest_suffixes: Set[str],
+) -> List[str]:
+    """Return paths of manifest files that changed, were added, or were deleted since baseline.
+
+    Returns an empty list when baseline is empty (safe default — no comparison possible).
+    """
+    if not baseline:
+        return []
+    current = snapshot_manifest_hashes(workspace, manifest_files, manifest_suffixes)
+    changed: List[str] = []
+    for path, old_hash in baseline.items():
+        if path not in current or current[path] != old_hash:
+            changed.append(path)
+    for path in current:
+        if path not in baseline:
+            changed.append(path)
+    return changed

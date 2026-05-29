@@ -24,6 +24,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import platform_utils
+
 WORKSPACE = ""
 CACHE_DIR = ""
 LIB_DIR = str(Path(__file__).parent.resolve())
@@ -150,8 +152,9 @@ def main() -> None:
         os.remove(DONE_FILE)
 
     if not os.environ.get("SNYK_TOKEN"):
-        config_dir = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
-        snyk_config_path = os.path.join(config_dir, "configstore", "snyk.json")
+        # platform_utils resolves %APPDATA%\\configstore on Windows,
+        # ~/.config/configstore elsewhere.
+        snyk_config_path = platform_utils.get_snyk_config_path()
         has_stored_auth = False
         try:
             with open(snyk_config_path) as f:
@@ -177,6 +180,8 @@ def main() -> None:
         finish("snyk_not_found", started_at=started_at)
         return
 
+    snyk_argv = platform_utils.build_cli_argv([snyk_bin, "test", ".", "--json"])
+
     env = os.environ.copy()
     env["SNYK_INTEGRATION_NAME"] = "STUDIO"
     env["SNYK_INTEGRATION_VERSION"] = SNYK_STUDIO_VERSION
@@ -185,7 +190,7 @@ def main() -> None:
 
     try:
         result = subprocess.run(
-            [snyk_bin, "test", ".", "--json"],
+            snyk_argv,
             capture_output=True,
             text=True,
             timeout=300,

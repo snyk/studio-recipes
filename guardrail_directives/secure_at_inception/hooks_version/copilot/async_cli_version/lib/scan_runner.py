@@ -29,6 +29,7 @@ from platform_utils import (
     file_lock,
     get_detached_popen_kwargs,
     get_snyk_binary_names,
+    get_snyk_config_path,
     get_snyk_search_paths,
     is_pid_alive,
 )
@@ -145,18 +146,6 @@ def _augment_path_for_snyk(env: Dict[str, str]) -> None:
 # AUTH TOKEN RESOLUTION
 # =============================================================================
 
-_SNYK_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".config", "configstore", "snyk.json")
-
-
-def _get_snyk_config_path() -> str:
-    """Return the path to the Snyk CLI config file.
-
-    Uses the hardcoded well-known path (~/.config/configstore/snyk.json)
-    rather than trusting XDG_CONFIG_HOME to avoid path-traversal via
-    a manipulated environment variable.
-    """
-    return _SNYK_CONFIG_PATH
-
 
 def check_snyk_auth() -> Optional[str]:
     """Check if Snyk is authenticated and return the token if found.
@@ -170,7 +159,7 @@ def check_snyk_auth() -> Optional[str]:
         return token
 
     try:
-        with open(_get_snyk_config_path()) as f:
+        with open(get_snyk_config_path()) as f:
             config = json.load(f)
         api_key = config.get("api")
         if api_key and isinstance(api_key, str):
@@ -234,7 +223,7 @@ def _ensure_snyk_token(env: Dict[str, str]) -> None:
         return
 
     try:
-        with open(_get_snyk_config_path()) as f:
+        with open(get_snyk_config_path()) as f:
             config = json.load(f)
         api_key = config.get("api")
         if api_key and isinstance(api_key, str):

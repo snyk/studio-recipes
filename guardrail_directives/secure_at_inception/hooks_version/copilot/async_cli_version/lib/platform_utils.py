@@ -19,6 +19,7 @@ import os
 import subprocess
 import sys
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Dict, Generator, Iterator, List
 
 _IS_WINDOWS = sys.platform == "win32"
@@ -153,6 +154,23 @@ def get_snyk_binary_names() -> List[str]:
 
 
 # =============================================================================
+# CLI COMMAND CONSTRUCTION
+# =============================================================================
+
+
+def build_cli_argv(argv: List[str]) -> List[str]:
+    """Wrap Windows .cmd/.bat shims in `cmd /c` for shell=False subprocess use.
+
+    CreateProcess cannot execute .cmd/.bat scripts directly (npm-installed
+    CLIs ship as such shims); a standalone .exe and all non-Windows platforms
+    are returned unchanged.
+    """
+    if _IS_WINDOWS and Path(argv[0]).suffix.lower() in (".cmd", ".bat"):
+        return ["cmd", "/c"] + argv
+    return argv
+
+
+# =============================================================================
 # FILE LOCKING
 # =============================================================================
 
@@ -200,6 +218,24 @@ def _file_lock_unix(lock_path: str) -> Generator[None, None, None]:
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         fd.close()
+
+
+# =============================================================================
+# SNYK CONFIG PATH
+# =============================================================================
+
+
+def get_snyk_config_path() -> str:
+    """Return the path to the Snyk CLI config file.
+
+    The configstore npm package uses %APPDATA%\\configstore on Windows and
+    ~/.config/configstore on all other platforms. The Windows path is built
+    from Path.home() rather than the APPDATA env var to avoid env-var taint.
+    """
+    home = Path.home()
+    if _IS_WINDOWS:
+        return str(home / "AppData" / "Roaming" / "configstore" / "snyk.json")
+    return str(home / ".config" / "configstore" / "snyk.json")
 
 
 # =============================================================================

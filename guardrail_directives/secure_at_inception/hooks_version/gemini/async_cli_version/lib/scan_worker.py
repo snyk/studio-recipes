@@ -33,6 +33,15 @@ LOG_FILE = ""
 
 SNYK_STUDIO_VERSION = "1.0.0"
 
+_IS_WINDOWS = sys.platform == "win32"
+# Console apps (snyk / the cmd.exe shim) spawned from this windowless background
+# worker allocate a new console window on Windows; CREATE_NO_WINDOW suppresses the
+# flash. The flag only exists on Windows; elsewhere this is 0 (subprocess's
+# default creationflags, i.e. a no-op).
+_CREATE_NO_WINDOW = 0
+if sys.platform == "win32":
+    _CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW
+
 
 def log(msg: str) -> None:
     if not LOG_FILE:
@@ -141,6 +150,8 @@ def main() -> None:
             timeout=300,
             cwd=WORKSPACE,
             env=env,
+            shell=_IS_WINDOWS,
+            creationflags=_CREATE_NO_WINDOW,
         )
         exit_code = result.returncode
         stdout = result.stdout

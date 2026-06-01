@@ -8,8 +8,7 @@ from helpers import read_json
 from merge_json import (
     STRATEGIES,
     _backup,
-    _command_launcher,
-    _command_script_key,
+    _command_script_names,
     _is_snyk_command,
     _load_json,
     _load_toml,
@@ -175,75 +174,115 @@ class TestExpandHookCommandPaths:
         assert out == {"cmd": "echo abc%USERPROFILE%def"}
 
 
-class TestCanonicalizeCommand:
-    """_canonicalize_command must collapse all spellings of the same hook to
-    a single comparison key. The four spellings the installer has produced or
-    encountered over time:
-      1. raw $HOME (or sibling token, before install-time expansion)
-      2. install-time expanded with mixed separators (legacy Windows bug)
-      3. install-time expanded with all-forward-slash separators
-      4. install-time expanded with all-native (backslash on Windows) separators
+class TestCommandScriptNames:
+    """_command_script_names collects every *.py script a command runs, by base
+    name — ignoring the runner, the path in front, the separator, trailing args,
+    and shell redirections. Matching a hook by intersection with this set is the
+    sole basis for identifying "our" hooks."""
 
-    All four must map to the same key, or upgrade/uninstall will leave
-    duplicate or orphan entries on disk.
-    """
+    def test_extracts_basename_from_quoted_path(self):
+        cmd = 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
+        assert _command_script_names(cmd) == {"snyk_secure_at_inception.py"}
 
-    def test_all_separator_variants_collapse_to_same_key(self, monkeypatch):
-        # Simulate a Windows home — POSIX expanduser honors $HOME, so this
-        # lets the test exercise backslash handling without needing Windows.
-        monkeypatch.setenv("HOME", "C:\\Users\\me")
-        from merge_json import _canonicalize_command
+    def test_ignores_runner(self):
+        for runner in ("uv run", "python", "python3", "cat"):
+            cmd = f'{runner} "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
+            assert _command_script_names(cmd) == {"snyk_secure_at_inception.py"}
 
-        raw_token = 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
-        mixed_sep = 'uv run "C:\\Users\\me/.cursor/hooks/snyk_secure_at_inception.py"'
-        forward_slash = 'uv run "C:/Users/me/.cursor/hooks/snyk_secure_at_inception.py"'
-        native_backslash = 'uv run "C:\\Users\\me\\.cursor\\hooks\\snyk_secure_at_inception.py"'
+    def test_ignores_path_and_separator(self):
+        names = (
+            _command_script_names('uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"')
+            | _command_script_names('uv run "C:\\Users\\me\\hooks\\snyk_secure_at_inception.py"')
+            | _command_script_names('uv run "/Users/me/.cursor/hooks/snyk_secure_at_inception.py"')
+            | _command_script_names('uv run "%USERPROFILE%/hooks/snyk_secure_at_inception.py"')
+        )
+        assert names == {"snyk_secure_at_inception.py"}
 
-        keys = {
-            _canonicalize_command(raw_token),
-            _canonicalize_command(mixed_sep),
-            _canonicalize_command(forward_slash),
-            _canonicalize_command(native_backslash),
+    def test_collects_every_py_token(self):
+        # A second, script-valued argument is also collected, so matching by
+        # intersection with our known scripts still identifies the hook even if
+        # the argument's name changes between installer versions.
+        cmd = 'python "$HOME/hooks/snyk_secure_at_inception.py" --config setup.py'
+        assert _command_script_names(cmd) == {"snyk_secure_at_inception.py", "setup.py"}
+
+    def test_handles_quoted_path_with_spaces(self):
+        # shlex keeps the quoted path intact despite the space in the directory.
+        cmd = 'python "/Users/My Name/.snyk/snyk_secure_at_inception.py"'
+        assert _command_script_names(cmd) == {"snyk_secure_at_inception.py"}
+
+    def test_ignores_trailing_args(self):
+        cmd = 'uv run "$HOME/.copilot/hooks/snyk_secure_at_inception.py" agentStop'
+        assert _command_script_names(cmd) == {"snyk_secure_at_inception.py"}
+
+    def test_ignores_redirect_to_log(self):
+        cmd = (
+            'python3 "$HOME/.cursor/hooks/snyk_secure_at_inception.py" '
+            '>> "$HOME/.cursor/hooks/snyk_secure_at_inception.log"'
+        )
+        assert _command_script_names(cmd) == {"snyk_secure_at_inception.py"}
+
+    def test_empty_when_no_py_script(self):
+        assert _command_script_names("eslint --fix") == set()
+
+    def test_empty_for_non_string(self):
+        assert _command_script_names(None) == set()
+
+
+class TestTransformUvwGuiScript:
+    """transform_uvw_gui_script rewrites `uv run` to `uvw run --gui-script` in strings."""
+
+    def test_substitutes_uv_run_in_command_string(self):
+        from merge_json import transform_uvw_gui_script
+
+        out = transform_uvw_gui_script({"command": 'uv run "$HOME/x.py"'})
+        assert out == {"command": 'uvw run --gui-script "$HOME/x.py"'}
+
+    def test_does_not_match_uvx(self):
+        from merge_json import transform_uvw_gui_script
+
+        out = transform_uvw_gui_script({"command": "uvx run something"})
+        assert out == {"command": "uvx run something"}
+
+    def test_does_not_match_my_uv_run(self):
+        # Bare-word check prevents corrupting unrelated tokens that happen to
+        # end in "uv run". The pattern requires a non-identifier prefix.
+        from merge_json import transform_uvw_gui_script
+
+        out = transform_uvw_gui_script({"command": "my-uv run something"})
+        assert out == {"command": "my-uv run something"}
+
+    def test_idempotent_on_already_transformed(self):
+        from merge_json import transform_uvw_gui_script
+
+        already = {"command": 'uvw run --gui-script "$HOME/x.py"'}
+        assert transform_uvw_gui_script(already) == already
+
+    def test_walks_nested_structure(self):
+        from merge_json import transform_uvw_gui_script
+
+        data = {
+            "hooks": {
+                "PostToolUse": [
+                    {"command": 'uv run "$HOME/a.py"'},
+                    {"nested": {"deeper": 'uv run "$HOME/b.py"'}},
+                ]
+            },
+            "version": 1,
         }
-        assert len(keys) == 1, f"expected one key, got {keys}"
+        out = transform_uvw_gui_script(data)
+        assert out["hooks"]["PostToolUse"][0]["command"] == 'uvw run --gui-script "$HOME/a.py"'
+        assert (
+            out["hooks"]["PostToolUse"][1]["nested"]["deeper"]
+            == 'uvw run --gui-script "$HOME/b.py"'
+        )
+        # Non-string values pass through.
+        assert out["version"] == 1
 
-    def test_cross_spelling_tokens_collapse_to_same_key(self, monkeypatch):
-        monkeypatch.setenv("HOME", "/Users/me")
-        from merge_json import _canonicalize_command
+    def test_no_op_on_strings_without_uv_run(self):
+        from merge_json import transform_uvw_gui_script
 
-        keys = {
-            _canonicalize_command('uv run "$HOME/x.py"'),
-            _canonicalize_command('uv run "${HOME}/x.py"'),
-            _canonicalize_command('uv run "/Users/me/x.py"'),
-        }
-        assert len(keys) == 1, f"expected one key, got {keys}"
-
-    def test_non_path_backslashes_outside_home_span_are_preserved(self, monkeypatch):
-        # Two commands that differ only by a non-path backslash (vs forward
-        # slash) in an argument must NOT collide on the canonical key. The
-        # fold is anchored at the home prefix so backslashes elsewhere (shell
-        # escapes, literal arguments, regex patterns) are untouched.
-        monkeypatch.setenv("HOME", "/Users/me")
-        from merge_json import _canonicalize_command
-
-        with_backslash = 'python3 "$HOME/foo.py" --pattern "a\\b"'
-        with_forward = 'python3 "$HOME/foo.py" --pattern "a/b"'
-        assert _canonicalize_command(with_backslash) != _canonicalize_command(with_forward)
-        # The backslash in the argument is preserved verbatim.
-        assert "a\\b" in _canonicalize_command(with_backslash)
-
-    def test_path_span_folds_while_arg_backslashes_preserved(self, monkeypatch):
-        # The path under home folds (\ -> /) but a backslash in a sibling
-        # argument is left alone. Two entries that differ only in path
-        # separator should match; the non-path arg differentiates other pairs.
-        monkeypatch.setenv("HOME", "C:\\Users\\me")
-        from merge_json import _canonicalize_command
-
-        raw = 'python3 "$HOME/foo/bar.py" --regex "x\\y"'
-        native = 'python3 "C:\\Users\\me\\foo\\bar.py" --regex "x\\y"'
-        assert _canonicalize_command(raw) == _canonicalize_command(native)
-        # The non-path backslash in --regex is NOT folded.
-        assert "x\\y" in _canonicalize_command(raw)
+        out = transform_uvw_gui_script({"command": "eslint --fix"})
+        assert out == {"command": "eslint --fix"}
 
 
 class TestLoadJson:
@@ -317,33 +356,9 @@ class TestIsSnykCommand:
         assert _is_snyk_command("") is False
 
 
-class TestCommandScriptKeyAndLauncher:
-    """Redirect-aware script identity (options 1 + 2 in merge_json)."""
-
-    def test_script_key_ignores_trailing_redirect_and_log(self):
-        cmd = (
-            "uv run $GEMINI_PROJECT_DIR/.gemini/hooks/snyk_secure_at_inception.py "
-            ">> $GEMINI_PROJECT_DIR/.gemini/hooks/snyk_secure_at_inception.log"
-        )
-        key = _command_script_key(cmd)
-        assert key is not None
-        assert key.endswith("snyk_secure_at_inception.py")
-        assert "snyk_secure_at_inception.log" not in key
-
-    def test_launcher_excludes_script_not_log_with_redirect(self):
-        cmd = (
-            'uv run "/proj/.gemini/hooks/snyk_secure_at_inception.py" '
-            '>> "/proj/.gemini/hooks/out.log"'
-        )
-        assert _command_launcher(cmd) == "uv run"
-
-    def test_legacy_launcher_python3_with_redirect(self):
-        cmd = (
-            'python3 "$HOME/.cursor/hooks/snyk_secure_at_inception.py" '
-            '>> "$HOME/.cursor/hooks/scan.log"'
-        )
-        assert _command_launcher(cmd) == "python3"
-        assert _command_script_key(cmd).endswith("snyk_secure_at_inception.py")
+class TestMergeRedirectEntries:
+    """Entries that pipe the hook script's output to a log file are still
+    matched by the script name, so a reinstall refreshes them in place."""
 
     def test_merge_replaces_legacy_when_target_has_redirect(self, write_json, snyk_cursor_source):
         target = write_json(
@@ -480,7 +495,49 @@ class TestMergeCursorHooks:
             'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
         )
 
-    def test_merge_does_not_replace_non_legacy_launcher(self, write_json, snyk_cursor_source):
+    def test_merge_replaces_uv_run_with_uvw_gui_script(self, write_json, tmp_path):
+        """Windows upgrade path: an older installer wrote `uv run ...` to the
+        target. The current Windows installer now writes `uvw run --gui-script ...`.
+        Same script (matched by file name) -> the old entry must be replaced in
+        place, not appended alongside."""
+        source = write_json(
+            "source/cursor_hooks.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "afterFileEdit": [
+                        {
+                            "command": (
+                                "uvw run --gui-script "
+                                '"$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
+                            )
+                        }
+                    ]
+                },
+            },
+        )
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "afterFileEdit": [
+                        {"command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'}
+                    ]
+                },
+            },
+        )
+        merge_cursor_hooks(target, source)
+        after_edit = read_json(target)["hooks"]["afterFileEdit"]
+        assert len(after_edit) == 1
+        assert after_edit[0]["command"] == (
+            'uvw run --gui-script "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
+        )
+
+    def test_merge_replaces_any_runner_of_same_script(self, write_json, snyk_cursor_source):
+        # Matching is by script name, so even an unusual runner that points at
+        # our hook script is treated as ours and refreshed in place — never
+        # left behind as a duplicate.
         target = write_json(
             "target.json",
             {
@@ -495,8 +552,170 @@ class TestMergeCursorHooks:
         merge_cursor_hooks(target, snyk_cursor_source)
         after_edit = read_json(target)["hooks"]["afterFileEdit"]
         commands = [e["command"] for e in after_edit]
-        assert 'cat "$HOME/.cursor/hooks/snyk_secure_at_inception.py"' in commands
-        assert 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"' in commands
+        assert commands == ['uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"']
+
+    def test_merge_collapses_multiple_existing_entries_for_same_script(
+        self, write_json, snyk_cursor_source
+    ):
+        # Two stale entries that run the same script (different runners) must
+        # collapse to a single refreshed entry — never leave a duplicate behind.
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "afterFileEdit": [
+                        {"command": 'python "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'},
+                        {"command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'},
+                    ]
+                },
+            },
+        )
+        merge_cursor_hooks(target, snyk_cursor_source)
+        after_edit = read_json(target)["hooks"]["afterFileEdit"]
+        assert [e["command"] for e in after_edit] == [
+            'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
+        ]
+
+    def test_merge_preserves_position_of_existing_hook(self, write_json, snyk_cursor_source):
+        # A stale hook entry is refreshed in place — the user's own hook that
+        # followed it keeps its relative order.
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "afterFileEdit": [
+                        {"command": 'python "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'},
+                        {"command": "eslint --fix"},
+                    ]
+                },
+            },
+        )
+        merge_cursor_hooks(target, snyk_cursor_source)
+        commands = [e["command"] for e in read_json(target)["hooks"]["afterFileEdit"]]
+        assert commands == [
+            'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"',
+            "eslint --fix",
+        ]
+
+    def test_merge_skips_non_dict_entries(self, write_json, snyk_cursor_source):
+        # A malformed config with a non-dict list item must not crash the merge.
+        target = write_json(
+            "target.json",
+            {"version": 1, "hooks": {"afterFileEdit": ["not-a-dict", {"command": "eslint --fix"}]}},
+        )
+        merge_cursor_hooks(target, snyk_cursor_source)
+        entries = read_json(target)["hooks"]["afterFileEdit"]
+        assert "not-a-dict" in entries
+        assert {"command": "eslint --fix"} in entries
+        assert any(
+            isinstance(e, dict) and "snyk_secure_at_inception" in e.get("command", "")
+            for e in entries
+        )
+
+    def test_merge_replaces_raw_home_when_source_is_expanded(self, write_json, tmp_path):
+        """Upgrade path: target was installed when source used $HOME; current source
+        ships an install-time-expanded absolute path. The two must collapse to one
+        entry (no duplicate)."""
+        home = os.path.expanduser("~")
+        expanded = f'uv run "{home}/.cursor/hooks/snyk_secure_at_inception.py"'
+        source = write_json(
+            "source/cursor_hooks.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "afterFileEdit": [{"command": expanded}],
+                    "stop": [{"command": expanded}],
+                },
+            },
+        )
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "afterFileEdit": [
+                        {"command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'}
+                    ]
+                },
+            },
+        )
+        merge_cursor_hooks(target, source)
+        after_edit = read_json(target)["hooks"]["afterFileEdit"]
+        assert len(after_edit) == 1
+        # Target should have migrated to the install-time-expanded form.
+        assert after_edit[0]["command"] == expanded
+
+    def test_merge_dedupes_mixed_separator_legacy_entry(self, write_json, monkeypatch):
+        """Upgrade path: a Windows install of a previous installer version wrote
+        the home-expanded path with mixed separators (the $HOME token was
+        replaced literally so forward slashes from the source survived next to
+        the backslashes from the home prefix). The current installer writes
+        all-native-separator paths via Path. Merge must recognize the legacy
+        mixed-separator entry as the same hook and replace it — never append a
+        duplicate."""
+        # Simulate a Windows home so canonicalization anchors at the same
+        # prefix the test data uses. POSIX expanduser honors $HOME.
+        monkeypatch.setenv("HOME", "C:\\Users\\me")
+        # Mixed-separator legacy form (what a Windows install of the old
+        # installer produced).
+        legacy_mixed = 'uv run "C:\\Users\\me/.cursor/hooks/snyk_secure_at_inception.py"'
+        # Native-separator form (what a Windows install of the new installer
+        # produces). Constructed explicitly so the test does not depend on the
+        # platform running the test.
+        new_native = 'uv run "C:\\Users\\me\\.cursor\\hooks\\snyk_secure_at_inception.py"'
+        source = write_json(
+            "source/cursor_hooks.json",
+            {"version": 1, "hooks": {"afterFileEdit": [{"command": new_native}]}},
+        )
+        target = write_json(
+            "target.json",
+            {"version": 1, "hooks": {"afterFileEdit": [{"command": legacy_mixed}]}},
+        )
+        merge_cursor_hooks(target, source)
+        after_edit = read_json(target)["hooks"]["afterFileEdit"]
+        assert len(after_edit) == 1
+        assert after_edit[0]["command"] == new_native
+
+    def test_merge_dedupes_forward_slash_when_source_is_native(self, write_json, monkeypatch):
+        """Upgrade path variant: target carries an all-forward-slash expanded
+        path (e.g. a Windows install that always used '/' in the past), source
+        is the new all-backslash native form. Single entry after merge."""
+        monkeypatch.setenv("HOME", "C:\\Users\\me")
+        forward_slash = 'uv run "C:/Users/me/.cursor/hooks/snyk_secure_at_inception.py"'
+        new_native = 'uv run "C:\\Users\\me\\.cursor\\hooks\\snyk_secure_at_inception.py"'
+        source = write_json(
+            "source/cursor_hooks.json",
+            {"version": 1, "hooks": {"afterFileEdit": [{"command": new_native}]}},
+        )
+        target = write_json(
+            "target.json",
+            {"version": 1, "hooks": {"afterFileEdit": [{"command": forward_slash}]}},
+        )
+        merge_cursor_hooks(target, source)
+        after_edit = read_json(target)["hooks"]["afterFileEdit"]
+        assert len(after_edit) == 1
+        assert after_edit[0]["command"] == new_native
+
+    def test_merge_is_idempotent_for_native_separator_source(self, write_json, monkeypatch):
+        """Re-running merge with the same native-separator source must not
+        accumulate duplicate entries — the second pass must dedupe by canonical
+        comparison even though the on-disk form has backslashes."""
+        monkeypatch.setenv("HOME", "C:\\Users\\me")
+        new_native = 'uv run "C:\\Users\\me\\.cursor\\hooks\\snyk_secure_at_inception.py"'
+        source = write_json(
+            "source/cursor_hooks.json",
+            {"version": 1, "hooks": {"afterFileEdit": [{"command": new_native}]}},
+        )
+        target = write_json(
+            "target.json",
+            {"version": 1, "hooks": {"afterFileEdit": []}},
+        )
+        merge_cursor_hooks(target, source)
+        merge_cursor_hooks(target, source)
+        after_edit = read_json(target)["hooks"]["afterFileEdit"]
+        assert len(after_edit) == 1
 
     def test_merge_replaces_raw_home_when_source_is_expanded(self, write_json, tmp_path):
         """Upgrade path: target was installed when source used $HOME; current source
@@ -838,6 +1057,65 @@ class TestUnmergeCursorHooks:
         result = read_json(target)
         assert len(result["hooks"]["afterFileEdit"]) == 1
         assert result["hooks"]["afterFileEdit"][0]["command"] == "eslint --fix"
+
+    def test_removes_uvw_gui_form_using_uv_run_source(self, write_json, snyk_cursor_source):
+        """Cross-launcher uninstall: target was written by the Windows installer
+        with `uvw run --gui-script ...`, source still uses the canonical
+        `uv run ...`. Matching is by script file name so the entry is recognized
+        and removed regardless of launcher."""
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "afterFileEdit": [
+                        {
+                            "command": (
+                                "uvw run --gui-script "
+                                '"$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
+                            )
+                        }
+                    ],
+                    "stop": [
+                        {
+                            "command": (
+                                "uvw run --gui-script "
+                                '"$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
+                            )
+                        }
+                    ],
+                },
+            },
+        )
+        unmerge_cursor_hooks(target, snyk_cursor_source)
+        result = read_json(target)
+        assert "afterFileEdit" not in result.get("hooks", {})
+        assert "stop" not in result.get("hooks", {})
+
+    def test_removes_entry_with_extra_script_argument(self, write_json, snyk_cursor_source):
+        # The installed hook carries an extra script-valued argument
+        # (--config setup.py). It must still be recognized as ours and removed
+        # — the argument's name must not break identification / idempotency.
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "afterFileEdit": [
+                        {"command": "eslint --fix"},
+                        {
+                            "command": (
+                                'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py" '
+                                '--config "$HOME/.cursor/hooks/setup.py"'
+                            )
+                        },
+                    ],
+                },
+            },
+        )
+        unmerge_cursor_hooks(target, snyk_cursor_source)
+        result = read_json(target)
+        assert [e["command"] for e in result["hooks"]["afterFileEdit"]] == ["eslint --fix"]
 
     def test_cleans_empty_events(self, write_json, snyk_cursor_source):
         target = write_json(

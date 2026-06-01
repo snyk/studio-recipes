@@ -443,30 +443,88 @@ class TestWinCompatibility:
         monkeypatch.setattr("sys.platform", "linux")
         assert installer._find_win_npm_executable("snyk") is None
 
-    def test_win_resolve_cmd_passthrough_on_non_windows(self, monkeypatch):
-        monkeypatch.setattr("sys.platform", "linux")
-        cmd = ["snyk", "--version"]
-        assert installer._win_resolve_cmd(cmd) == cmd
+    def test_should_gui_transform_only_on_windows(self, monkeypatch):
+        monkeypatch.setattr(installer, "_IS_WINDOWS", False)
+        assert installer._should_gui_transform("merge_cursor_hooks") is False
+        monkeypatch.setattr(installer, "_IS_WINDOWS", True)
+        assert installer._should_gui_transform("merge_cursor_hooks") is True
+        assert installer._should_gui_transform("unmerge_cursor_hooks") is True
+        assert installer._should_gui_transform("merge_copilot_cli_hooks") is True
+        assert installer._should_gui_transform("merge_mcp_servers") is False
 
-    def test_win_resolve_cmd_wraps_cmd_extension_with_cmd_c(self, monkeypatch, tmp_path):
-        monkeypatch.setattr("sys.platform", "win32")
-        fake_snyk = tmp_path / "snyk.cmd"
-        fake_snyk.touch()
+    def test_expand_source_rewrites_uv_run_on_windows(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(installer, "_IS_WINDOWS", True)
         monkeypatch.setattr(
-            installer.shutil, "which", lambda name: str(fake_snyk) if name == "snyk" else None
+            installer.os.path, "expanduser", lambda p: "/home/me" if p == "~" else p
         )
-        result = installer._win_resolve_cmd(["snyk", "--version"])
-        assert result[:2] == ["cmd", "/c"]
-        assert "snyk" in result
+        src = tmp_path / "hooks.json"
+        src.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "hooks": {
+                        "afterFileEdit": [
+                            {"command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'}
+                        ]
+                    },
+                }
+            )
+        )
+        with installer._expand_source("merge_cursor_hooks", src) as resolved:
+            data = json.loads(Path(resolved).read_text())
+        cmd = data["hooks"]["afterFileEdit"][0]["command"]
+        assert "uvw run --gui-script" in cmd
+        assert "uv run" not in cmd.replace("uvw run", "")
 
-    def test_win_resolve_cmd_passthrough_for_exe(self, monkeypatch, tmp_path):
-        monkeypatch.setattr("sys.platform", "win32")
-        fake_node = tmp_path / "node.exe"
-        fake_node.touch()
+    def test_expand_source_preserves_uv_run_off_windows(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(installer, "_IS_WINDOWS", False)
         monkeypatch.setattr(
-            installer.shutil, "which", lambda name: str(fake_node) if name == "node" else None
+            installer.os.path, "expanduser", lambda p: "/home/me" if p == "~" else p
         )
-        assert installer._win_resolve_cmd(["node", "--version"]) == ["node", "--version"]
+        src = tmp_path / "hooks.json"
+        src.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "hooks": {
+                        "afterFileEdit": [
+                            {"command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'}
+                        ]
+                    },
+                }
+            )
+        )
+        with installer._expand_source("merge_cursor_hooks", src) as resolved:
+            data = json.loads(Path(resolved).read_text())
+        cmd = data["hooks"]["afterFileEdit"][0]["command"]
+        assert "uvw" not in cmd
+        assert cmd.startswith("uv run ")
+
+    def test_expand_source_rewrites_copilot_cli_hooks_on_windows(self, monkeypatch, tmp_path):
+        # copilot_cli_hooks is NOT in _HOOK_EXPAND_STRATEGIES (Copilot bash runtime
+        # expands $HOME at hook time), but the GUI rewrite must still apply.
+        monkeypatch.setattr(installer, "_IS_WINDOWS", True)
+        src = tmp_path / "hooks.json"
+        src.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "hooks": {
+                        "sessionStart": [
+                            {
+                                "bash": 'uv run "$HOME/.copilot/hooks/snyk_secure_at_inception.py" sessionStart'
+                            }
+                        ]
+                    },
+                }
+            )
+        )
+        with installer._expand_source("merge_copilot_cli_hooks", src) as resolved:
+            data = json.loads(Path(resolved).read_text())
+        bash_cmd = data["hooks"]["sessionStart"][0]["bash"]
+        assert bash_cmd.startswith("uvw run --gui-script ")
+        # $HOME should be preserved (copilot strategy isn't in the expand set).
+        assert "$HOME" in bash_cmd
 
 
 # ===========================================================================
@@ -1441,6 +1499,7 @@ class TestVSCodeSettingsConflict:
 
     def test_windows_global_path(self, manifest, vscode_env, monkeypatch):
         monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(installer, "_IS_WINDOWS", True)
         appdata = vscode_env["home"] / "AppData" / "Roaming"
         monkeypatch.setitem(os.environ, "APPDATA", str(appdata))
 

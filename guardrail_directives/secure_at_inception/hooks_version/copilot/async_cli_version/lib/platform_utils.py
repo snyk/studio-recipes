@@ -154,23 +154,6 @@ def get_snyk_binary_names() -> List[str]:
 
 
 # =============================================================================
-# CLI COMMAND CONSTRUCTION
-# =============================================================================
-
-
-def build_cli_argv(argv: List[str]) -> List[str]:
-    """Wrap Windows .cmd/.bat shims in `cmd /c` for shell=False subprocess use.
-
-    CreateProcess cannot execute .cmd/.bat scripts directly (npm-installed
-    CLIs ship as such shims); a standalone .exe and all non-Windows platforms
-    are returned unchanged.
-    """
-    if _IS_WINDOWS and Path(argv[0]).suffix.lower() in (".cmd", ".bat"):
-        return ["cmd", "/c"] + argv
-    return argv
-
-
-# =============================================================================
 # FILE LOCKING
 # =============================================================================
 

@@ -20,10 +20,20 @@ Usage:
 import json
 import os
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 SNYK_STUDIO_VERSION = "1.0.0"
+
+_IS_WINDOWS = sys.platform == "win32"
+# Console apps (snyk / the cmd.exe shim) spawned from this windowless background
+# worker allocate a new console window on Windows; CREATE_NO_WINDOW suppresses the
+# flash. The flag only exists on Windows; elsewhere this is 0 (subprocess's
+# default creationflags, i.e. a no-op).
+_CREATE_NO_WINDOW = 0
+if sys.platform == "win32":
+    _CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW
 
 
 @dataclass
@@ -172,6 +182,8 @@ def run_snyk_cli(args: List[str], timeout: int = 300) -> tuple[int, str, str]:
             text=True,
             timeout=timeout,
             env=env,
+            shell=_IS_WINDOWS,
+            creationflags=_CREATE_NO_WINDOW,
         )
         return result.returncode, result.stdout, result.stderr
     except subprocess.TimeoutExpired:

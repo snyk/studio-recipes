@@ -1281,7 +1281,11 @@ def remove_file(path: Path, dry_run: bool) -> None:
 def remove_pycache_under(root: Path, dry_run: bool) -> None:
     if not root.is_dir():
         return
-    for d in root.glob("__pycache__"):
+    # Recursive: hook scripts live several levels below the install root
+    # (e.g. .snyk-studio/components/scripts/), so any __pycache__ they produce
+    # is nested. A non-recursive glob would miss it and leave the directory
+    # non-empty, blocking remove_empty_parents from pruning the tree.
+    for d in root.rglob("__pycache__"):
         if d.is_dir():
             if dry_run:
                 print(f"    {C.dim(f'[dry-run] remove: {d}/')}")
@@ -1305,6 +1309,43 @@ def remove_empty_parents(directory: Path, stop: Path, dry_run: bool) -> None:
         current.rmdir()
         print(f"    {C.green('removed:')} {current}/")
         current = current.parent
+
+
+def remove_legacy_workspace_files(sources: Dict[str, Any], workspace: Path, dry_run: bool) -> None:
+    """Remove workspace files written by older installer versions at locations
+    we no longer use (declared as ``legacy_files`` in the manifest), and prune
+    their emptied parents + ``__pycache__``.
+
+    Run from both install and uninstall: on install it migrates an older layout
+    (e.g. ``.snyk/studio/...``, which collided with a repo's existing ``.snyk``
+    policy file) by deleting the stale copy after the current one is written; on
+    uninstall it guarantees cleanup is complete regardless of which version
+    performed the original install. ``remove_empty_parents`` stops at any
+    non-empty directory, so a sibling ``.snyk`` policy file (or any other user
+    content) is preserved — only the empty tree we created is removed.
+    """
+    legacy_files = sources.get("legacy_files", [])
+    if not legacy_files:
+        return
+
+    for f in legacy_files:
+        remove_file(resolve_install_path(workspace, f["dest"]), dry_run)
+
+    install_roots = set()
+    for f in legacy_files:
+        dest = resolve_install_path(workspace, f["dest"])
+        try:
+            rel = dest.relative_to(workspace.resolve())
+        except ValueError:
+            continue
+        if rel.parts:
+            install_roots.add(workspace / rel.parts[0])
+    for root in install_roots:
+        if root.is_dir():
+            remove_pycache_under(root, dry_run)
+    for f in legacy_files:
+        dest = resolve_install_path(workspace, f["dest"])
+        remove_empty_parents(dest.parent, workspace, dry_run)
 
 
 def chmod_python_files(ade_home: Path, dry_run: bool) -> None:
@@ -1391,6 +1432,11 @@ def install_workspace_recipe(
                 dest.chmod(0o755)
             except OSError:
                 pass
+
+    # Migrate away from older layouts: the current files are in place and the
+    # hook shim (replaced by tag, so it now points at the new path) is wired —
+    # delete any stale copy an older installer version left behind.
+    remove_legacy_workspace_files(sources, workspace, dry_run)
 
 
 def verify_workspace_recipe(
@@ -1487,6 +1533,9 @@ def uninstall_workspace_recipe(
     for f in files:
         dest = resolve_install_path(workspace, f["dest"])
         remove_empty_parents(dest.parent, workspace, dry_run)
+
+    # Also clear any tree left by an older installer version (different dest).
+    remove_legacy_workspace_files(sources, workspace, dry_run)
 
 
 def install_recipe(

@@ -33,7 +33,7 @@ hook returns success immediately without invoking Snyk.
 ## Installation
 
 The hook script is **installed inside the workspace** at
-`.snyk/studio/components/scripts/snyk_secure_at_commit.py`. Hook-manager
+`.snyk-studio/components/scripts/snyk_secure_at_commit.py`. Hook-manager
 configs that get committed (`.pre-commit-config.yaml`, `.husky/pre-commit`)
 reference the script via that workspace-relative path, so cloning the repo
 on a new machine — or running `pre-commit install` there — Just Works
@@ -49,12 +49,16 @@ workspace already has, in this order:
 Each wire-up is wrapped in `# >>> snyk-secure-at-commit >>>` /
 `# <<< snyk-secure-at-commit <<<` markers so the installer can later remove
 the entry idempotently on uninstall. The shim command is a workspace-relative
-path (`uv run .snyk/studio/components/scripts/snyk_secure_at_commit.py`) so
+path (`uv run .snyk-studio/components/scripts/snyk_secure_at_commit.py`) so
 it stays portable when the file is committed.
 
-The `.snyk/studio/components/scripts/` tree should be committed alongside
+The `.snyk-studio/components/scripts/` tree should be committed alongside
 your `.pre-commit-config.yaml` / `.husky/pre-commit` so collaborators get
 the same pre-commit behavior on `git pull`.
+
+> Earlier versions installed the script under `.snyk/studio/`, which collided
+> with a repo's existing `.snyk` policy file. The location is now `.snyk-studio/`;
+> uninstall still removes the old `.snyk/studio/` tree for a clean migration.
 
 ## Uninstall
 

@@ -68,7 +68,8 @@ def payload():
     return pl
 
 
-SAC_DEST = Path(".snyk") / "studio" / "components" / "scripts" / "snyk_secure_at_commit.py"
+SAC_DEST = Path(".snyk-studio") / "components" / "scripts" / "snyk_secure_at_commit.py"
+LEGACY_SAC_DEST = Path(".snyk") / "studio" / "components" / "scripts" / "snyk_secure_at_commit.py"
 
 
 # ============================================================================
@@ -91,18 +92,24 @@ class TestManifestSAC:
         assert list(sources.keys()) == ["workspace"]
         ws = sources["workspace"]
         assert ws["files"], "sac-hooks must ship files"
-        # All file dests are workspace-relative under .snyk/studio/components/scripts/
+        # All file dests are workspace-relative under .snyk-studio/components/scripts/
         # so the script ships inside the repo and any committed hook config
-        # (e.g. .pre-commit-config.yaml) references it portably.
+        # (e.g. .pre-commit-config.yaml) references it portably. The directory
+        # is deliberately NOT under .snyk/, which can already exist as a Snyk
+        # policy file in the repo.
         for f in ws["files"]:
-            assert f["dest"].startswith(".snyk/studio/components/scripts/"), f
+            assert f["dest"].startswith(".snyk-studio/components/scripts/"), f
             assert not f["dest"].startswith("/"), f
+        # Older installs lived under .snyk/studio/; uninstall still cleans those.
+        assert ws["legacy_files"] == [
+            {"dest": ".snyk/studio/components/scripts/snyk_secure_at_commit.py"}
+        ]
         assert ws["pre_commit_integration"]["tag"] == "snyk-secure-at-commit"
         # The shim command is workspace-relative too — no absolute path or
         # token gets baked in, so a committed .pre-commit-config.yaml stays
         # portable across machines.
         cmd = ws["pre_commit_integration"]["command"]
-        assert ".snyk/studio/components/scripts/snyk_secure_at_commit.py" in cmd
+        assert ".snyk-studio/components/scripts/snyk_secure_at_commit.py" in cmd
         assert "$WORKSPACE" not in cmd
         assert "$USER_DATA_HOME" not in cmd
         # The installer wires the pre-commit form with --staged so the hook
@@ -678,7 +685,7 @@ class TestInstallWorkspaceRecipe:
         self, workspace, manifest, payload, capsys
     ):
         installer.install_workspace_recipe("sac-hooks", manifest, payload, workspace, dry_run=False)
-        # Script lives at <workspace>/.snyk/studio/components/scripts/...
+        # Script lives at <workspace>/.snyk-studio/components/scripts/...
         script = workspace / SAC_DEST
         assert script.is_file()
         # Hook shim is present in the git-native pre-commit file.
@@ -733,7 +740,103 @@ class TestInstallWorkspaceRecipe:
         # The shim is gone…
         assert not (workspace / ".git" / "hooks" / "pre-commit").exists()
         # …and so is the workspace-local script tree.
+        assert not (workspace / ".snyk-studio").exists()
+
+    def test_install_over_legacy_rewrites_shim_and_migrates_script(
+        self, workspace, manifest, payload
+    ):
+        # Simulate a legacy install: a git-native shim pointing at the old
+        # .snyk/studio/ path, plus the old script committed on disk.
+        legacy_cmd = "uv run .snyk/studio/components/scripts/snyk_secure_at_commit.py --staged"
+        spec = git_hooks.HookSpec(tag="snyk-secure-at-commit", command=legacy_cmd)
+        git_hooks.install_hook(workspace, spec)
+        legacy = workspace / LEGACY_SAC_DEST
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text("# legacy script\n")
+
+        # Re-run install (an upgrade).
+        installer.install_workspace_recipe("sac-hooks", manifest, payload, workspace, dry_run=False)
+
+        hook = (workspace / ".git" / "hooks" / "pre-commit").read_text()
+        # The shim now points at the new location, with no duplicate block…
+        assert ".snyk-studio/components/scripts/snyk_secure_at_commit.py" in hook
+        assert ".snyk/studio/" not in hook
+        assert hook.count("# >>> snyk-secure-at-commit >>>") == 1
+        # …the new script is in place…
+        assert (workspace / SAC_DEST).is_file()
+        # …and the stale legacy tree is gone.
+        assert not legacy.exists()
         assert not (workspace / ".snyk").exists()
+
+    def test_install_coexists_with_existing_snyk_policy_file(self, workspace, manifest, payload):
+        # A repo may already have a `.snyk` policy file. Installing under
+        # `.snyk-studio/` must not collide with it (the old `.snyk/studio/`
+        # layout did) and must leave the policy file untouched.
+        policy = workspace / ".snyk"
+        policy.write_text("version: v1.0.0\nignore: {}\n")
+        installer.install_workspace_recipe("sac-hooks", manifest, payload, workspace, dry_run=False)
+        assert (workspace / SAC_DEST).is_file()
+        # The policy file is still a file with its original contents.
+        assert policy.is_file()
+        assert "version: v1.0.0" in policy.read_text()
+
+    def test_uninstall_removes_legacy_snyk_studio_tree(self, workspace, manifest, payload):
+        # Simulate an install done by an older installer version under
+        # `.snyk/studio/...`. Uninstall must remove the legacy script and prune
+        # its now-empty parents.
+        legacy = workspace / LEGACY_SAC_DEST
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text("# legacy script\n")
+
+        installer.uninstall_workspace_recipe(
+            "sac-hooks", manifest, payload, workspace, dry_run=False
+        )
+
+        assert not legacy.exists()
+        # The whole legacy tree, including `.snyk/`, is pruned since it is empty.
+        assert not (workspace / ".snyk").exists()
+
+    def test_uninstall_prunes_legacy_tree_with_nested_pycache(self, workspace, manifest, payload):
+        # The script sits several levels deep, so any __pycache__ it generates
+        # is nested (not directly under .snyk/). Cleanup must find and remove it
+        # recursively — otherwise the directory stays non-empty and the legacy
+        # tree can't be pruned.
+        legacy = workspace / LEGACY_SAC_DEST
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text("# legacy script\n")
+        pycache = legacy.parent / "__pycache__"
+        pycache.mkdir()
+        (pycache / "snyk_secure_at_commit.cpython-312.pyc").write_bytes(b"\x00")
+
+        installer.uninstall_workspace_recipe(
+            "sac-hooks", manifest, payload, workspace, dry_run=False
+        )
+
+        assert not pycache.exists()
+        # With the nested __pycache__ gone, the whole legacy tree prunes away.
+        assert not (workspace / ".snyk").exists()
+
+    def test_uninstall_preserves_snyk_policy_file_during_legacy_cleanup(
+        self, workspace, manifest, payload
+    ):
+        # Legacy cleanup must not touch a sibling `.snyk` *policy file* — only
+        # the empty `.snyk/` directory tree it created is pruned. (Here `.snyk`
+        # is a directory holding both the legacy tree and a user file, so the
+        # directory itself stays because it is non-empty after cleanup.)
+        legacy = workspace / LEGACY_SAC_DEST
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text("# legacy script\n")
+        user_file = workspace / ".snyk" / "keep-me.txt"
+        user_file.write_text("user data\n")
+
+        installer.uninstall_workspace_recipe(
+            "sac-hooks", manifest, payload, workspace, dry_run=False
+        )
+
+        assert not legacy.exists()
+        # `.snyk/studio/` is gone but the user's file (and thus `.snyk/`) remains.
+        assert not (workspace / ".snyk" / "studio").exists()
+        assert user_file.is_file()
 
     def test_dry_run_makes_no_filesystem_changes(self, workspace, manifest, payload):
         installer.install_workspace_recipe("sac-hooks", manifest, payload, workspace, dry_run=True)

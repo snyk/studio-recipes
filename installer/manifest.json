@@ -264,11 +264,14 @@
       "sources": {
         "workspace": {
           "files": [
-            { "src": "guardrail_directives/secure_at_commit/snyk_secure_at_commit.py", "dest": ".snyk/studio/components/scripts/snyk_secure_at_commit.py" }
+            { "src": "guardrail_directives/secure_at_commit/snyk_secure_at_commit.py", "dest": ".snyk-studio/components/scripts/snyk_secure_at_commit.py" }
+          ],
+          "legacy_files": [
+            { "dest": ".snyk/studio/components/scripts/snyk_secure_at_commit.py" }
           ],
           "pre_commit_integration": {
             "tag": "snyk-secure-at-commit",
-            "command": "uv run .snyk/studio/components/scripts/snyk_secure_at_commit.py --staged"
+            "command": "uv run .snyk-studio/components/scripts/snyk_secure_at_commit.py --staged"
           }
         }
       }

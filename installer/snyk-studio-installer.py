@@ -31,6 +31,7 @@ import os
 import platform
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -44,6 +45,16 @@ BUNDLE_ENV = "SNYK_STUDIO_BUNDLE_ROOT"
 GLOBAL = "global"
 WORKSPACE = "workspace"
 SNYK_MINIMUM_VERSION = "1.1302.0"
+
+_IS_WINDOWS = sys.platform == "win32"
+
+# When the installer runs inside a GUI ADE (no attached console), spawning a
+# console subprocess via shell=True (which goes through cmd.exe) pops up a
+# console window. CREATE_NO_WINDOW suppresses it. The flag only exists on
+# Windows; elsewhere this is 0 (subprocess's default creationflags, i.e. no-op).
+_CREATE_NO_WINDOW = 0
+if sys.platform == "win32":
+    _CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW
 
 
 # =============================================================================
@@ -60,7 +71,7 @@ class Color:
     def _detect(self) -> bool:
         if not hasattr(sys.stdout, "isatty") or not sys.stdout.isatty():
             return False
-        if sys.platform == "win32":
+        if _IS_WINDOWS:
             try:
                 import ctypes
 
@@ -364,7 +375,7 @@ class Manifest:
         settings_paths = []
 
         # set path prefix paths depending on OS
-        if sys.platform == "win32":
+        if _IS_WINDOWS:
             path_prefix = Path(os.environ.get("APPDATA", str(home / "AppData/Roaming")))
         elif sys.platform == "darwin":
             path_prefix = Path(home / "Library/Application Support")
@@ -478,7 +489,7 @@ def _find_win_npm_executable(name: str) -> Optional[str]:
     nvm-windows stores global npm packages (snyk, npm, etc.) in %APPDATA%\\npm by default.
     This directory is sometimes absent from the PATH inherited by Python subprocesses.
     """
-    if sys.platform != "win32":
+    if not _IS_WINDOWS:
         return None
     search_dirs: List[Path] = []
     appdata = os.environ.get("APPDATA", "")
@@ -497,21 +508,6 @@ def _find_win_npm_executable(name: str) -> Optional[str]:
             if candidate.is_file():
                 return str(candidate)
     return None
-
-
-def _win_resolve_cmd(cmd: List[str]) -> List[str]:
-    """On Windows, prefix .cmd/.bat executables with 'cmd /c' for subprocess compatibility.
-
-    Windows CreateProcess cannot execute .cmd/.bat scripts directly; cmd.exe is required.
-    This affects npm-installed CLI tools (snyk, npm itself) that ship as .cmd wrappers,
-    as is the case with nvm-windows managed installations.
-    """
-    if sys.platform != "win32":
-        return cmd
-    exe = shutil.which(cmd[0]) or _find_win_npm_executable(cmd[0])
-    if exe and Path(exe).suffix.lower() in (".cmd", ".bat"):
-        return ["cmd", "/c"] + cmd
-    return cmd
 
 
 # =============================================================================
@@ -632,11 +628,17 @@ def _update_process_path_for_nodejs(base_paths: Optional[List[str]] = None) -> N
     else:
         if sys.platform == "darwin":
             new_paths.extend(["brew --prefix"])
-        elif sys.platform == "win32":
+        elif _IS_WINDOWS:
             new_paths.append("C:\\Program Files\\nodejs")
             appdata = os.environ.get("APPDATA")
             if appdata:
                 new_paths.append(os.path.join(appdata, "npm"))
+            # nvm-windows install root: some setups keep globally installed CLIs
+            # (snyk) here. Mirror _find_win_npm_executable so shell-based PATH
+            # discovery can run what that helper is able to find.
+            nvm_home = os.environ.get("NVM_HOME", "")
+            if nvm_home:
+                new_paths.append(nvm_home)
             # nvm-windows: NVM_SYMLINK points to the active Node.js version directory
             nvm_symlink = os.environ.get("NVM_SYMLINK", "")
             if nvm_symlink:
@@ -645,7 +647,7 @@ def _update_process_path_for_nodejs(base_paths: Optional[List[str]] = None) -> N
             new_paths.extend(["/usr/local/bin", "/usr/bin"])
 
     current_path = os.environ.get("PATH", "")
-    path_sep = ";" if sys.platform == "win32" else ":"
+    path_sep = ";" if _IS_WINDOWS else ":"
     existing_paths = set(current_path.split(path_sep))
 
     added = []
@@ -662,15 +664,11 @@ def ensure_node_installed(auto_yes: bool) -> bool:
     if shutil.which("node") and shutil.which("npm"):
         # On Windows, ensure %APPDATA%\npm (global npm packages like snyk) is also on PATH
         # even when node/npm themselves are already found via NVM_SYMLINK or similar.
-        if sys.platform == "win32":
+        if _IS_WINDOWS:
             _update_process_path_for_nodejs()
         return True
     # On Windows with nvm-windows, node/npm may live in paths not yet on PATH
-    if (
-        sys.platform == "win32"
-        and _find_win_npm_executable("node")
-        and _find_win_npm_executable("npm")
-    ):
+    if _IS_WINDOWS and _find_win_npm_executable("node") and _find_win_npm_executable("npm"):
         _update_process_path_for_nodejs()
         return True
 
@@ -724,7 +722,7 @@ def ensure_node_installed(auto_yes: bool) -> bool:
 def run_command(cmd: list[str], warn: str) -> int:
     """Run the given command and return the exit code (increments warning count in check_prerequisites)."""
     try:
-        run(_win_resolve_cmd(cmd), check=True)
+        run(cmd, check=True, shell=_IS_WINDOWS, creationflags=_CREATE_NO_WINDOW)
         return 0
     except Exception:
         print(warn)
@@ -735,11 +733,10 @@ def check_prerequisites(auto_yes: bool) -> None:
     """Check that the required prerequisites are installed and configured. If not, attempt to install them."""
 
     warnings = 0
-    is_windows = sys.platform == "win32"
 
     def get_npm_install_cmd(pkg: str) -> List[str]:
         cmd = ["npm", "install", "-g", pkg]
-        return ["sudo"] + cmd if not is_windows else cmd
+        return ["sudo"] + cmd if not _IS_WINDOWS else cmd
 
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
     print(f"  {C.green('OK')} Python {py_ver}")
@@ -757,7 +754,14 @@ def check_prerequisites(auto_yes: bool) -> None:
     minimum_snyk_version = parse_version(SNYK_MINIMUM_VERSION)
 
     if get_snyk_path():
-        r = run(_win_resolve_cmd(["snyk", "--version"]), capture_output=True, text=True, timeout=10)
+        r = run(
+            ["snyk", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            shell=_IS_WINDOWS,
+            creationflags=_CREATE_NO_WINDOW,
+        )
         ver_str = r.stdout.strip().splitlines()[0] if r.stdout else "unknown"
         match = re.match(r"(\d+\.\d+\.\d+)", ver_str)
         if match:
@@ -830,7 +834,7 @@ def _vscode_user_dir() -> Path:
     """
     home = Path.home()
 
-    if sys.platform == "win32":
+    if _IS_WINDOWS:
         return _join_path_to_env_var("APPDATA", home / "AppData" / "Roaming", "Code")
     if sys.platform == "darwin":
         return home / "Library" / "Application Support" / "Code"
@@ -1034,7 +1038,7 @@ def detect_ades() -> List[str]:
     if (
         (home / ".cursor").is_dir()
         or _cursor_app_bundle_exists()
-        or sys.platform != "win32"
+        or not _IS_WINDOWS
         and _cursor_process_running()
     ):
         detected.append("cursor")
@@ -1137,6 +1141,22 @@ _HOOK_EXPAND_STRATEGIES: frozenset[str] = frozenset(
     {"cursor_hooks", "claude_settings", "gemini_settings", "kiro_settings", "codex_config"}
 )
 
+# Strategies whose source file carries hook commands the Windows installer
+# rewrites from ``uv run`` to ``uvw run --gui-script`` to suppress the console
+# window ``uv run`` would otherwise pop up under graphical ADEs. Includes the
+# Copilot CLI strategy even though it doesn't need install-time $HOME
+# expansion (Copilot CLI runs hooks via bash, which handles $HOME).
+_HOOK_GUI_STRATEGIES: frozenset[str] = frozenset(
+    {
+        "cursor_hooks",
+        "claude_settings",
+        "gemini_settings",
+        "kiro_settings",
+        "codex_config",
+        "copilot_cli_hooks",
+    }
+)
+
 
 def _should_expand_source(strategy: str) -> bool:
     """True iff the source file for ``strategy`` carries hook commands we
@@ -1151,17 +1171,34 @@ def _should_expand_source(strategy: str) -> bool:
     return not strategy.startswith("unmerge_")
 
 
+def _should_gui_transform(strategy: str) -> bool:
+    """True iff the source file for ``strategy`` carries ``uv run`` hook
+    commands the Windows installer should rewrite to ``uvw run --gui-script``.
+
+    Applies on Windows only. Runs for both ``merge_*`` and ``unmerge_*``
+    strategies so the unmerge source matches the on-disk form the installer
+    wrote.
+    """
+    if not _IS_WINDOWS:
+        return False
+    return any(s in strategy for s in _HOOK_GUI_STRATEGIES)
+
+
 @contextlib.contextmanager
 def _expand_source(strategy: str, source: Path) -> Iterator[Path]:
     """Context manager yielding a path to source data with home-dir tokens expanded.
 
     For strategies that pass ``_should_expand_source``, parses the source,
     runs every string through ``expand_hook_command_paths``, writes the
-    result to a temp file, and yields its path. Otherwise yields ``source``
-    unchanged. ``delete=False`` is required on Windows because the file
-    cannot be read while still open.
+    result to a temp file, and yields its path. On Windows, strategies that
+    pass ``_should_gui_transform`` also have ``uv run`` rewritten to
+    ``uvw run --gui-script``. Otherwise yields ``source`` unchanged.
+    ``delete=False`` is required on Windows because the file cannot be read
+    while still open.
     """
-    if not _should_expand_source(strategy):
+    needs_expand = _should_expand_source(strategy)
+    needs_gui = _should_gui_transform(strategy)
+    if not needs_expand and not needs_gui:
         yield source
         return
 
@@ -1187,7 +1224,10 @@ def _expand_source(strategy: str, source: Path) -> Iterator[Path]:
         sys.path.insert(0, lib_dir)
     import merge_json
 
-    data = merge_json.expand_hook_command_paths(data)
+    if needs_expand:
+        data = merge_json.expand_hook_command_paths(data)
+    if needs_gui:
+        data = merge_json.transform_uvw_gui_script(data)
 
     suffix = ".toml" if is_toml else ".json"
     mode = "wb" if is_toml else "w"
@@ -1281,7 +1321,11 @@ def remove_file(path: Path, dry_run: bool) -> None:
 def remove_pycache_under(root: Path, dry_run: bool) -> None:
     if not root.is_dir():
         return
-    for d in root.glob("__pycache__"):
+    # Recursive: hook scripts live several levels below the install root
+    # (e.g. .snyk-studio/components/scripts/), so any __pycache__ they produce
+    # is nested. A non-recursive glob would miss it and leave the directory
+    # non-empty, blocking remove_empty_parents from pruning the tree.
+    for d in root.rglob("__pycache__"):
         if d.is_dir():
             if dry_run:
                 print(f"    {C.dim(f'[dry-run] remove: {d}/')}")
@@ -1307,8 +1351,45 @@ def remove_empty_parents(directory: Path, stop: Path, dry_run: bool) -> None:
         current = current.parent
 
 
+def remove_legacy_workspace_files(sources: Dict[str, Any], workspace: Path, dry_run: bool) -> None:
+    """Remove workspace files written by older installer versions at locations
+    we no longer use (declared as ``legacy_files`` in the manifest), and prune
+    their emptied parents + ``__pycache__``.
+
+    Run from both install and uninstall: on install it migrates an older layout
+    (e.g. ``.snyk/studio/...``, which collided with a repo's existing ``.snyk``
+    policy file) by deleting the stale copy after the current one is written; on
+    uninstall it guarantees cleanup is complete regardless of which version
+    performed the original install. ``remove_empty_parents`` stops at any
+    non-empty directory, so a sibling ``.snyk`` policy file (or any other user
+    content) is preserved — only the empty tree we created is removed.
+    """
+    legacy_files = sources.get("legacy_files", [])
+    if not legacy_files:
+        return
+
+    for f in legacy_files:
+        remove_file(resolve_install_path(workspace, f["dest"]), dry_run)
+
+    install_roots = set()
+    for f in legacy_files:
+        dest = resolve_install_path(workspace, f["dest"])
+        try:
+            rel = dest.relative_to(workspace.resolve())
+        except ValueError:
+            continue
+        if rel.parts:
+            install_roots.add(workspace / rel.parts[0])
+    for root in install_roots:
+        if root.is_dir():
+            remove_pycache_under(root, dry_run)
+    for f in legacy_files:
+        dest = resolve_install_path(workspace, f["dest"])
+        remove_empty_parents(dest.parent, workspace, dry_run)
+
+
 def chmod_python_files(ade_home: Path, dry_run: bool) -> None:
-    if sys.platform == "win32" or dry_run:
+    if _IS_WINDOWS or dry_run:
         return
     for py_file in ade_home.rglob("*.py"):
         rel = str(py_file.relative_to(ade_home))
@@ -1386,11 +1467,16 @@ def install_workspace_recipe(
     # chmod +x on Python files (covers both workspace-local and user-data dests)
     for f in sources.get("files", []):
         dest = resolve_install_path(workspace, f["dest"])
-        if dest.suffix == ".py" and dest.exists() and sys.platform != "win32" and not dry_run:
+        if dest.suffix == ".py" and dest.exists() and not _IS_WINDOWS and not dry_run:
             try:
                 dest.chmod(0o755)
             except OSError:
                 pass
+
+    # Migrate away from older layouts: the current files are in place and the
+    # hook shim (replaced by tag, so it now points at the new path) is wired —
+    # delete any stale copy an older installer version left behind.
+    remove_legacy_workspace_files(sources, workspace, dry_run)
 
 
 def verify_workspace_recipe(
@@ -1487,6 +1573,9 @@ def uninstall_workspace_recipe(
     for f in files:
         dest = resolve_install_path(workspace, f["dest"])
         remove_empty_parents(dest.parent, workspace, dry_run)
+
+    # Also clear any tree left by an older installer version (different dest).
+    remove_legacy_workspace_files(sources, workspace, dry_run)
 
 
 def install_recipe(
@@ -1798,25 +1887,25 @@ def main() -> None:
         mcp_tool_name = SNYK_MCP_TOOL_NAMES[ade]
         print(f"    Cleaning up {scope} skills for {ade}...")
         run(
-            _win_resolve_cmd(
-                [
-                    "snyk",
-                    "mcp",
-                    "configure",
-                    "--tool",
-                    mcp_tool_name,
-                    "--rm",
-                    "--rules-scope",
-                    scope,
-                    "--rule-type",
-                    "always-apply",
-                    "--workspace",
-                    ".",
-                    "--configure-mcp=false",
-                    "--configure-rules=true",
-                ]
-            ),
+            [
+                "snyk",
+                "mcp",
+                "configure",
+                "--tool",
+                mcp_tool_name,
+                "--rm",
+                "--rules-scope",
+                scope,
+                "--rule-type",
+                "always-apply",
+                "--workspace",
+                ".",
+                "--configure-mcp=false",
+                "--configure-rules=true",
+            ],
             timeout=10,
+            shell=_IS_WINDOWS,
+            creationflags=_CREATE_NO_WINDOW,
         )
 
     # Verify mode

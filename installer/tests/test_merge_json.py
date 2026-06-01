@@ -228,6 +228,63 @@ class TestCommandScriptNames:
         assert _command_script_names(None) == set()
 
 
+class TestTransformUvwGuiScript:
+    """transform_uvw_gui_script rewrites `uv run` to `uvw run --gui-script` in strings."""
+
+    def test_substitutes_uv_run_in_command_string(self):
+        from merge_json import transform_uvw_gui_script
+
+        out = transform_uvw_gui_script({"command": 'uv run "$HOME/x.py"'})
+        assert out == {"command": 'uvw run --gui-script "$HOME/x.py"'}
+
+    def test_does_not_match_uvx(self):
+        from merge_json import transform_uvw_gui_script
+
+        out = transform_uvw_gui_script({"command": "uvx run something"})
+        assert out == {"command": "uvx run something"}
+
+    def test_does_not_match_my_uv_run(self):
+        # Bare-word check prevents corrupting unrelated tokens that happen to
+        # end in "uv run". The pattern requires a non-identifier prefix.
+        from merge_json import transform_uvw_gui_script
+
+        out = transform_uvw_gui_script({"command": "my-uv run something"})
+        assert out == {"command": "my-uv run something"}
+
+    def test_idempotent_on_already_transformed(self):
+        from merge_json import transform_uvw_gui_script
+
+        already = {"command": 'uvw run --gui-script "$HOME/x.py"'}
+        assert transform_uvw_gui_script(already) == already
+
+    def test_walks_nested_structure(self):
+        from merge_json import transform_uvw_gui_script
+
+        data = {
+            "hooks": {
+                "PostToolUse": [
+                    {"command": 'uv run "$HOME/a.py"'},
+                    {"nested": {"deeper": 'uv run "$HOME/b.py"'}},
+                ]
+            },
+            "version": 1,
+        }
+        out = transform_uvw_gui_script(data)
+        assert out["hooks"]["PostToolUse"][0]["command"] == 'uvw run --gui-script "$HOME/a.py"'
+        assert (
+            out["hooks"]["PostToolUse"][1]["nested"]["deeper"]
+            == 'uvw run --gui-script "$HOME/b.py"'
+        )
+        # Non-string values pass through.
+        assert out["version"] == 1
+
+    def test_no_op_on_strings_without_uv_run(self):
+        from merge_json import transform_uvw_gui_script
+
+        out = transform_uvw_gui_script({"command": "eslint --fix"})
+        assert out == {"command": "eslint --fix"}
+
+
 class TestLoadJson:
     def test_returns_dict_from_valid_file(self, tmp_path):
         p = tmp_path / "data.json"
@@ -436,6 +493,45 @@ class TestMergeCursorHooks:
         assert len(after_edit) == 1
         assert after_edit[0]["command"] == (
             'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
+        )
+
+    def test_merge_replaces_uv_run_with_uvw_gui_script(self, write_json, tmp_path):
+        """Windows upgrade path: an older installer wrote `uv run ...` to the
+        target. The current Windows installer now writes `uvw run --gui-script ...`.
+        Same script (matched by file name) -> the old entry must be replaced in
+        place, not appended alongside."""
+        source = write_json(
+            "source/cursor_hooks.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "afterFileEdit": [
+                        {
+                            "command": (
+                                "uvw run --gui-script "
+                                '"$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
+                            )
+                        }
+                    ]
+                },
+            },
+        )
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "afterFileEdit": [
+                        {"command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'}
+                    ]
+                },
+            },
+        )
+        merge_cursor_hooks(target, source)
+        after_edit = read_json(target)["hooks"]["afterFileEdit"]
+        assert len(after_edit) == 1
+        assert after_edit[0]["command"] == (
+            'uvw run --gui-script "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
         )
 
     def test_merge_replaces_any_runner_of_same_script(self, write_json, snyk_cursor_source):
@@ -858,6 +954,40 @@ class TestUnmergeCursorHooks:
         result = read_json(target)
         assert len(result["hooks"]["afterFileEdit"]) == 1
         assert result["hooks"]["afterFileEdit"][0]["command"] == "eslint --fix"
+
+    def test_removes_uvw_gui_form_using_uv_run_source(self, write_json, snyk_cursor_source):
+        """Cross-launcher uninstall: target was written by the Windows installer
+        with `uvw run --gui-script ...`, source still uses the canonical
+        `uv run ...`. Matching is by script file name so the entry is recognized
+        and removed regardless of launcher."""
+        target = write_json(
+            "target.json",
+            {
+                "version": 1,
+                "hooks": {
+                    "afterFileEdit": [
+                        {
+                            "command": (
+                                "uvw run --gui-script "
+                                '"$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
+                            )
+                        }
+                    ],
+                    "stop": [
+                        {
+                            "command": (
+                                "uvw run --gui-script "
+                                '"$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
+                            )
+                        }
+                    ],
+                },
+            },
+        )
+        unmerge_cursor_hooks(target, snyk_cursor_source)
+        result = read_json(target)
+        assert "afterFileEdit" not in result.get("hooks", {})
+        assert "stop" not in result.get("hooks", {})
 
     def test_removes_entry_with_extra_script_argument(self, write_json, snyk_cursor_source):
         # The installed hook carries an extra script-valued argument

@@ -34,6 +34,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Token used by the Windows installer to suppress the cmd.exe window `uv run`
+# pops up under graphical ADEs. The installed-on-Windows form of every SAI
+# hook command is `uvw run --gui-script <path>`; everywhere else the source
+# form `uv run <path>` is preserved. Matching/dedup is by script file name
+# (see _command_script_names), so the rewritten launcher needs no special
+# handling there.
+_UVW_GUI_TOKEN = "uvw run --gui-script"
+_UV_RUN_RE = re.compile(r"(?<![\w./-])uv run(?!\S)")
+
 # Home-directory variable tokens we substitute at install time so that the
 # command string in the installed config no longer depends on shell expansion.
 # Each pattern captures an optional path continuation after the token so the
@@ -104,6 +113,30 @@ def expand_hook_command_paths(data, home=None):
             return [_walk(item) for item in obj]
         if isinstance(obj, str):
             return _expand(obj)
+        return obj
+
+    return _walk(data)
+
+
+def transform_uvw_gui_script(data):
+    """Rewrite ``uv run`` to ``uvw run --gui-script`` in every string in ``data``.
+
+    Walks dicts/lists recursively; on each string, substitutes the literal
+    launcher ``uv run`` (word-boundary anchored so ``uvx run`` and similar
+    do not match). Idempotent — strings already using the new form pass
+    through unchanged.
+
+    Used by the installer on Windows to suppress the console window that
+    ``uv run`` would otherwise pop up under graphical ADEs.
+    """
+
+    def _walk(obj):
+        if isinstance(obj, dict):
+            return {k: _walk(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_walk(item) for item in obj]
+        if isinstance(obj, str):
+            return _UV_RUN_RE.sub(_UVW_GUI_TOKEN, obj)
         return obj
 
     return _walk(data)

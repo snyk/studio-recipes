@@ -20,6 +20,14 @@ Automatically scans new or modified code for vulnerabilities the moment the assi
 | **[Claude Code](./secure_at_inception/hooks_version/claude/)** | Deterministic (hooks) |
 | **[Kiro / any Git client](./secure_at_inception/kiro_hooks/)** | Deterministic (Git pre-commit + Kiro background scanning) |
 
+### Secure at Commit (SAC) — Experimental
+
+Blocks `git commit` when staged code or dependencies introduce new vulnerabilities — a deterministic gate at commit time that catches risky code from any source, not just the AI assistant.
+
+| Coding Assistant | Enforcement |
+|---|---|
+| **[Any Git client](./secure_at_commit/)** | Deterministic (Git pre-commit hook) |
+
 ### Package Enforcement
 
 Blocks dependency installation until security scans pass.
@@ -32,16 +40,18 @@ Blocks dependency installation until security scans pass.
 
 ## Choosing the enforcement model
 
-Guardrails come in two forms. Most teams benefit from layering both.
+Guardrails come in a few forms. Most teams layer rules with one deterministic hook model.
 
-| Consideration | Rules | Hooks |
-|---|---|---|
-| **Enforcement** | Non-deterministic — the AI may skip them | Deterministic — always run on the configured event |
-| **Setup** | Drop-in instructions the AI reads as guidance | Scripts wired to lifecycle events |
-| **Visibility** | Inline in the conversation | Separate output panel |
-| **Best for** | Real-time inline feedback during generation | Hard guarantees ("this scan must run before commit") |
+| Consideration | Rules | SAI Hooks | SAC Hooks *(experimental)* |
+|---|---|---|---|
+| **Enforcement** | Non-deterministic — the AI may skip them | Deterministic — always run as code is written | Deterministic — always run at `git commit` |
+| **Setup** | Drop-in instructions the AI reads as guidance | Scripts wired to assistant lifecycle events | One pre-commit hook per repository |
+| **Visibility** | Inline in the conversation | Separate output panel | In your terminal at commit time |
+| **Best for** | Real-time inline feedback during generation | Catching issues as the assistant writes | A final gate on everything staged, from any source |
 
-**Recommendation:** Use hooks where available for deterministic enforcement. Add rules on top so developers see issues inline as the assistant writes code.
+[SAI](./secure_at_inception/) and [SAC](./secure_at_commit/) hooks are mutually exclusive — pick the moment you want the deterministic gate to fire (as code is written, or at commit).
+
+**Recommendation:** Use SAI hooks where available for deterministic enforcement during generation, and add rules on top so developers see issues inline. Prefer SAC hooks when you want a single commit-time gate that also covers manual edits.
 
 ---
 

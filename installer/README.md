@@ -51,6 +51,7 @@ For non-interactive setups (CI, containers, shared workstations), set the `SNYK_
 |---|---|
 | **default** *(used if `--profile` is omitted)* | Secure at Inception guardrails, on-demand fix commands (`/snyk-fix`, `/snyk-batch-fix`), secure dependency health-check skill, and MCP configuration |
 | **minimal** | Secure at Inception guardrails and MCP configuration only |
+| **experimental** *(early access)* | [Secure at **Commit**](../guardrail_directives/secure_at_commit/) guardrails, on-demand fix commands (`/snyk-fix`, `/snyk-batch-fix`), secure dependency health-check skill, and MCP configuration — run inside the target repo or pass `--workspace`. |
 
 Choose with `--profile <name>`.
 
@@ -62,6 +63,7 @@ Choose with `--profile <name>`.
 |---|---|
 | Preview without writing files | `--dry-run` |
 | Install for one assistant only | `--ade <cursor\|claude\|gemini\|kiro\|codex\|windsurf\|copilot-cli\|copilot-vscode>` |
+| Choose the repo for commit-time hooks (Secure at Commit) | `--workspace <path>` |
 | Skip confirmation prompts | `-y`, `--yes` |
 | Re-verify a previous install | `--verify` |
 | Remove what was installed | `--uninstall` |
@@ -78,6 +80,9 @@ bash ./snyk-studio-install.sh --ade cursor --profile minimal -y
 
 # Preview changes
 bash ./snyk-studio-install.sh --dry-run
+
+# Experimental: Secure at Commit into a specific repo
+bash ./snyk-studio-install.sh --profile experimental --workspace /path/to/repo -y
 
 # Cleanly remove what was installed
 bash ./snyk-studio-install.sh --uninstall -y

@@ -25,6 +25,7 @@ A curated catalog of **recipes** — security building blocks that snap into you
 | Recipe type | What it does | When it fires |
 |---|---|---|
 | **Secure at Inception guardrails** | Auto-scan AI-generated code for vulnerabilities the moment it's written. | Continuously, as the assistant writes code. |
+| **[Secure at Commit guardrails](guardrail_directives/secure_at_commit/)** *(experimental)* | Block `git commit` when staged code or dependencies introduce new vulnerabilities — a deterministic gate that fires no matter how the code was written. | At `git commit` time. |
 | **Package enforcement guardrails** | Block risky or vulnerable dependencies before they're installed. | At dependency-add time. |
 | **Remediation commands & skills** | Find, fix, validate, and PR security issues in one guided flow (`/snyk-fix`, `/snyk-batch-fix`, secure dependency health checks, and more). | On demand from the developer or the agent. |
 | **Snyk MCP integration** | Wires Snyk's CLI and scanners into the assistant via the [Snyk MCP server](https://docs.snyk.io/integrations/snyk-studio-agentic-integrations/getting-started-with-snyk-studio). | Automatically, once installed. |

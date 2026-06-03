@@ -1,88 +1,51 @@
-# Secure At Commit (SAC)
+# Secure At Commit (SAC) — Experimental
 
-Block git commits when newly introduced code or dependency vulnerabilities show
-up in the files staged for commit. SAC is the **complement** of Secure At
-Inception (SAI):
+> **Experimental.** Secure At Commit is early access. Behavior, flags, and configuration may change.
 
-| | SAI | SAC |
-| --- | --- | --- |
-| When does it run? | Each agent edit / before the agent stops | At `git commit` time |
-| What does it watch? | Lines the agent just edited | Files staged for commit |
-| What blocks the operation? | Agent's `Stop` event | `git commit` (non-zero exit) |
-| Installation surface | Per-ADE agent hooks | One in-repo script + one pre-commit shim per workspace |
+Stop vulnerable code and dependencies from ever reaching a commit. Secure At Commit (SAC) adds a Git pre-commit check that scans the changes you're about to commit and blocks the commit if it finds new vulnerabilities.
 
-SAI and SAC are not designed to run together — the installer treats them as
-mutually exclusive. SAC is opted into via `--profile=experimental`.
+SAC is the commit-time complement to [Secure at Inception (SAI)](../). Where SAI scans code as your AI assistant writes it, SAC enforces a single deterministic gate at `git commit` — so it catches risky code no matter how it got there: AI agent, manual edit, or copy-paste.
 
-## What gets scanned
+## What you get
 
-On commit, SAC:
+- **A hard gate at commit time.** New vulnerabilities in your staged changes block the commit. It always runs — regardless of which assistant or workflow produced the code.
+- **Code *and* dependency coverage.** Runs Snyk Code (SAST) on staged source files and Snyk Open Source (SCA) on changed dependency manifests.
+- **Shared with your team.** The hook lives in the repository, so teammates get the same protection automatically on `git pull`.
 
-1. Asks git which files are staged (`git diff --cached --name-only`).
-2. If any of them are code files, runs a Snyk Code (SAST) scan on the workspace
-   and filters results to the staged files.
-3. If any of them are dependency manifests (package.json, pom.xml, go.mod, …),
-   runs a Snyk Open Source (SCA) scan on the workspace and filters results by
-   severity threshold.
-4. Prints a vulnerability report on stderr and exits non-zero — git aborts the
-   commit. The user can bypass with `git commit --no-verify`.
+## Get it
 
-If staging contains no code or manifest files (e.g. a docs-only commit), the
-hook returns success immediately without invoking Snyk.
+Follow the [Quick start](../../README.md#quick-start) to download the installer and authenticate the Snyk CLI — then install SAC by selecting the **experimental** profile. Run the installer from inside the Git repository you want to protect:
 
-## Installation
+```bash
+bash ./snyk-studio-install.sh --profile experimental
+```
 
-The hook script is **installed inside the workspace** at
-`.snyk-studio/components/scripts/snyk_secure_at_commit.py`. Hook-manager
-configs that get committed (`.pre-commit-config.yaml`, `.husky/pre-commit`)
-reference the script via that workspace-relative path, so cloning the repo
-on a new machine — or running `pre-commit install` there — Just Works
-without depending on any per-user install location.
+To target a repository other than your current directory, pass `--workspace`:
 
-The installer wires the script into whichever pre-commit machinery the
-workspace already has, in this order:
+```bash
+bash ./snyk-studio-install.sh --profile experimental --workspace /path/to/repo
+```
 
-- If `.pre-commit-config.yaml` exists → append a `local` repo entry.
-- Else if `.husky/pre-commit` exists → append a single shim line.
-- Else → write `.git/hooks/pre-commit`.
+> SAC and SAI are mutually exclusive. The `experimental` profile installs SAC in place of the default Secure at Inception guardrails, and the installer warns you if leftover SAI hooks are still present.
 
-Each wire-up is wrapped in `# >>> snyk-secure-at-commit >>>` /
-`# <<< snyk-secure-at-commit <<<` markers so the installer can later remove
-the entry idempotently on uninstall. The shim command is a workspace-relative
-path (`uv run .snyk-studio/components/scripts/snyk_secure_at_commit.py`) so
-it stays portable when the file is committed.
+## How it works
 
-The `.snyk-studio/components/scripts/` tree should be committed alongside
-your `.pre-commit-config.yaml` / `.husky/pre-commit` so collaborators get
-the same pre-commit behavior on `git pull`.
+When you run `git commit`, the hook:
 
-> Earlier versions installed the script under `.snyk/studio/`, which collided
-> with a repo's existing `.snyk` policy file. The location is now `.snyk-studio/`;
-> uninstall still removes the old `.snyk/studio/` tree for a clean migration.
+1. Looks at the files you've staged.
+2. Scans staged source with Snyk Code and any changed dependency manifests with Snyk Open Source.
+3. If it finds new vulnerabilities at or above the block threshold, it prints a report and stops the commit. Otherwise the commit proceeds.
+
+Commits with no code or dependency changes (for example, docs only) pass straight through. Need to commit anyway? `git commit --no-verify` bypasses the check.
+
+## Tune it
+
+- `SAC_MIN_BLOCK_SEVERITY` — lowest dependency severity that blocks a commit: `low`, `medium`, `high`, or `critical` (default `medium`).
 
 ## Uninstall
 
-`snyk-studio-install --uninstall` removes the pre-commit shim from the
-workspace's hook config and deletes the installed script.
-
-## Configuration
-
-Environment variables read by the hook script at commit time:
-
-- `SAC_MIN_BLOCK_SEVERITY` — minimum SCA severity that blocks commit (default `medium`).
-- `SAC_HOOK_DEBUG=1` — verbose log lines on stderr.
-
-The hook runs the Snyk CLI synchronously and waits for it to finish — no
-timeout. Interrupt with Ctrl-C if a scan is taking too long.
-
-## Layout
-
-```
-secure_at_commit/
-  snyk_secure_at_commit.py   # entry point (git pre-commit hook); self-contained
-  README.md
+```bash
+bash ./snyk-studio-install.sh --uninstall
 ```
 
-The hook is a single self-contained script: it shells out to `snyk code test`
-and `snyk test`, parses their JSON output, filters the results against the
-staged file set, and prints a markdown report on findings.
+Removes the pre-commit hook and the installed script from the repository.

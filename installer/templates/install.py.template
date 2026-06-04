@@ -128,6 +128,14 @@ def ensure_uv(argv: List[str]) -> None:
         print("    Install with: curl -LsSf https://astral.sh/uv/install.sh | sh", file=sys.stderr)
 
     if not auto_yes:
+        # Only prompt on an interactive terminal; in an automated environment a
+        # read on an open-but-silent stdin would block forever, so fail fast.
+        if not hasattr(sys.stdin, "isatty") or not sys.stdin.isatty():
+            print(
+                "  Error: uv is required; re-run with -y to install it without prompting.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         try:
             reply = (
                 input("\n  Install uv now? (y/n) ")

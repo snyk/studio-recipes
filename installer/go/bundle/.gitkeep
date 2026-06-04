@@ -1,0 +1,2 @@
+# Placeholder so this directory exists in a fresh checkout and //go:embed has a
+# match before build_installer.py stages the real recipe payload here.

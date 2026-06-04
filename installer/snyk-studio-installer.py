@@ -1860,6 +1860,17 @@ def main() -> None:
         manifest.list_recipes()
         return
 
+    # Everything below can prompt for confirmation (prerequisites, ADE
+    # selection, install/uninstall). On a non-interactive stdin those reads
+    # would block forever, so fail fast unless -y was given (which skips them).
+    if not args.yes and (not hasattr(sys.stdin, "isatty") or not sys.stdin.isatty()):
+        print(
+            "  Error: interactive input required; re-run with -y (and flags such as "
+            "--ade/--profile) to run non-interactively.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     print_banner()
 
     # Prerequisites

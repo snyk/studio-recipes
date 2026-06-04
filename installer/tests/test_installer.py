@@ -256,6 +256,28 @@ class TestColor:
         assert "error" in result
 
 
+class TestNonInteractiveGuard:
+    def test_install_fails_fast_without_tty(self, monkeypatch, capsys):
+        # Non-interactive stdin + no -y: main() must fail fast, not block on a prompt.
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False, raising=False)
+        monkeypatch.setattr(installer, "parse_args", lambda: MagicMock(list_mode=False, yes=False))
+        monkeypatch.setattr(installer, "PayloadContext", lambda: MagicMock())
+        monkeypatch.setattr(installer, "Manifest", lambda *a, **k: MagicMock())
+        with pytest.raises(SystemExit):
+            installer.main()
+        assert "interactive input required" in capsys.readouterr().err
+
+    def test_list_mode_allowed_without_tty(self, monkeypatch):
+        # --list never prompts, so it must work on a non-interactive stdin.
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False, raising=False)
+        monkeypatch.setattr(installer, "parse_args", lambda: MagicMock(list_mode=True, yes=False))
+        monkeypatch.setattr(installer, "PayloadContext", lambda: MagicMock())
+        listed = MagicMock()
+        monkeypatch.setattr(installer, "Manifest", lambda *a, **k: listed)
+        installer.main()  # returns without SystemExit
+        listed.list_recipes.assert_called_once()
+
+
 # ===========================================================================
 # TestEnsureNodeInstalled
 # ===========================================================================

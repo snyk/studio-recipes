@@ -142,6 +142,10 @@ MAX_STOP_CYCLES = 3
 
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
+# User-facing prefix for hook messages surfaced via the response `systemMessage`
+# field, so it's clear in the UI when (and which) Secure-at-Inception hook ran.
+HOOK_BANNER = "🔒 Snyk Secure at Inception"
+
 
 # =============================================================================
 # UTILITY FUNCTIONS
@@ -157,7 +161,14 @@ def log_to_panel(message: str) -> None:
     print(message, file=sys.stderr)
 
 
-def output_response(response: Dict[str, Any]) -> None:
+def output_response(response: Dict[str, Any], system_message: Optional[str] = None) -> None:
+    """Emit the hook's JSON response on stdout.
+
+    When system_message is provided, attach it (prefixed with HOOK_BANNER) so the
+    user sees a clear, branded note in the UI that the hook ran and what it did.
+    """
+    if system_message:
+        response = {**response, "systemMessage": f"{HOOK_BANNER} · {system_message}"}
     print(json.dumps(response))
 
 
@@ -461,7 +472,10 @@ def handle_session_start(data: Dict[str, Any], workspace: str) -> None:
         write_state(workspace, state)
     debug_log(f"Manifest baseline: {len(state['manifest_baseline'])} files snapshotted")
 
-    output_response({})
+    output_response(
+        {},
+        system_message="session started — security scanning is active (warming scan cache).",
+    )
 
 
 def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
@@ -542,9 +556,16 @@ def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
         if launch_background_scan(workspace):
             log_to_panel("[SAI] Background scan launched")
 
-    else:
-        debug_log(f"File not scannable, ignoring: {file_path}")
+        output_response(
+            {},
+            system_message=(
+                f"change detected in {Path(file_path).name} — running a background "
+                "security scan for newly introduced vulnerabilities."
+            ),
+        )
+        return
 
+    debug_log(f"File not scannable, ignoring: {file_path}")
     output_response({})
 
 
@@ -739,14 +760,20 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
         elif sca_fallback:
             sast_fallback += f"\n\n## Dependency Scan Unavailable\n\n{sca_fallback}"
         clear_state(workspace)
-        output_response({"decision": "block", "reason": sast_fallback})
+        output_response(
+            {"decision": "block", "reason": sast_fallback},
+            system_message="⚠️ Stop hook ran — security scan could not complete; see fallback instructions.",
+        )
         return
 
     # --- Update state and decide ---
     if not new_vulns and not new_sca_vulns and not sca_fallback:
         log_to_panel("[SAI] No new security issues found.")
         clear_state(workspace)
-        output_response({})
+        output_response(
+            {},
+            system_message="✅ Stop hook ran — scan complete, no new vulnerabilities introduced. Safe to stop.",
+        )
         return
 
     # Remove clean files in one locked write
@@ -792,7 +819,13 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
     reason_parts.append("\nAfter fixing, the security scan will run again automatically.")
 
     log_to_panel(f"[SAI] Blocking: {len(new_vulns)} SAST + {len(new_sca_vulns)} SCA vuln(s)")
-    output_response({"decision": "block", "reason": "\n".join(reason_parts)})
+    output_response(
+        {"decision": "block", "reason": "\n".join(reason_parts)},
+        system_message=(
+            f"🚨 Stop hook blocked — {len(new_vulns)} new code + {len(new_sca_vulns)} new "
+            "dependency vulnerability(ies) introduced. Fix required before stopping."
+        ),
+    )
 
 
 # =============================================================================

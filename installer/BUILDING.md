@@ -23,7 +23,7 @@ python3 build_installer.py
 This regenerates the installers from [`manifest.json`](manifest.json) and the recipe sources alongside it:
 
 - `dist/snyk-studio-install.sh`, `dist/snyk-studio-install.ps1`, `dist/snyk-studio-install.py` — single self-extracting scripts with the recipe payload embedded as base64.
-- `dist/snyk-studio-install-<os>-<arch>[.exe]` — Go installer binaries cross-compiled for macOS, Linux, and Windows (amd64/arm64).
+- `dist/snyk-studio-<os>-<arch>[.exe]` — Go installer binaries cross-compiled for macOS, Linux, and Windows (`macos`/`linux`/`windows` × `x86_64`/`arm64`). Invoke with the `install` subcommand, e.g. `snyk-studio-macos-arm64 install -y` (options after `install` are forwarded to the Python installer).
 
 Distribute or host the contents of `dist/` — developers run them exactly the same way as the pre-built installer described in [`README.md`](README.md).
 

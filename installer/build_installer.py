@@ -40,6 +40,10 @@ GO_TARGETS = [
     ("windows", "arm64"),
 ]
 
+# Map Go's GOOS/GOARCH values to the labels used in emitted binary names.
+GO_OS_LABELS = {"darwin": "macos"}
+GO_ARCH_LABELS = {"amd64": "x86_64"}
+
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build the Snyk Studio recipes installers.")
@@ -286,7 +290,9 @@ def build_go_binaries(go_dir: Path, dist_dir: Path) -> None:
         return
 
     for goos, goarch in GO_TARGETS:
-        out_name = f"snyk-studio-install-{goos}-{goarch}"
+        os_label = GO_OS_LABELS.get(goos, goos)
+        arch_label = GO_ARCH_LABELS.get(goarch, goarch)
+        out_name = f"snyk-studio-{os_label}-{arch_label}"
         if goos == "windows":
             out_name += ".exe"
         out_path = dist_dir / out_name

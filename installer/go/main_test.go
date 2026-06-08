@@ -8,6 +8,30 @@ import (
 	"testing"
 )
 
+// TestRunDispatch covers the top-level subcommand routing. The "install"
+// command is exercised end-to-end elsewhere; here we check the cases that
+// return before any extraction happens.
+func TestRunDispatch(t *testing.T) {
+	cases := []struct {
+		name string
+		argv []string
+		want int
+	}{
+		{"no command", nil, 2},
+		{"help long", []string{"--help"}, 0},
+		{"help short", []string{"-h"}, 0},
+		{"help word", []string{"help"}, 0},
+		{"unknown command", []string{"frobnicate"}, 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := run(tc.argv); got != tc.want {
+				t.Errorf("run(%v) = %d, want %d", tc.argv, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestExtractBundle verifies every embedded file lands on disk under workdir
 // with the "bundle/" prefix stripped and byte-identical contents. Works with
 // whatever is currently embedded (the .gitkeep placeholder at minimum, or the

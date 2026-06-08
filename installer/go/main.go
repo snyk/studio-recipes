@@ -38,12 +38,46 @@ const bundleRoot = "bundle"
 const installerScript = "snyk-studio-installer.py"
 
 func main() {
-	os.Exit(run())
+	os.Exit(run(os.Args[1:]))
 }
 
-func run() int {
+// run dispatches on the first positional argument as a subcommand. This lets
+// the binary grow other behaviors (e.g. uninstall, version) alongside install.
+func run(argv []string) int {
+	if len(argv) == 0 {
+		usage(os.Stderr)
+		return 2
+	}
+
+	command, rest := argv[0], argv[1:]
+	switch command {
+	case "install":
+		return runInstall(rest)
+	case "-h", "--help", "help":
+		usage(os.Stdout)
+		return 0
+	default:
+		fmt.Fprintf(os.Stderr, "Error: unknown command %q\n\n", command)
+		usage(os.Stderr)
+		return 2
+	}
+}
+
+// usage prints the top-level command listing.
+func usage(w io.Writer) {
+	fmt.Fprintln(w, "Snyk Studio Recipes installer")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Usage: snyk-studio <command> [options]")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Commands:")
+	fmt.Fprintln(w, "  install   Install Snyk Studio recipes (pass installer options after the command)")
+}
+
+// runInstall extracts the embedded bundle and hands off to the Python installer.
+// installArgs are forwarded verbatim to snyk-studio-installer.py.
+func runInstall(installArgs []string) int {
 	ensureUvOnPath()
-	if err := ensureUv(os.Args[1:]); err != nil {
+	if err := ensureUv(installArgs); err != nil {
 		fmt.Fprintf(os.Stderr, "  Error: %s\n", err)
 		return 1
 	}
@@ -83,7 +117,7 @@ func run() int {
 		return 1
 	}
 
-	args := append([]string{"run", installer}, os.Args[1:]...)
+	args := append([]string{"run", installer}, installArgs...)
 	cmd := exec.Command(uvExe, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout

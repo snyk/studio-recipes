@@ -19,6 +19,8 @@ Options:
     --uninstall                                Remove Snyk recipes from detected ADEs
     --verify                                   Verify installed files and merged configs match manifest
     --list                                     List available recipes and profiles
+    --global                                   Install pinned dependency versions (uv, snyk)
+                                               from the manifest instead of the latest
     -y, --yes                                  Skip confirmation prompts
     -h, --help                                 Show this help message
 """
@@ -44,7 +46,6 @@ BUNDLE_ENV = "SNYK_STUDIO_BUNDLE_ROOT"
 
 GLOBAL = "global"
 WORKSPACE = "workspace"
-SNYK_MINIMUM_VERSION = "1.1302.0"
 
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -156,6 +157,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--list", action="store_true", dest="list_mode", help="List available recipes and profiles"
     )
     parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompts")
+    parser.add_argument(
+        "--global",
+        action="store_true",
+        dest="global_mode",
+        help=(
+            "Install pinned dependency versions (from manifest prerequisites) "
+            "instead of the latest available."
+        ),
+    )
     parser.add_argument(
         "--workspace",
         default=None,
@@ -276,6 +286,11 @@ class Manifest:
 
     def all_recipe_ids(self) -> List[str]:
         return list(self.recipes.keys())
+
+    def prerequisite_version(self, name: str) -> Optional[str]:
+        """Return the pinned version string for a prerequisite, or None if unset."""
+        value = self.data.get("prerequisites", {}).get(name)
+        return str(value) if value else None
 
     def detect_stale_conflicts(self, active_recipes: List[str]) -> List[Tuple[str, str, str]]:
         """Return ``(active, conflicted, ade)`` triples for stale on-disk installs.
@@ -729,14 +744,29 @@ def run_command(cmd: list[str], warn: str) -> int:
         return 1
 
 
-def check_prerequisites(auto_yes: bool) -> None:
-    """Check that the required prerequisites are installed and configured. If not, attempt to install them."""
+def check_prerequisites(
+    auto_yes: bool, snyk_version: Optional[str] = None, global_mode: bool = False
+) -> None:
+    """Check that the required prerequisites are installed and configured. If not, attempt to install them.
+
+    ``snyk_version`` is the pinned Snyk CLI version from the manifest
+    prerequisites; it doubles as the minimum-acceptable version. In
+    ``global_mode`` the installer pins to exactly that version (``snyk@<ver>``)
+    rather than tracking the latest release, and only (re)installs when Snyk is
+    missing or older than the pin.
+    """
 
     warnings = 0
 
     def get_npm_install_cmd(pkg: str) -> List[str]:
         cmd = ["npm", "install", "-g", pkg]
         return ["sudo"] + cmd if not _IS_WINDOWS else cmd
+
+    def snyk_pkg(latest_label: str) -> str:
+        """Package spec to install: the pin in global mode, else the latest label."""
+        if global_mode and snyk_version:
+            return f"snyk@{snyk_version}"
+        return latest_label
 
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
     print(f"  {C.green('OK')} Python {py_ver}")
@@ -751,7 +781,7 @@ def check_prerequisites(auto_yes: bool) -> None:
     def parse_version(x):
         return tuple(map(int, x.split(".")))
 
-    minimum_snyk_version = parse_version(SNYK_MINIMUM_VERSION)
+    minimum_snyk_version = parse_version(snyk_version) if snyk_version else None
 
     if get_snyk_path():
         r = run(
@@ -766,28 +796,34 @@ def check_prerequisites(auto_yes: bool) -> None:
         match = re.match(r"(\d+\.\d+\.\d+)", ver_str)
         if match:
             current_version = parse_version(match.group(1))
-            if current_version < minimum_snyk_version:
+            # Only (re)install when the installed Snyk is older than the
+            # pin/minimum; an equal-or-newer build is left untouched in both
+            # global and default mode.
+            if minimum_snyk_version is not None and current_version < minimum_snyk_version:
+                target = "pinned" if global_mode else "latest"
                 print(
-                    f"  {C.yellow('WARNING')} Snyk CLI {ver_str} is outdated (min: {SNYK_MINIMUM_VERSION}). Upgrade snyk?"
+                    f"  {C.yellow('WARNING')} Snyk CLI {ver_str} is outdated "
+                    f"(min: {snyk_version}). Upgrade to {target}?"
                 )
                 if not auto_yes:
                     reply = input("  (y/n) ").strip().lower()
                     if reply not in ("y", "yes"):
                         sys.exit(1)
                 warnings += run_command(
-                    get_npm_install_cmd("snyk@latest"),
-                    f"  {C.yellow('WARNING')} Failed to upgrade Snyk CLI to latest via npm",
+                    get_npm_install_cmd(snyk_pkg("snyk@latest")),
+                    f"  {C.yellow('WARNING')} Failed to upgrade Snyk CLI to {target} via npm",
                 )
             else:
                 print(f"  {C.green('OK')} Snyk CLI {ver_str}")
     else:
-        print(f"  {C.yellow('WARNING')} Snyk CLI not found, install latest version?")
+        target = "pinned" if global_mode and snyk_version else "latest"
+        print(f"  {C.yellow('WARNING')} Snyk CLI not found, install {target} version?")
         if not auto_yes:
             reply = input("  (y/n) ").strip().lower()
             if reply not in ("y", "yes"):
                 sys.exit(1)
         warnings += run_command(
-            get_npm_install_cmd("snyk"),
+            get_npm_install_cmd(snyk_pkg("snyk")),
             f"  {C.yellow('WARNING')} Failed to install Snyk CLI via npm",
         )
 
@@ -1875,7 +1911,11 @@ def main() -> None:
 
     # Prerequisites
     print(f"  {C.bold('Prerequisites')}")
-    check_prerequisites(args.yes)
+    check_prerequisites(
+        args.yes,
+        snyk_version=manifest.prerequisite_version("snyk"),
+        global_mode=args.global_mode,
+    )
     print()
 
     # ADE detection

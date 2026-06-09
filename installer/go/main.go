@@ -10,6 +10,7 @@ package main
 
 import (
 	"embed"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -18,6 +19,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 )
@@ -71,13 +73,25 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  install   Install Snyk Studio recipes (pass installer options after the command)")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Install options:")
+	fmt.Fprintln(w, "  --global  Install pinned dependency versions (uv, snyk) instead of the latest")
 }
 
 // runInstall extracts the embedded bundle and hands off to the Python installer.
 // installArgs are forwarded verbatim to snyk-studio-installer.py.
 func runInstall(installArgs []string) int {
 	ensureUvOnPath()
-	if err := ensureUv(installArgs); err != nil {
+	// --global pins binary dependencies (uv here, snyk in the Python installer)
+	// to the versions declared in the manifest's prerequisites, instead of
+	// tracking the latest release. The flag stays in installArgs so it also
+	// reaches the Python installer.
+	globalMode := hasFlag(installArgs, "--global")
+	pinnedUv := ""
+	if globalMode {
+		pinnedUv = pinnedVersion("uv")
+	}
+	if err := ensureUv(installArgs, globalMode, pinnedUv); err != nil {
 		fmt.Fprintf(os.Stderr, "  Error: %s\n", err)
 		return 1
 	}
@@ -153,25 +167,53 @@ func ensureUvOnPath() {
 
 // ensureUv probes for uv and, if missing, offers to install it via the official
 // script (mirrors install.sh / install.ps1 / install.py).
-func ensureUv(argv []string) error {
-	autoYes := false
-	for _, a := range argv {
-		if a == "-y" || a == "--yes" {
-			autoYes = true
-			break
-		}
-	}
+//
+// In globalMode with a non-empty pinnedUv, an already-installed uv that is older
+// than the pin is upgraded to it; an equal-or-newer uv (or any uv outside global
+// mode) is accepted as-is. The version installed is the pin in global mode and
+// the latest release otherwise.
+func ensureUv(argv []string, globalMode bool, pinnedUv string) error {
+	autoYes := hasFlag(argv, "-y", "--yes")
 
 	if _, err := exec.LookPath("uv"); err == nil {
-		fmt.Printf("  OK uv %s\n", uvVersionLine())
-		return nil
+		cur, haveVer := uvInstalledVersion()
+		// Outside global pinning, any installed uv is acceptable.
+		if !globalMode || pinnedUv == "" {
+			fmt.Printf("  OK uv %s\n", uvVersionLine())
+			return nil
+		}
+		// Pinning: keep the installed uv only when we can confirm it is not
+		// older than the pin. If we cannot read or compare the versions (e.g. a
+		// malformed manifest pin or unexpected `uv --version` output), fall
+		// through and (re)install the pin rather than acting on a guess.
+		older, comparable := versionOlder(cur, pinnedUv)
+		if haveVer && comparable && !older {
+			fmt.Printf("  OK uv %s\n", uvVersionLine())
+			return nil
+		}
+		switch {
+		case !haveVer:
+			fmt.Fprintf(os.Stderr, "  WARNING could not read uv version; reinstalling %s\n", pinnedUv)
+		case !comparable:
+			fmt.Fprintf(os.Stderr, "  WARNING could not compare uv %s against pinned %s; reinstalling %s\n", cur, pinnedUv, pinnedUv)
+		default:
+			fmt.Fprintf(os.Stderr, "  WARNING uv %s is older than the minimum supported %s\n", cur, pinnedUv)
+		}
+		// Fall through to (re)install the pinned version.
+	} else {
+		fmt.Fprintln(os.Stderr, "  WARNING uv not found")
 	}
 
-	fmt.Fprintln(os.Stderr, "  WARNING uv not found")
+	// In global mode install the manifest pin; otherwise track the latest.
+	installVersion := ""
+	if globalMode {
+		installVersion = pinnedUv
+	}
+
 	if runtime.GOOS == "windows" {
-		fmt.Fprintln(os.Stderr, "    Install with: irm https://astral.sh/uv/install.ps1 | iex")
+		fmt.Fprintf(os.Stderr, "    Install with: irm %s | iex\n", uvInstallURL("install.ps1", installVersion))
 	} else {
-		fmt.Fprintln(os.Stderr, "    Install with: curl -LsSf https://astral.sh/uv/install.sh | sh")
+		fmt.Fprintf(os.Stderr, "    Install with: curl -LsSf %s | sh\n", uvInstallURL("install.sh", installVersion))
 	}
 
 	if !autoYes {
@@ -191,7 +233,7 @@ func ensureUv(argv []string) error {
 		}
 	}
 
-	if err := bootstrapUvInstall(); err != nil {
+	if err := bootstrapUvInstall(installVersion); err != nil {
 		return fmt.Errorf("uv install failed: %s", err)
 	}
 
@@ -200,6 +242,118 @@ func ensureUv(argv []string) error {
 		return fmt.Errorf("uv was installed but is not on PATH. Add ~/.local/bin to PATH and retry.")
 	}
 	return nil
+}
+
+// hasFlag reports whether any of names appears verbatim in argv.
+func hasFlag(argv []string, names ...string) bool {
+	for _, a := range argv {
+		for _, n := range names {
+			if a == n {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// pinnedVersion reads a pinned dependency version from the embedded manifest's
+// "prerequisites" map. Returns "" if the manifest is absent or the key is unset
+// — e.g. a dev build where only the bundle .gitkeep placeholder is embedded —
+// in which case callers fall back to installing the latest release.
+func pinnedVersion(dep string) string {
+	data, err := bundleFS.ReadFile(bundleRoot + "/manifest.json")
+	if err != nil {
+		return ""
+	}
+	var m struct {
+		Prerequisites map[string]string `json:"prerequisites"`
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return ""
+	}
+	return m.Prerequisites[dep]
+}
+
+// uvInstallURL returns the astral.sh install-script URL for uv. A non-empty
+// version pins to that exact release (https://astral.sh/uv/<version>/<script>);
+// otherwise it tracks the latest.
+func uvInstallURL(script, version string) string {
+	if version != "" {
+		return "https://astral.sh/uv/" + version + "/" + script
+	}
+	return "https://astral.sh/uv/" + script
+}
+
+// uvInstalledVersion returns the numeric version reported by `uv --version`
+// (e.g. "0.11.19"), and false if uv is absent or its output is unparseable.
+func uvInstalledVersion() (string, bool) {
+	out, err := exec.Command("uv", "--version").Output()
+	if err != nil {
+		return "", false
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) < 2 {
+		return "", false
+	}
+	return fields[1], true
+}
+
+// parseVersion splits a dotted version like "0.11.19" into integer components,
+// reading only the leading digits of each component so a trailing build suffix
+// (e.g. "1.2.3-rc1") still parses. It returns ok=false when the string is empty
+// or any component lacks a leading digit (e.g. "1..2", ".rc1", "1.2."), so a
+// malformed manifest pin is surfaced rather than silently coerced to zeros and
+// compared as if valid.
+func parseVersion(s string) ([]int, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, false
+	}
+	parts := strings.Split(s, ".")
+	nums := make([]int, len(parts))
+	for i, p := range parts {
+		j := 0
+		for j < len(p) && p[j] >= '0' && p[j] <= '9' {
+			j++
+		}
+		if j == 0 {
+			return nil, false
+		}
+		n, err := strconv.Atoi(p[:j])
+		if err != nil {
+			return nil, false // overflow or other malformed component
+		}
+		nums[i] = n
+	}
+	return nums, true
+}
+
+// versionOlder reports whether version a is strictly older than version b. ok is
+// false when either version cannot be parsed, in which case older is meaningless
+// and the caller must decide how to proceed rather than trusting the result.
+func versionOlder(a, b string) (older bool, ok bool) {
+	av, aok := parseVersion(a)
+	bv, bok := parseVersion(b)
+	if !aok || !bok {
+		return false, false
+	}
+	n := len(av)
+	if len(bv) > n {
+		n = len(bv)
+	}
+	for i := 0; i < n; i++ {
+		var x, y int
+		if i < len(av) {
+			x = av[i]
+		}
+		if i < len(bv) {
+			y = bv[i]
+		}
+		if x != y {
+			return x < y, true
+		}
+	}
+	return false, true
 }
 
 // stdinIsInteractive reports whether stdin is a terminal (character device),
@@ -223,7 +377,9 @@ func uvVersionLine() string {
 	return "present"
 }
 
-func bootstrapUvInstall() error {
+// bootstrapUvInstall runs the official uv installer. A non-empty version pins to
+// that exact release; otherwise the latest is installed.
+func bootstrapUvInstall(version string) error {
 	if runtime.GOOS == "windows" {
 		ps, err := exec.LookPath("powershell")
 		if err != nil {
@@ -233,14 +389,14 @@ func bootstrapUvInstall() error {
 			return fmt.Errorf("need PowerShell to install uv on Windows")
 		}
 		return runInherit(ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
-			"Invoke-Expression (Invoke-RestMethod -Uri 'https://astral.sh/uv/install.ps1')")
+			"Invoke-Expression (Invoke-RestMethod -Uri '"+uvInstallURL("install.ps1", version)+"')")
 	}
 
 	var shellCmd string
 	if _, err := exec.LookPath("curl"); err == nil {
-		shellCmd = "curl -LsSf https://astral.sh/uv/install.sh | sh"
+		shellCmd = "curl -LsSf " + uvInstallURL("install.sh", version) + " | sh"
 	} else if _, err := exec.LookPath("wget"); err == nil {
-		shellCmd = "wget -qO- https://astral.sh/uv/install.sh | sh"
+		shellCmd = "wget -qO- " + uvInstallURL("install.sh", version) + " | sh"
 	} else {
 		return fmt.Errorf("need curl or wget to install uv")
 	}

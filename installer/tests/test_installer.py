@@ -64,7 +64,7 @@ class TestCheckPrerequisites:
         monkeypatch.setattr(installer, "run", mock_run)
 
         # With auto_yes=True, it should just print warning and continue
-        installer.check_prerequisites(auto_yes=True)
+        installer.check_prerequisites(auto_yes=True, snyk_version="1.1302.0")
         captured = capsys.readouterr()
         assert "WARNING Snyk CLI 1.1301.0 is outdated" in captured.out
 
@@ -84,7 +84,7 @@ class TestCheckPrerequisites:
         monkeypatch.setattr("builtins.input", lambda _: "n")
 
         with pytest.raises(SystemExit):
-            installer.check_prerequisites(auto_yes=False)
+            installer.check_prerequisites(auto_yes=False, snyk_version="1.1302.0")
 
         captured = capsys.readouterr()
         assert "WARNING Snyk CLI 1.1301.0 is outdated" in captured.out
@@ -127,12 +127,79 @@ class TestCheckPrerequisites:
 
         monkeypatch.setattr(installer, "run", mock_run)
 
-        installer.check_prerequisites(auto_yes=True)
+        installer.check_prerequisites(auto_yes=True, snyk_version="1.1302.0")
 
         # Verify that npm install was called
         assert ["sudo", "npm", "install", "-g", "snyk@latest"] in cmds_run
         captured = capsys.readouterr()
         assert "WARNING Snyk CLI 1.1301.0 is outdated" in captured.out
+
+    def test_global_pins_snyk_on_upgrade(self, monkeypatch, capsys):
+        """In --global mode an outdated Snyk upgrades to the pinned version, not latest."""
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None
+        )
+        monkeypatch.setattr("sys.platform", "linux")
+
+        cmds_run = []
+
+        def mock_run(cmd, **kwargs):
+            cmds_run.append(cmd)
+            m = MagicMock()
+            if cmd[0] == "snyk" and cmd[1] == "--version":
+                m.stdout = "1.1301.0\n"
+                m.returncode = 0
+            return m
+
+        monkeypatch.setattr(installer, "run", mock_run)
+
+        installer.check_prerequisites(auto_yes=True, snyk_version="1.1304.0", global_mode=True)
+
+        assert ["sudo", "npm", "install", "-g", "snyk@1.1304.0"] in cmds_run
+        assert ["sudo", "npm", "install", "-g", "snyk@latest"] not in cmds_run
+
+    def test_global_pins_snyk_when_missing(self, monkeypatch, capsys):
+        """In --global mode a missing Snyk installs exactly the pinned version."""
+        monkeypatch.setattr("shutil.which", lambda cmd: None)
+        monkeypatch.setattr("sys.platform", "linux")
+
+        cmds_run = []
+
+        def mock_run(cmd, **kwargs):
+            cmds_run.append(cmd)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(installer, "run", mock_run)
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+
+        installer.check_prerequisites(auto_yes=True, snyk_version="1.1304.0", global_mode=True)
+
+        assert ["sudo", "npm", "install", "-g", "snyk@1.1304.0"] in cmds_run
+
+    def test_global_skips_snyk_when_newer_than_pin(self, monkeypatch, capsys):
+        """In --global mode an installed Snyk newer than the pin is left untouched."""
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None
+        )
+        monkeypatch.setattr("sys.platform", "linux")
+
+        cmds_run = []
+
+        def mock_run(cmd, **kwargs):
+            cmds_run.append(cmd)
+            m = MagicMock()
+            if cmd[0] == "snyk" and cmd[1] == "--version":
+                m.stdout = "1.1310.0\n"
+                m.returncode = 0
+            return m
+
+        monkeypatch.setattr(installer, "run", mock_run)
+
+        installer.check_prerequisites(auto_yes=True, snyk_version="1.1304.0", global_mode=True)
+
+        assert not any(c[:3] == ["sudo", "npm", "install"] for c in cmds_run)
+        captured = capsys.readouterr()
+        assert "OK Snyk CLI 1.1310.0" in captured.out
 
     def test_version_parse_edge_case(self, monkeypatch, capsys):
         monkeypatch.setattr(
@@ -185,6 +252,7 @@ class TestParseArgs:
         assert args.verify is False
         assert args.list_mode is False
         assert args.yes is False
+        assert args.global_mode is False
 
     def test_all_flags(self):
         args = installer.parse_args(
@@ -197,6 +265,7 @@ class TestParseArgs:
                 "--verify",
                 "--list",
                 "-y",
+                "--global",
             ]
         )
         assert args.profile == "minimal"
@@ -205,6 +274,7 @@ class TestParseArgs:
         assert args.verify is True
         assert args.list_mode is True
         assert args.yes is True
+        assert args.global_mode is True
 
     def test_invalid_ade_rejected(self):
         with pytest.raises(SystemExit):

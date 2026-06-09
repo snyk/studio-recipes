@@ -1341,10 +1341,10 @@ class TestLifecycle:
             tmp_path / ".copilot" / "skills" / "secure-dependency-health-check" / "SKILL.md"
         ).exists()
         assert (tmp_path / ".copilot" / "skills" / "snyk-fix" / "SKILL.md").exists()
-        # sai-hooks-async should drop scripts and merge ~/.copilot/hooks.json
+        # sai-hooks-async should drop scripts and merge ~/.copilot/hooks/hooks.json
         assert (tmp_path / ".copilot" / "hooks" / "snyk_secure_at_inception.py").exists()
         assert (tmp_path / ".copilot" / "hooks" / "lib" / "scan_runner.py").exists()
-        hooks_cfg = json.loads((tmp_path / ".copilot" / "hooks.json").read_text())
+        hooks_cfg = json.loads((tmp_path / ".copilot" / "hooks" / "hooks.json").read_text())
         for event in ("sessionStart", "postToolUse", "agentStop"):
             assert any(
                 "snyk_secure_at_inception" in e.get("bash", "") for e in hooks_cfg["hooks"][event]
@@ -1357,7 +1357,7 @@ class TestLifecycle:
         assert not (tmp_path / ".copilot" / "skills" / "snyk-fix" / "SKILL.md").exists()
         assert not (tmp_path / ".copilot" / "hooks" / "snyk_secure_at_inception.py").exists()
 
-    def test_copilot_vscode_sai_installs_under_dot_copilot(
+    def test_copilot_vscode_sai_installs_under_dot_copilot_hooks(
         self, tmp_path, payload, manifest, monkeypatch
     ):
         """copilot-vscode SAI files must land in ~/.copilot/hooks/ (shared with the
@@ -1375,13 +1375,76 @@ class TestLifecycle:
 
         # SAI hooks live under $HOME/.copilot/, not under the VS Code user dir.
         assert (tmp_path / ".copilot" / "hooks" / "snyk_secure_at_inception.py").exists()
-        assert (tmp_path / ".copilot" / "hooks.json").exists()
+        assert (tmp_path / ".copilot" / "hooks" / "hooks.json").exists()
         assert not (vscode_user / "User" / ".copilot").exists()
 
         assert installer.verify_recipe("sai-hooks-async", "copilot-vscode", manifest, payload)
 
         installer.uninstall(["copilot-vscode"], manifest, payload, workspace=None, dry_run=False)
         assert not (tmp_path / ".copilot" / "hooks" / "snyk_secure_at_inception.py").exists()
+
+    def _seed_legacy_copilot_hooks(self, tmp_path, extra_events=None):
+        """Write a pre-AG-299 ~/.copilot/hooks.json (wrong location) the way the
+        buggy installer would have, plus any extra non-Snyk entries."""
+        hooks = {
+            "sessionStart": [
+                {
+                    "type": "command",
+                    "bash": 'uv run "$HOME/.copilot/hooks/snyk_secure_at_inception.py" sessionStart',
+                    "timeoutSec": 10,
+                }
+            ]
+        }
+        hooks.update(extra_events or {})
+        legacy = tmp_path / ".copilot" / "hooks.json"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text(json.dumps({"version": 1, "hooks": hooks}))
+        return legacy
+
+    def test_install_removes_legacy_copilot_hooks_file_when_empty(
+        self, tmp_path, payload, manifest, monkeypatch
+    ):
+        """Upgrading from the buggy version (hooks merged into ~/.copilot/hooks.json)
+        should strip Snyk entries from the old file and delete it once nothing else
+        remains, so no dead config is left at the wrong path."""
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        legacy = self._seed_legacy_copilot_hooks(tmp_path)
+
+        installer.install_recipe("sai-hooks-async", "copilot-cli", manifest, payload, dry_run=False)
+
+        # Old location is gone; hooks now live at the correct path.
+        assert not legacy.exists()
+        assert not (tmp_path / ".copilot" / "hooks.json.bak").exists()
+        assert (tmp_path / ".copilot" / "hooks" / "hooks.json").exists()
+
+    def test_install_preserves_user_entries_in_legacy_file(
+        self, tmp_path, payload, manifest, monkeypatch
+    ):
+        """A legacy ~/.copilot/hooks.json that also holds a user's own hook must keep
+        that hook — only Snyk-owned entries are stripped, and the file survives."""
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        user_entry = {"type": "command", "bash": "echo my-own-hook", "timeoutSec": 5}
+        legacy = self._seed_legacy_copilot_hooks(
+            tmp_path, extra_events={"preToolUse": [user_entry]}
+        )
+
+        installer.install_recipe("sai-hooks-async", "copilot-cli", manifest, payload, dry_run=False)
+
+        remaining = json.loads(legacy.read_text())
+        assert "sessionStart" not in remaining["hooks"]  # Snyk entry stripped
+        assert remaining["hooks"]["preToolUse"] == [user_entry]  # user entry kept
+
+    def test_uninstall_cleans_legacy_copilot_hooks_file(
+        self, tmp_path, payload, manifest, monkeypatch
+    ):
+        """Uninstall must also clean the old location for users who never re-ran a
+        fixed install before removing Snyk."""
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        legacy = self._seed_legacy_copilot_hooks(tmp_path)
+
+        installer.uninstall(["copilot-cli"], manifest, payload, workspace=None, dry_run=False)
+
+        assert not legacy.exists()
 
     def test_install_verify_uninstall_windsurf(self, tmp_path, payload, manifest, monkeypatch):
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))

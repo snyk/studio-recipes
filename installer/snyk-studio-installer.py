@@ -1344,6 +1344,54 @@ def merge_config(
         print(f"    {C.green('merged:')} {target}")
 
 
+def cleanup_legacy_config_merge(
+    cm: Dict[str, Any], ade: str, payload: "PayloadContext", dry_run: bool
+) -> None:
+    """Strip Snyk entries from superseded config_merge locations.
+
+    Older installer versions wrote Copilot hooks to ``~/.copilot/hooks.json``,
+    but Copilot reads ``~/.copilot/hooks/hooks.json``. Each ``dest`` listed
+    under the config_merge's ``legacy_targets`` is unmerged with the same
+    strategy as the live target, then deleted (with its ``.bak``) once no entries
+    remain — so an upgrade or uninstall doesn't leave dead config at the old path.
+    Only Snyk-owned entries are removed, so a file a user added other hooks to is
+    left in place. Idempotent.
+    """
+    for rel in cm.get("legacy_targets", []):
+        target = resolve_ade_path(ade, rel)
+        if not target.is_file():
+            continue
+        strategy = cm["strategy"].replace("merge_", "unmerge_", 1)
+        if dry_run:
+            print(f"    {C.dim(f'[dry-run] clean legacy ({strategy}): {target}')}")
+            continue
+        with _expand_source(strategy, payload.resolve_src(cm["source"])) as resolved_path:
+            lib_dir = str(payload.payload_dir / "lib")
+            if lib_dir not in sys.path:
+                sys.path.insert(0, lib_dir)
+            import merge_json
+
+            if strategy not in merge_json.STRATEGIES:
+                continue
+            try:
+                merge_json.STRATEGIES[strategy](str(target), str(resolved_path))
+            except ValueError:
+                continue
+        _remove_if_no_hooks(target, dry_run)
+
+
+def _remove_if_no_hooks(target: Path, dry_run: bool) -> None:
+    """Delete a hooks.json (and its .bak) left with no remaining hook entries."""
+    try:
+        data = json.loads(target.read_text())
+    except (OSError, ValueError):
+        return
+    if data.get("hooks"):
+        return
+    remove_file(target, dry_run)
+    remove_file(Path(str(target) + ".bak"), dry_run)
+
+
 def remove_file(path: Path, dry_run: bool) -> None:
     if not path.exists():
         return
@@ -1645,6 +1693,7 @@ def install_recipe(
             source = payload.resolve_src("mcp/.mcp.mac.json")
 
         merge_config(cm["strategy"], target, source, payload, dry_run)
+        cleanup_legacy_config_merge(cm, ade, payload, dry_run)
 
     # chmod +x on Python files
     chmod_python_files(ade_home, dry_run)
@@ -1768,6 +1817,7 @@ def uninstall_ade_recipe(
                 if strategy in merge_json.STRATEGIES:
                     merge_json.STRATEGIES[strategy](str(target), str(resolved_path))
                     print(f"    {C.green('unmerged:')} {target}")
+        cleanup_legacy_config_merge(cm, ade, payload, dry_run)
 
 
 def uninstall(

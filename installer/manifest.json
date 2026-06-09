@@ -79,9 +79,10 @@
             { "src": "guardrail_directives/secure_at_inception/hooks_version/copilot/async_cli_version/lib/sca_scan_worker.py", "dest": ".copilot/hooks/lib/sca_scan_worker.py" }
           ],
           "config_merge": {
-            "target": ".copilot/hooks.json",
+            "target": ".copilot/hooks/hooks.json",
             "source": "guardrail_directives/secure_at_inception/hooks_version/copilot/async_cli_version/hooks.json",
-            "strategy": "merge_copilot_cli_hooks"
+            "strategy": "merge_copilot_cli_hooks",
+            "legacy_targets": [".copilot/hooks.json"]
           }
         },
         "copilot-vscode": {
@@ -94,9 +95,10 @@
             { "src": "guardrail_directives/secure_at_inception/hooks_version/copilot/async_cli_version/lib/sca_scan_worker.py", "dest": ".copilot/hooks/lib/sca_scan_worker.py" }
           ],
           "config_merge": {
-            "target": ".copilot/hooks.json",
+            "target": ".copilot/hooks/hooks.json",
             "source": "guardrail_directives/secure_at_inception/hooks_version/copilot/async_cli_version/hooks.json",
-            "strategy": "merge_copilot_cli_hooks"
+            "strategy": "merge_copilot_cli_hooks",
+            "legacy_targets": [".copilot/hooks.json"]
           }
         }
       }

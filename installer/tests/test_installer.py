@@ -593,9 +593,13 @@ class TestWinCompatibility:
         assert cmd.startswith("uv run ")
 
     def test_expand_source_rewrites_copilot_cli_hooks_on_windows(self, monkeypatch, tmp_path):
-        # copilot_cli_hooks is NOT in _HOOK_EXPAND_STRATEGIES (Copilot bash runtime
-        # expands $HOME at hook time), but the GUI rewrite must still apply.
+        # On Windows, copilot_cli_hooks needs BOTH the GUI rewrite and install-time
+        # $HOME expansion (hooks run with Windows-native paths, not a bash shell
+        # that would expand $HOME at hook time).
         monkeypatch.setattr(installer, "_IS_WINDOWS", True)
+        monkeypatch.setattr(
+            installer.os.path, "expanduser", lambda p: "/home/me" if p == "~" else p
+        )
         src = tmp_path / "hooks.json"
         src.write_text(
             json.dumps(
@@ -615,8 +619,9 @@ class TestWinCompatibility:
             data = json.loads(Path(resolved).read_text())
         bash_cmd = data["hooks"]["sessionStart"][0]["bash"]
         assert bash_cmd.startswith("uvw run --gui-script ")
-        # $HOME should be preserved (copilot strategy isn't in the expand set).
-        assert "$HOME" in bash_cmd
+        # $HOME should be expanded to an absolute path (copilot is in the expand set).
+        assert "$HOME" not in bash_cmd
+        assert "/home/me/.copilot/hooks/snyk_secure_at_inception.py" in bash_cmd
 
 
 # ===========================================================================

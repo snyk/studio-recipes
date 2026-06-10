@@ -186,7 +186,7 @@ def run_snyk_cli(args: List[str], timeout: int = 300) -> tuple[int, str, str]:
         )
         _machine_id = open(_device_id, encoding="utf-8-sig").read().strip()
         if _machine_id:
-            env["SNYK_MACHINE_ID"] = _machine_id
+            env["SNYK_CLIENT_MACHINE_ID"] = _machine_id
     except Exception:
         pass
 

@@ -2,7 +2,10 @@
   "version": "1.0.0",
   "description": "Snyk Studio Recipes - Default Distribution",
   "prerequisites": {
-    "python": "3.8"
+    "python": "3.8",
+    "uv": "0.11.19",
+    "node": "24.11.1",
+    "snyk": "1.1304.0"
   },
   "recipes": {
     "sai-hooks-async": {
@@ -76,9 +79,10 @@
             { "src": "guardrail_directives/secure_at_inception/hooks_version/copilot/async_cli_version/lib/sca_scan_worker.py", "dest": ".copilot/hooks/lib/sca_scan_worker.py" }
           ],
           "config_merge": {
-            "target": ".copilot/hooks.json",
+            "target": ".copilot/hooks/hooks.json",
             "source": "guardrail_directives/secure_at_inception/hooks_version/copilot/async_cli_version/hooks.json",
-            "strategy": "merge_copilot_cli_hooks"
+            "strategy": "merge_copilot_cli_hooks",
+            "legacy_targets": [".copilot/hooks.json"]
           }
         },
         "copilot-vscode": {
@@ -91,9 +95,10 @@
             { "src": "guardrail_directives/secure_at_inception/hooks_version/copilot/async_cli_version/lib/sca_scan_worker.py", "dest": ".copilot/hooks/lib/sca_scan_worker.py" }
           ],
           "config_merge": {
-            "target": ".copilot/hooks.json",
+            "target": ".copilot/hooks/hooks.json",
             "source": "guardrail_directives/secure_at_inception/hooks_version/copilot/async_cli_version/hooks.json",
-            "strategy": "merge_copilot_cli_hooks"
+            "strategy": "merge_copilot_cli_hooks",
+            "legacy_targets": [".copilot/hooks.json"]
           }
         }
       }

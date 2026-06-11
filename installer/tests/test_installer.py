@@ -64,7 +64,7 @@ class TestCheckPrerequisites:
         monkeypatch.setattr(installer, "run", mock_run)
 
         # With auto_yes=True, it should just print warning and continue
-        installer.check_prerequisites(auto_yes=True)
+        installer.check_prerequisites(auto_yes=True, snyk_version="1.1302.0")
         captured = capsys.readouterr()
         assert "WARNING Snyk CLI 1.1301.0 is outdated" in captured.out
 
@@ -84,7 +84,7 @@ class TestCheckPrerequisites:
         monkeypatch.setattr("builtins.input", lambda _: "n")
 
         with pytest.raises(SystemExit):
-            installer.check_prerequisites(auto_yes=False)
+            installer.check_prerequisites(auto_yes=False, snyk_version="1.1302.0")
 
         captured = capsys.readouterr()
         assert "WARNING Snyk CLI 1.1301.0 is outdated" in captured.out
@@ -127,12 +127,79 @@ class TestCheckPrerequisites:
 
         monkeypatch.setattr(installer, "run", mock_run)
 
-        installer.check_prerequisites(auto_yes=True)
+        installer.check_prerequisites(auto_yes=True, snyk_version="1.1302.0")
 
         # Verify that npm install was called
         assert ["sudo", "npm", "install", "-g", "snyk@latest"] in cmds_run
         captured = capsys.readouterr()
         assert "WARNING Snyk CLI 1.1301.0 is outdated" in captured.out
+
+    def test_global_pins_snyk_on_upgrade(self, monkeypatch, capsys):
+        """In --global mode an outdated Snyk upgrades to the pinned version, not latest."""
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None
+        )
+        monkeypatch.setattr("sys.platform", "linux")
+
+        cmds_run = []
+
+        def mock_run(cmd, **kwargs):
+            cmds_run.append(cmd)
+            m = MagicMock()
+            if cmd[0] == "snyk" and cmd[1] == "--version":
+                m.stdout = "1.1301.0\n"
+                m.returncode = 0
+            return m
+
+        monkeypatch.setattr(installer, "run", mock_run)
+
+        installer.check_prerequisites(auto_yes=True, snyk_version="1.1304.0", global_mode=True)
+
+        assert ["sudo", "npm", "install", "-g", "snyk@1.1304.0"] in cmds_run
+        assert ["sudo", "npm", "install", "-g", "snyk@latest"] not in cmds_run
+
+    def test_global_pins_snyk_when_missing(self, monkeypatch, capsys):
+        """In --global mode a missing Snyk installs exactly the pinned version."""
+        monkeypatch.setattr("shutil.which", lambda cmd: None)
+        monkeypatch.setattr("sys.platform", "linux")
+
+        cmds_run = []
+
+        def mock_run(cmd, **kwargs):
+            cmds_run.append(cmd)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(installer, "run", mock_run)
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+
+        installer.check_prerequisites(auto_yes=True, snyk_version="1.1304.0", global_mode=True)
+
+        assert ["sudo", "npm", "install", "-g", "snyk@1.1304.0"] in cmds_run
+
+    def test_global_skips_snyk_when_newer_than_pin(self, monkeypatch, capsys):
+        """In --global mode an installed Snyk newer than the pin is left untouched."""
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None
+        )
+        monkeypatch.setattr("sys.platform", "linux")
+
+        cmds_run = []
+
+        def mock_run(cmd, **kwargs):
+            cmds_run.append(cmd)
+            m = MagicMock()
+            if cmd[0] == "snyk" and cmd[1] == "--version":
+                m.stdout = "1.1310.0\n"
+                m.returncode = 0
+            return m
+
+        monkeypatch.setattr(installer, "run", mock_run)
+
+        installer.check_prerequisites(auto_yes=True, snyk_version="1.1304.0", global_mode=True)
+
+        assert not any(c[:3] == ["sudo", "npm", "install"] for c in cmds_run)
+        captured = capsys.readouterr()
+        assert "OK Snyk CLI 1.1310.0" in captured.out
 
     def test_version_parse_edge_case(self, monkeypatch, capsys):
         monkeypatch.setattr(
@@ -185,6 +252,7 @@ class TestParseArgs:
         assert args.verify is False
         assert args.list_mode is False
         assert args.yes is False
+        assert args.global_mode is False
 
     def test_all_flags(self):
         args = installer.parse_args(
@@ -197,6 +265,7 @@ class TestParseArgs:
                 "--verify",
                 "--list",
                 "-y",
+                "--global",
             ]
         )
         assert args.profile == "minimal"
@@ -205,6 +274,7 @@ class TestParseArgs:
         assert args.verify is True
         assert args.list_mode is True
         assert args.yes is True
+        assert args.global_mode is True
 
     def test_invalid_ade_rejected(self):
         with pytest.raises(SystemExit):
@@ -254,6 +324,28 @@ class TestColor:
         result = c.red("error")
         assert "\033[" in result
         assert "error" in result
+
+
+class TestNonInteractiveGuard:
+    def test_install_fails_fast_without_tty(self, monkeypatch, capsys):
+        # Non-interactive stdin + no -y: main() must fail fast, not block on a prompt.
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False, raising=False)
+        monkeypatch.setattr(installer, "parse_args", lambda: MagicMock(list_mode=False, yes=False))
+        monkeypatch.setattr(installer, "PayloadContext", lambda: MagicMock())
+        monkeypatch.setattr(installer, "Manifest", lambda *a, **k: MagicMock())
+        with pytest.raises(SystemExit):
+            installer.main()
+        assert "interactive input required" in capsys.readouterr().err
+
+    def test_list_mode_allowed_without_tty(self, monkeypatch):
+        # --list never prompts, so it must work on a non-interactive stdin.
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False, raising=False)
+        monkeypatch.setattr(installer, "parse_args", lambda: MagicMock(list_mode=True, yes=False))
+        monkeypatch.setattr(installer, "PayloadContext", lambda: MagicMock())
+        listed = MagicMock()
+        monkeypatch.setattr(installer, "Manifest", lambda *a, **k: listed)
+        installer.main()  # returns without SystemExit
+        listed.list_recipes.assert_called_once()
 
 
 # ===========================================================================
@@ -501,9 +593,13 @@ class TestWinCompatibility:
         assert cmd.startswith("uv run ")
 
     def test_expand_source_rewrites_copilot_cli_hooks_on_windows(self, monkeypatch, tmp_path):
-        # copilot_cli_hooks is NOT in _HOOK_EXPAND_STRATEGIES (Copilot bash runtime
-        # expands $HOME at hook time), but the GUI rewrite must still apply.
+        # On Windows, copilot_cli_hooks needs BOTH the GUI rewrite and install-time
+        # $HOME expansion (hooks run with Windows-native paths, not a bash shell
+        # that would expand $HOME at hook time).
         monkeypatch.setattr(installer, "_IS_WINDOWS", True)
+        monkeypatch.setattr(
+            installer.os.path, "expanduser", lambda p: "/home/me" if p == "~" else p
+        )
         src = tmp_path / "hooks.json"
         src.write_text(
             json.dumps(
@@ -523,8 +619,9 @@ class TestWinCompatibility:
             data = json.loads(Path(resolved).read_text())
         bash_cmd = data["hooks"]["sessionStart"][0]["bash"]
         assert bash_cmd.startswith("uvw run --gui-script ")
-        # $HOME should be preserved (copilot strategy isn't in the expand set).
-        assert "$HOME" in bash_cmd
+        # $HOME should be expanded to an absolute path (copilot is in the expand set).
+        assert "$HOME" not in bash_cmd
+        assert "/home/me/.copilot/hooks/snyk_secure_at_inception.py" in bash_cmd
 
 
 # ===========================================================================
@@ -1249,10 +1346,10 @@ class TestLifecycle:
             tmp_path / ".copilot" / "skills" / "secure-dependency-health-check" / "SKILL.md"
         ).exists()
         assert (tmp_path / ".copilot" / "skills" / "snyk-fix" / "SKILL.md").exists()
-        # sai-hooks-async should drop scripts and merge ~/.copilot/hooks.json
+        # sai-hooks-async should drop scripts and merge ~/.copilot/hooks/hooks.json
         assert (tmp_path / ".copilot" / "hooks" / "snyk_secure_at_inception.py").exists()
         assert (tmp_path / ".copilot" / "hooks" / "lib" / "scan_runner.py").exists()
-        hooks_cfg = json.loads((tmp_path / ".copilot" / "hooks.json").read_text())
+        hooks_cfg = json.loads((tmp_path / ".copilot" / "hooks" / "hooks.json").read_text())
         for event in ("sessionStart", "postToolUse", "agentStop"):
             assert any(
                 "snyk_secure_at_inception" in e.get("bash", "") for e in hooks_cfg["hooks"][event]
@@ -1265,7 +1362,7 @@ class TestLifecycle:
         assert not (tmp_path / ".copilot" / "skills" / "snyk-fix" / "SKILL.md").exists()
         assert not (tmp_path / ".copilot" / "hooks" / "snyk_secure_at_inception.py").exists()
 
-    def test_copilot_vscode_sai_installs_under_dot_copilot(
+    def test_copilot_vscode_sai_installs_under_dot_copilot_hooks(
         self, tmp_path, payload, manifest, monkeypatch
     ):
         """copilot-vscode SAI files must land in ~/.copilot/hooks/ (shared with the
@@ -1283,13 +1380,76 @@ class TestLifecycle:
 
         # SAI hooks live under $HOME/.copilot/, not under the VS Code user dir.
         assert (tmp_path / ".copilot" / "hooks" / "snyk_secure_at_inception.py").exists()
-        assert (tmp_path / ".copilot" / "hooks.json").exists()
+        assert (tmp_path / ".copilot" / "hooks" / "hooks.json").exists()
         assert not (vscode_user / "User" / ".copilot").exists()
 
         assert installer.verify_recipe("sai-hooks-async", "copilot-vscode", manifest, payload)
 
         installer.uninstall(["copilot-vscode"], manifest, payload, workspace=None, dry_run=False)
         assert not (tmp_path / ".copilot" / "hooks" / "snyk_secure_at_inception.py").exists()
+
+    def _seed_legacy_copilot_hooks(self, tmp_path, extra_events=None):
+        """Write a pre-AG-299 ~/.copilot/hooks.json (wrong location) the way the
+        buggy installer would have, plus any extra non-Snyk entries."""
+        hooks = {
+            "sessionStart": [
+                {
+                    "type": "command",
+                    "bash": 'uv run "$HOME/.copilot/hooks/snyk_secure_at_inception.py" sessionStart',
+                    "timeoutSec": 10,
+                }
+            ]
+        }
+        hooks.update(extra_events or {})
+        legacy = tmp_path / ".copilot" / "hooks.json"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text(json.dumps({"version": 1, "hooks": hooks}))
+        return legacy
+
+    def test_install_removes_legacy_copilot_hooks_file_when_empty(
+        self, tmp_path, payload, manifest, monkeypatch
+    ):
+        """Upgrading from the buggy version (hooks merged into ~/.copilot/hooks.json)
+        should strip Snyk entries from the old file and delete it once nothing else
+        remains, so no dead config is left at the wrong path."""
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        legacy = self._seed_legacy_copilot_hooks(tmp_path)
+
+        installer.install_recipe("sai-hooks-async", "copilot-cli", manifest, payload, dry_run=False)
+
+        # Old location is gone; hooks now live at the correct path.
+        assert not legacy.exists()
+        assert not (tmp_path / ".copilot" / "hooks.json.bak").exists()
+        assert (tmp_path / ".copilot" / "hooks" / "hooks.json").exists()
+
+    def test_install_preserves_user_entries_in_legacy_file(
+        self, tmp_path, payload, manifest, monkeypatch
+    ):
+        """A legacy ~/.copilot/hooks.json that also holds a user's own hook must keep
+        that hook — only Snyk-owned entries are stripped, and the file survives."""
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        user_entry = {"type": "command", "bash": "echo my-own-hook", "timeoutSec": 5}
+        legacy = self._seed_legacy_copilot_hooks(
+            tmp_path, extra_events={"preToolUse": [user_entry]}
+        )
+
+        installer.install_recipe("sai-hooks-async", "copilot-cli", manifest, payload, dry_run=False)
+
+        remaining = json.loads(legacy.read_text())
+        assert "sessionStart" not in remaining["hooks"]  # Snyk entry stripped
+        assert remaining["hooks"]["preToolUse"] == [user_entry]  # user entry kept
+
+    def test_uninstall_cleans_legacy_copilot_hooks_file(
+        self, tmp_path, payload, manifest, monkeypatch
+    ):
+        """Uninstall must also clean the old location for users who never re-ran a
+        fixed install before removing Snyk."""
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        legacy = self._seed_legacy_copilot_hooks(tmp_path)
+
+        installer.uninstall(["copilot-cli"], manifest, payload, workspace=None, dry_run=False)
+
+        assert not legacy.exists()
 
     def test_install_verify_uninstall_windsurf(self, tmp_path, payload, manifest, monkeypatch):
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))

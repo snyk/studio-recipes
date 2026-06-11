@@ -62,6 +62,12 @@ function Ensure-Uv {
     Write-Host "    Install with: irm https://astral.sh/uv/install.ps1 | iex"
 
     if (-not $autoYes) {
+        # Only prompt on an interactive console; if stdin is redirected (pipe/file)
+        # Read-Host would block or fail in an automated run, so fail fast.
+        if ([System.Console]::IsInputRedirected) {
+            Write-Error "  uv is required; re-run with -y to install it without prompting."
+            exit 1
+        }
         $reply = (Read-Host "`n  Install uv now? (y/n)").Trim().ToLowerInvariant()
         if ($reply -ne "y" -and $reply -ne "yes") {
             Write-Error "  Cancelled: uv is required to run this installer."

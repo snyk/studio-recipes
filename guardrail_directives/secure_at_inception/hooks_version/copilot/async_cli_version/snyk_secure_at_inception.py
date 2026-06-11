@@ -12,7 +12,7 @@ were introduced in agent-modified code.
 
 
 WORKFLOW:
-  1. postToolUse (edit|write|create) -> track ranges, launch background scan
+  1. postToolUse (any file edit/create tool) -> track ranges, launch background scan
   2. agentStop -> wait for scan, filter results to modified lines, block if new vulns
 
 INSTALLATION:
@@ -158,6 +158,26 @@ def output_response(response: Dict[str, Any]) -> None:
     print(json.dumps(response))
 
 
+def output_block(reason: str, data: Dict[str, Any]) -> None:
+    """Emit a 'block' decision that keeps the turn open and re-prompts the agent.
+
+    Works on both Copilot surfaces. The Copilot CLI reads a top-level
+    {"decision":"block","reason":...}; the GitHub Copilot Chat extension reads
+    it nested under hookSpecificOutput keyed by hookEventName. Emit both -- each
+    host ignores the field it doesn't use."""
+    output_response(
+        {
+            "decision": "block",
+            "reason": reason,
+            "hookSpecificOutput": {
+                "hookEventName": data.get("hook_event_name") or "Stop",
+                "decision": "block",
+                "reason": reason,
+            },
+        }
+    )
+
+
 def get_state_file_path(workspace: str) -> str:
     return os.path.join(get_cache_dir(workspace), "state.json")
 
@@ -180,6 +200,33 @@ def _parse_tool_args(raw: Any) -> Dict[str, Any]:
         except json.JSONDecodeError:
             return {}
     return {}
+
+
+# File-modifying tool names across both Copilot surfaces. The Copilot CLI sends
+# edit/write/create; the Copilot Chat extension sends replace_string_in_file /
+# multi_replace_string_in_file / insert_edit_into_file / create_file / apply_patch.
+# Matching is case-insensitive.
+_CREATE_TOOLS = {"write", "create", "create_file"}
+_EDIT_TOOLS = {
+    "edit",
+    "multiedit",
+    "str_replace_editor",
+    "replace_string_in_file",
+    "multi_replace_string_in_file",
+    "insert_edit_into_file",
+    "apply_patch",
+}
+
+
+def _classify_edit_tool(tool_name: str) -> Optional[str]:
+    """Map a Copilot tool name (CLI or Chat extension) to 'edit' or 'create', or
+    None if the tool does not modify file contents (and the edit is ignored)."""
+    name = (tool_name or "").lower()
+    if name in _CREATE_TOOLS:
+        return "create"
+    if name in _EDIT_TOOLS:
+        return "edit"
+    return None
 
 
 # =============================================================================
@@ -437,15 +484,23 @@ def handle_session_start(data: Dict[str, Any], workspace: str) -> None:
 
 def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
     """Track file edits and launch background scans. Output ignored."""
-    tool_name = data.get("toolName", "")
-    if tool_name not in ("edit", "write", "create"):
-        debug_log(f"Ignoring postToolUse for tool: {tool_name}")
+    # Field names differ by surface: the Copilot CLI sends toolName/toolArgs;
+    # the Copilot Chat extension sends the Claude-style tool_name/tool_input.
+    raw_tool_name = data.get("tool_name") or data.get("toolName") or ""
+    raw_tool_args = data.get("tool_input")
+    if raw_tool_args is None:
+        raw_tool_args = data.get("toolArgs", {})
+
+    edit_kind = _classify_edit_tool(raw_tool_name)
+    if edit_kind is None:
+        debug_log(f"Ignoring postToolUse for tool: {raw_tool_name}")
         output_response({})
         return
 
-    tool_args = _parse_tool_args(data.get("toolArgs", {}))
-    file_path = tool_args.get("filePath") or tool_args.get("file_path", "")
+    tool_args = _parse_tool_args(raw_tool_args)
+    file_path = tool_args.get("filePath") or tool_args.get("file_path") or tool_args.get("path", "")
     if not file_path:
+        debug_log(f"No file path in tool args (keys: {list(tool_args.keys())})")
         output_response({})
         return
 
@@ -458,11 +513,13 @@ def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
         state = read_state(workspace)
         _initialize_session(workspace, state)
 
-        if tool_name == "edit":
+        if edit_kind == "edit":
             new_content = (
                 tool_args.get("content")
                 or tool_args.get("newContent")
-                or tool_args.get("new_string", "")
+                or tool_args.get("new_string")
+                or tool_args.get("newString")  # Copilot Chat replace_string_in_file
+                or tool_args.get("code", "")  # Copilot Chat insert_edit_into_file
             )
             if new_content:
                 try:
@@ -527,7 +584,7 @@ def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
                     "Snyk CLI is not installed or not on PATH. Install it with "
                     "`npm install -g snyk` and authenticate with `snyk auth`."
                 )
-            output_response({"decision": "block", "reason": reason})
+            output_block(reason, data)
             return
 
     if launch_background_scan(workspace):
@@ -708,7 +765,7 @@ def handle_agent_stop(data: Dict[str, Any], workspace: str) -> None:
         elif sca_fallback:
             sast_fallback += f"\n\n## Dependency Scan Unavailable\n\n{sca_fallback}"
         clear_state(workspace)
-        output_response({"decision": "block", "reason": sast_fallback})
+        output_block(sast_fallback, data)
         return
 
     if not new_vulns and not new_sca_vulns and not sca_fallback:
@@ -756,7 +813,7 @@ def handle_agent_stop(data: Dict[str, Any], workspace: str) -> None:
     reason_parts.append("\nAfter fixing, the security scan will run again automatically.")
 
     log_to_panel(f"[SAI] Blocking: {len(new_vulns)} SAST + {len(new_sca_vulns)} SCA vuln(s)")
-    output_response({"decision": "block", "reason": "\n".join(reason_parts)})
+    output_block("\n".join(reason_parts), data)
 
 
 # =============================================================================

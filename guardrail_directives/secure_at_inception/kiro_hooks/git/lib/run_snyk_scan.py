@@ -174,6 +174,21 @@ def run_snyk_cli(args: List[str], timeout: int = 300) -> tuple[int, str, str]:
     env["SNYK_INTEGRATION_VERSION"] = SNYK_STUDIO_VERSION
     env["SNYK_INTEGRATION_ENVIRONMENT"] = "kiro"
     env["SNYK_INTEGRATION_ENVIRONMENT_VERSION"] = SNYK_STUDIO_VERSION
+    try:
+        _device_id = (
+            os.path.join(
+                os.environ.get("ProgramData", "C:\\ProgramData"), "snyk-studio", "device-id"
+            )
+            if sys.platform == "win32"  # Windows
+            else "/Library/Application Support/snyk-studio/device-id"
+            if sys.platform == "darwin"  # macOS
+            else "/var/lib/snyk-studio/device-id"  # Linux
+        )
+        _machine_id = open(_device_id, encoding="utf-8-sig").read().strip()
+        if _machine_id:
+            env["SNYK_CLIENT_MACHINE_ID"] = _machine_id
+    except Exception:
+        pass
 
     try:
         result = subprocess.run(

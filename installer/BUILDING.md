@@ -8,6 +8,7 @@ Build from source to **tailor the bundle for your organization**, **audit the in
 
 - Python 3.8+
 - A clone of [`snyk/studio-recipes`](https://github.com/snyk/studio-recipes)
+- Go 1.18+ (optional — only needed to compile the Go installer binaries; install from [go.dev/dl](https://go.dev/dl/). The build skips them if `go` is not on `PATH`)
 
 ---
 
@@ -19,7 +20,19 @@ From the `installer/` directory of your clone:
 python3 build_installer.py
 ```
 
-This regenerates `dist/snyk-studio-install.sh` and `dist/snyk-studio-install.ps1` from [`manifest.json`](manifest.json) and the recipe sources alongside it. Distribute or host the contents of `dist/` — developers run them exactly the same way as the pre-built installer described in [`README.md`](README.md).
+This regenerates the installers from [`manifest.json`](manifest.json) and the recipe sources alongside it:
+
+- `dist/snyk-studio-install.sh`, `dist/snyk-studio-install.ps1`, `dist/snyk-studio-install.py` — single self-extracting scripts with the recipe payload embedded as base64.
+- `dist/snyk-studio-<os>-<arch>[.exe]` — Go installer binaries cross-compiled for macOS, Linux, and Windows (`macos`/`linux`/`windows` × `x86_64`/`arm64`). Invoke with the `install` subcommand, e.g. `snyk-studio-macos-arm64 install -y` (options after `install` are forwarded to the Python installer).
+
+Distribute or host the contents of `dist/` — developers run them exactly the same way as the pre-built installer described in [`README.md`](README.md).
+
+To build a single flavor, pass `--only` (repeatable):
+
+```bash
+python3 build_installer.py --only go        # just the Go binaries
+python3 build_installer.py --only sh --only ps1
+```
 
 ---
 
@@ -56,4 +69,10 @@ Once `dist/` is built, place `snyk-studio-install.sh` and `snyk-studio-install.p
 
 ```bash
 pytest
+```
+
+The Go installer has its own tests (they exercise the embedded-bundle extraction against whatever is currently staged in `go/bundle/`):
+
+```bash
+cd go && go test ./...
 ```

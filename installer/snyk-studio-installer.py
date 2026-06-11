@@ -19,6 +19,8 @@ Options:
     --uninstall                                Remove Snyk recipes from detected ADEs
     --verify                                   Verify installed files and merged configs match manifest
     --list                                     List available recipes and profiles
+    --global                                   Install pinned dependency versions (uv, snyk)
+                                               from the manifest instead of the latest
     -y, --yes                                  Skip confirmation prompts
     -h, --help                                 Show this help message
 """
@@ -44,7 +46,16 @@ BUNDLE_ENV = "SNYK_STUDIO_BUNDLE_ROOT"
 
 GLOBAL = "global"
 WORKSPACE = "workspace"
-SNYK_MINIMUM_VERSION = "1.1302.0"
+
+_IS_WINDOWS = sys.platform == "win32"
+
+# When the installer runs inside a GUI ADE (no attached console), spawning a
+# console subprocess via shell=True (which goes through cmd.exe) pops up a
+# console window. CREATE_NO_WINDOW suppresses it. The flag only exists on
+# Windows; elsewhere this is 0 (subprocess's default creationflags, i.e. no-op).
+_CREATE_NO_WINDOW = 0
+if sys.platform == "win32":
+    _CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW
 
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -156,6 +167,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--list", action="store_true", dest="list_mode", help="List available recipes and profiles"
     )
     parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompts")
+    parser.add_argument(
+        "--global",
+        action="store_true",
+        dest="global_mode",
+        help=(
+            "Install pinned dependency versions (from manifest prerequisites) "
+            "instead of the latest available."
+        ),
+    )
     parser.add_argument(
         "--workspace",
         default=None,
@@ -276,6 +296,11 @@ class Manifest:
 
     def all_recipe_ids(self) -> List[str]:
         return list(self.recipes.keys())
+
+    def prerequisite_version(self, name: str) -> Optional[str]:
+        """Return the pinned version string for a prerequisite, or None if unset."""
+        value = self.data.get("prerequisites", {}).get(name)
+        return str(value) if value else None
 
     def detect_stale_conflicts(self, active_recipes: List[str]) -> List[Tuple[str, str, str]]:
         """Return ``(active, conflicted, ade)`` triples for stale on-disk installs.
@@ -729,14 +754,29 @@ def run_command(cmd: list[str], warn: str) -> int:
         return 1
 
 
-def check_prerequisites(auto_yes: bool) -> None:
-    """Check that the required prerequisites are installed and configured. If not, attempt to install them."""
+def check_prerequisites(
+    auto_yes: bool, snyk_version: Optional[str] = None, global_mode: bool = False
+) -> None:
+    """Check that the required prerequisites are installed and configured. If not, attempt to install them.
+
+    ``snyk_version`` is the pinned Snyk CLI version from the manifest
+    prerequisites; it doubles as the minimum-acceptable version. In
+    ``global_mode`` the installer pins to exactly that version (``snyk@<ver>``)
+    rather than tracking the latest release, and only (re)installs when Snyk is
+    missing or older than the pin.
+    """
 
     warnings = 0
 
     def get_npm_install_cmd(pkg: str) -> List[str]:
         cmd = ["npm", "install", "-g", pkg]
         return ["sudo"] + cmd if not _IS_WINDOWS else cmd
+
+    def snyk_pkg(latest_label: str) -> str:
+        """Package spec to install: the pin in global mode, else the latest label."""
+        if global_mode and snyk_version:
+            return f"snyk@{snyk_version}"
+        return latest_label
 
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
     print(f"  {C.green('OK')} Python {py_ver}")
@@ -751,7 +791,7 @@ def check_prerequisites(auto_yes: bool) -> None:
     def parse_version(x):
         return tuple(map(int, x.split(".")))
 
-    minimum_snyk_version = parse_version(SNYK_MINIMUM_VERSION)
+    minimum_snyk_version = parse_version(snyk_version) if snyk_version else None
 
     if get_snyk_path():
         r = run(
@@ -766,28 +806,34 @@ def check_prerequisites(auto_yes: bool) -> None:
         match = re.match(r"(\d+\.\d+\.\d+)", ver_str)
         if match:
             current_version = parse_version(match.group(1))
-            if current_version < minimum_snyk_version:
+            # Only (re)install when the installed Snyk is older than the
+            # pin/minimum; an equal-or-newer build is left untouched in both
+            # global and default mode.
+            if minimum_snyk_version is not None and current_version < minimum_snyk_version:
+                target = "pinned" if global_mode else "latest"
                 print(
-                    f"  {C.yellow('WARNING')} Snyk CLI {ver_str} is outdated (min: {SNYK_MINIMUM_VERSION}). Upgrade snyk?"
+                    f"  {C.yellow('WARNING')} Snyk CLI {ver_str} is outdated "
+                    f"(min: {snyk_version}). Upgrade to {target}?"
                 )
                 if not auto_yes:
                     reply = input("  (y/n) ").strip().lower()
                     if reply not in ("y", "yes"):
                         sys.exit(1)
                 warnings += run_command(
-                    get_npm_install_cmd("snyk@latest"),
-                    f"  {C.yellow('WARNING')} Failed to upgrade Snyk CLI to latest via npm",
+                    get_npm_install_cmd(snyk_pkg("snyk@latest")),
+                    f"  {C.yellow('WARNING')} Failed to upgrade Snyk CLI to {target} via npm",
                 )
             else:
                 print(f"  {C.green('OK')} Snyk CLI {ver_str}")
     else:
-        print(f"  {C.yellow('WARNING')} Snyk CLI not found, install latest version?")
+        target = "pinned" if global_mode and snyk_version else "latest"
+        print(f"  {C.yellow('WARNING')} Snyk CLI not found, install {target} version?")
         if not auto_yes:
             reply = input("  (y/n) ").strip().lower()
             if reply not in ("y", "yes"):
                 sys.exit(1)
         warnings += run_command(
-            get_npm_install_cmd("snyk"),
+            get_npm_install_cmd(snyk_pkg("snyk")),
             f"  {C.yellow('WARNING')} Failed to install Snyk CLI via npm",
         )
 
@@ -1138,7 +1184,31 @@ def get_target_ades(
 # Strategies whose source file carries hook commands needing expansion:
 
 _HOOK_EXPAND_STRATEGIES: frozenset[str] = frozenset(
-    {"cursor_hooks", "claude_settings", "gemini_settings", "kiro_settings", "codex_config"}
+    {
+        "cursor_hooks",
+        "claude_settings",
+        "gemini_settings",
+        "kiro_settings",
+        "codex_config",
+        "copilot_cli_hooks",
+    }
+)
+
+# Strategies whose source file carries hook commands the Windows installer
+# rewrites from ``uv run`` to ``uvw run --gui-script`` to suppress the console
+# window ``uv run`` would otherwise pop up under graphical ADEs. Includes the
+# Copilot CLI strategy, which on Windows needs both the GUI rewrite and
+# install-time $HOME expansion (its hooks run with Windows-native paths, not a
+# bash shell that would expand $HOME at hook time).
+_HOOK_GUI_STRATEGIES: frozenset[str] = frozenset(
+    {
+        "cursor_hooks",
+        "claude_settings",
+        "gemini_settings",
+        "kiro_settings",
+        "codex_config",
+        "copilot_cli_hooks",
+    }
 )
 
 # Strategies whose source file carries hook commands the Windows installer
@@ -1156,6 +1226,32 @@ _HOOK_GUI_STRATEGIES: frozenset[str] = frozenset(
         "copilot_cli_hooks",
     }
 )
+
+
+def _should_expand_source(strategy: str) -> bool:
+    """True iff the source file for ``strategy`` carries hook commands we
+    should pre-expand before passing to the merge layer.
+
+    Skipped for ``unmerge_*`` strategies — those handle dual-form (raw vs
+    expanded) matching internally so they can clean up entries written by
+    older installer versions that still contain ``$HOME``.
+    """
+    if not any(s in strategy for s in _HOOK_EXPAND_STRATEGIES):
+        return False
+    return not strategy.startswith("unmerge_")
+
+
+def _should_gui_transform(strategy: str) -> bool:
+    """True iff the source file for ``strategy`` carries ``uv run`` hook
+    commands the Windows installer should rewrite to ``uvw run --gui-script``.
+
+    Applies on Windows only. Runs for both ``merge_*`` and ``unmerge_*``
+    strategies so the unmerge source matches the on-disk form the installer
+    wrote.
+    """
+    if not _IS_WINDOWS:
+        return False
+    return any(s in strategy for s in _HOOK_GUI_STRATEGIES)
 
 
 def _should_expand_source(strategy: str) -> bool:
@@ -1306,6 +1402,54 @@ def merge_config(
             )
             return
         print(f"    {C.green('merged:')} {target}")
+
+
+def cleanup_legacy_config_merge(
+    cm: Dict[str, Any], ade: str, payload: "PayloadContext", dry_run: bool
+) -> None:
+    """Strip Snyk entries from superseded config_merge locations.
+
+    Older installer versions wrote Copilot hooks to ``~/.copilot/hooks.json``,
+    but Copilot reads ``~/.copilot/hooks/hooks.json``. Each ``dest`` listed
+    under the config_merge's ``legacy_targets`` is unmerged with the same
+    strategy as the live target, then deleted (with its ``.bak``) once no entries
+    remain — so an upgrade or uninstall doesn't leave dead config at the old path.
+    Only Snyk-owned entries are removed, so a file a user added other hooks to is
+    left in place. Idempotent.
+    """
+    for rel in cm.get("legacy_targets", []):
+        target = resolve_ade_path(ade, rel)
+        if not target.is_file():
+            continue
+        strategy = cm["strategy"].replace("merge_", "unmerge_", 1)
+        if dry_run:
+            print(f"    {C.dim(f'[dry-run] clean legacy ({strategy}): {target}')}")
+            continue
+        with _expand_source(strategy, payload.resolve_src(cm["source"])) as resolved_path:
+            lib_dir = str(payload.payload_dir / "lib")
+            if lib_dir not in sys.path:
+                sys.path.insert(0, lib_dir)
+            import merge_json
+
+            if strategy not in merge_json.STRATEGIES:
+                continue
+            try:
+                merge_json.STRATEGIES[strategy](str(target), str(resolved_path))
+            except ValueError:
+                continue
+        _remove_if_no_hooks(target, dry_run)
+
+
+def _remove_if_no_hooks(target: Path, dry_run: bool) -> None:
+    """Delete a hooks.json (and its .bak) left with no remaining hook entries."""
+    try:
+        data = json.loads(target.read_text())
+    except (OSError, ValueError):
+        return
+    if data.get("hooks"):
+        return
+    remove_file(target, dry_run)
+    remove_file(Path(str(target) + ".bak"), dry_run)
 
 
 def remove_file(path: Path, dry_run: bool) -> None:
@@ -1609,6 +1753,7 @@ def install_recipe(
             source = payload.resolve_src("mcp/.mcp.mac.json")
 
         merge_config(cm["strategy"], target, source, payload, dry_run)
+        cleanup_legacy_config_merge(cm, ade, payload, dry_run)
 
     # chmod +x on Python files
     chmod_python_files(ade_home, dry_run)
@@ -1732,6 +1877,7 @@ def uninstall_ade_recipe(
                 if strategy in merge_json.STRATEGIES:
                     merge_json.STRATEGIES[strategy](str(target), str(resolved_path))
                     print(f"    {C.green('unmerged:')} {target}")
+        cleanup_legacy_config_merge(cm, ade, payload, dry_run)
 
 
 def uninstall(
@@ -1860,11 +2006,26 @@ def main() -> None:
         manifest.list_recipes()
         return
 
+    # Everything below can prompt for confirmation (prerequisites, ADE
+    # selection, install/uninstall). On a non-interactive stdin those reads
+    # would block forever, so fail fast unless -y was given (which skips them).
+    if not args.yes and (not hasattr(sys.stdin, "isatty") or not sys.stdin.isatty()):
+        print(
+            "  Error: interactive input required; re-run with -y (and flags such as "
+            "--ade/--profile) to run non-interactively.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     print_banner()
 
     # Prerequisites
     print(f"  {C.bold('Prerequisites')}")
-    check_prerequisites(args.yes)
+    check_prerequisites(
+        args.yes,
+        snyk_version=manifest.prerequisite_version("snyk"),
+        global_mode=args.global_mode,
+    )
     print()
 
     # ADE detection

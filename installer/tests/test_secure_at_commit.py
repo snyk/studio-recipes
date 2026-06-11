@@ -1212,6 +1212,90 @@ class TestSnykConfigPath:
         assert path == str(tmp_path / ".config" / "configstore" / "snyk.json")
 
 
+class TestSnykEnv:
+    def test_machine_id_linux_path(self, monkeypatch):
+        import builtins
+        import io
+
+        monkeypatch.setattr("sys.platform", "linux")
+        real_open = builtins.open
+
+        def mock_open(path, *args, **kwargs):
+            if path == "/var/lib/snyk-studio/device-id":
+                return io.StringIO("my-device-id")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", mock_open)
+        env = sac_hook._snyk_env()
+        assert env["SNYK_CLIENT_MACHINE_ID"] == "my-device-id"
+
+    def test_machine_id_macos_path(self, monkeypatch):
+        import builtins
+        import io
+
+        monkeypatch.setattr("sys.platform", "darwin")
+        real_open = builtins.open
+
+        def mock_open(path, *args, **kwargs):
+            if path == "/Library/Application Support/snyk-studio/device-id":
+                return io.StringIO("my-device-id")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", mock_open)
+        env = sac_hook._snyk_env()
+        assert env["SNYK_CLIENT_MACHINE_ID"] == "my-device-id"
+
+    def test_machine_id_windows_path(self, monkeypatch):
+        import builtins
+        import io
+
+        monkeypatch.setattr("sys.platform", "win32")
+        monkeypatch.setattr("snyk_secure_at_commit.shutil.which", lambda *a, **kw: None)
+        monkeypatch.setenv("ProgramData", "C:\\ProgramData")
+        expected_path = os.path.join("C:\\ProgramData", "snyk-studio", "device-id")
+        real_open = builtins.open
+
+        def mock_open(path, *args, **kwargs):
+            if path == expected_path:
+                return io.StringIO("my-device-id")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", mock_open)
+        env = sac_hook._snyk_env()
+        assert env["SNYK_CLIENT_MACHINE_ID"] == "my-device-id"
+
+    def test_machine_id_absent_when_file_missing(self, monkeypatch):
+        import builtins
+
+        monkeypatch.setattr("sys.platform", "linux")
+        real_open = builtins.open
+
+        def mock_open(path, *args, **kwargs):
+            if path == "/var/lib/snyk-studio/device-id":
+                raise FileNotFoundError(path)
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", mock_open)
+        env = sac_hook._snyk_env()
+        assert "SNYK_CLIENT_MACHINE_ID" not in env
+
+    def test_machine_id_absent_when_file_empty(self, monkeypatch):
+        import builtins
+        import io
+
+        monkeypatch.setattr("sys.platform", "linux")
+        real_open = builtins.open
+
+        def mock_open(path, *args, **kwargs):
+            if path == "/var/lib/snyk-studio/device-id":
+                return io.StringIO("   ")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", mock_open)
+        env = sac_hook._snyk_env()
+        assert "SNYK_CLIENT_MACHINE_ID" not in env
+
+
 # ============================================================================
 # 7. Compiler-style output formatting
 # ============================================================================

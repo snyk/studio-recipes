@@ -1,0 +1,8 @@
+# bundle/ is staged by build_installer.py at build time. Keep only the
+# placeholder so the module still compiles (//go:embed requires a match) and
+# git stays clean of the generated payload.
+/bundle/*
+!/bundle/.gitkeep
+
+# Go coverage artifact (make go-coverage)
+/coverage.out

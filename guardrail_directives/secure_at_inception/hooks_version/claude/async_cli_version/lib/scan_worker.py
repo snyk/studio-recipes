@@ -12,6 +12,7 @@ Configuration is passed via environment variables.
 Environment variables (set by scan_runner):
 - SAI_WORKSPACE: Path to the workspace being scanned
 - SAI_CACHE_DIR: Path to the cache directory
+- SAI_LOG_FILE: Path to the unified persistent log (shared with orchestrator)
 - SAI_LIB_DIR: Path to the lib directory (for imports)
 """
 
@@ -24,14 +25,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from platform_utils import STUDIO_VERSION as SNYK_STUDIO_VERSION
+from platform_utils import log as _platform_log
+
 WORKSPACE = ""
 CACHE_DIR = ""
 LIB_DIR = str(Path(__file__).parent.resolve())
 PID_FILE = ""
 DONE_FILE = ""
-LOG_FILE = ""
-
-SNYK_STUDIO_VERSION = "1.0.0"
+LOG_FILE: Optional[str] = None
 
 _IS_WINDOWS = sys.platform == "win32"
 # Console apps (snyk / the cmd.exe shim) spawned from this windowless background
@@ -43,14 +45,10 @@ if sys.platform == "win32":
     _CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW
 
 
-def log(msg: str) -> None:
+def log(msg: str, *, debug: bool = False) -> None:
     if not LOG_FILE:
         return
-    try:
-        with open(LOG_FILE, "a") as f:
-            f.write(f"[{datetime.now().isoformat()}] {msg}\n")
-    except Exception:
-        pass
+    _platform_log(f"[worker] {msg}", LOG_FILE, debug=debug)
 
 
 def finish(
@@ -97,7 +95,7 @@ def main() -> None:
 
     PID_FILE = os.path.join(CACHE_DIR, "scan.pid")
     DONE_FILE = os.path.join(CACHE_DIR, "scan.done")
-    LOG_FILE = os.path.realpath(os.path.join(CACHE_DIR, "scan.log"))
+    LOG_FILE = os.environ.get("SAI_LOG_FILE", None)
 
     sys.path.insert(0, LIB_DIR)
     from scan_runner import parse_sarif_results
@@ -176,7 +174,7 @@ def main() -> None:
         finish("timeout", started_at=started_at)
         return
 
-    log(f"Snyk exited with code {exit_code}")
+    log(f"Snyk exited with code {exit_code}", debug=True)
 
     if exit_code > 1:
         combined_output = (stderr + stdout).lower()

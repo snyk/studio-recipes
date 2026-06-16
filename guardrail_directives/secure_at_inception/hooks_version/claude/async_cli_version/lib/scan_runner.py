@@ -31,6 +31,8 @@ from platform_utils import (
     get_snyk_binary_names,
     get_snyk_search_paths,
     is_pid_alive,
+    resolve_log_file,
+    workspace_hash,
 )
 
 # =============================================================================
@@ -49,8 +51,7 @@ PID_STALENESS_TIMEOUT = 600
 
 
 def get_cache_dir(workspace: str) -> str:
-    workspace_hash = hashlib.sha256(workspace.encode()).hexdigest()[:8]
-    return os.path.join(tempfile.gettempdir(), f"claude-sai-{workspace_hash}")
+    return os.path.join(tempfile.gettempdir(), f"claude-sai-{workspace_hash(workspace)}")
 
 
 def ensure_cache_dirs(workspace: str) -> str:
@@ -395,6 +396,7 @@ def _do_launch(
         _ensure_snyk_token(env)
         env["SAI_WORKSPACE"] = workspace
         env["SAI_CACHE_DIR"] = get_cache_dir(workspace)
+        env["SAI_LOG_FILE"] = resolve_log_file(workspace)
         env["SAI_LIB_DIR"] = str(Path(__file__).parent.resolve())
         try:
             proc = subprocess.Popen(

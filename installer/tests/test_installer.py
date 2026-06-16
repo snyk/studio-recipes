@@ -28,7 +28,7 @@ installer = importlib.import_module("snyk-studio-installer")
 class TestCheckPrerequisites:
     @pytest.fixture(autouse=True)
     def mock_node_installed(self, monkeypatch):
-        monkeypatch.setattr(installer, "ensure_node_installed", lambda _: True)
+        monkeypatch.setattr(installer, "ensure_node_installed", lambda *_: True)
 
     def test_all_ok(self, monkeypatch, capsys):
         monkeypatch.setattr(
@@ -359,6 +359,223 @@ class TestEnsureNodeInstalled:
             "shutil.which", lambda cmd: "/bin/cmd" if cmd in ("node", "npm") else None
         )
         assert installer.ensure_node_installed(auto_yes=True) is True
+
+    def test_node_meets_minimum_no_warning(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/bin/cmd" if cmd in ("node", "npm") else None
+        )
+        monkeypatch.setattr(installer, "_get_node_version", lambda: (24, 12, 0))
+        assert installer.ensure_node_installed(auto_yes=True, node_version="24.11.1") is True
+        assert "is outdated" not in capsys.readouterr().out
+
+    def test_outdated_node_warns_and_upgrades(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/bin/cmd" if cmd in ("node", "npm", "brew") else None
+        )
+        monkeypatch.setattr("platform.system", lambda: "Darwin")
+        monkeypatch.setattr(installer, "_get_node_version", lambda: (18, 0, 0))
+
+        cmds_run = []
+        monkeypatch.setattr(
+            installer, "run", lambda cmd, **k: cmds_run.append(cmd) or MagicMock(returncode=0)
+        )
+
+        assert installer.ensure_node_installed(auto_yes=True, node_version="24.11.1") is True
+        captured = capsys.readouterr()
+        assert "WARNING Node.js 18.0.0 is outdated (min: 24.11.1)" in captured.out
+        # macOS pins to the closest Homebrew formula (node@24) and links it.
+        assert ["brew", "install", "node@24"] in cmds_run
+        # --force (keg-only) but NOT --overwrite, so existing node/npm isn't clobbered.
+        assert ["brew", "link", "--force", "node@24"] in cmds_run
+
+    def test_outdated_node_failed_upgrade_exits(self, monkeypatch, capsys):
+        """A failed upgrade of an outdated Node must not silently proceed — it exits."""
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/bin/cmd" if cmd in ("node", "npm", "brew") else None
+        )
+        monkeypatch.setattr("platform.system", lambda: "Darwin")
+        monkeypatch.setattr(installer, "_get_node_version", lambda: (18, 0, 0))
+        # Every install command (pin + fallback) fails.
+        monkeypatch.setattr(
+            installer, "run", lambda cmd, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
+
+        with pytest.raises(SystemExit):
+            installer.ensure_node_installed(auto_yes=True, node_version="24.11.1")
+        out = capsys.readouterr().out
+        assert "is outdated" in out
+        # _run_node_install / fallback already printed the install failure before exit.
+        assert "Installation failed" in out
+
+    def test_outdated_node_declined_upgrade_returns_true(self, monkeypatch, capsys):
+        """Declining the upgrade is an informed choice — proceed (warning already shown)."""
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/bin/cmd" if cmd in ("node", "npm", "brew") else None
+        )
+        monkeypatch.setattr("platform.system", lambda: "Darwin")
+        monkeypatch.setattr(installer, "_get_node_version", lambda: (18, 0, 0))
+        monkeypatch.setattr("builtins.input", lambda prompt: "n")
+        monkeypatch.setattr(
+            installer, "run", lambda cmd, **k: (_ for _ in ()).throw(AssertionError("no install"))
+        )
+
+        assert installer.ensure_node_installed(auto_yes=False, node_version="24.11.1") is True
+
+    def test_darwin_install_pins_major_formula(self, monkeypatch):
+        """A target version installs the closest major Homebrew formula + link."""
+        monkeypatch.setattr("shutil.which", lambda cmd: "/bin/brew" if cmd == "brew" else None)
+        monkeypatch.setattr("platform.system", lambda: "Darwin")
+        cmds = installer._build_node_install_cmds(auto_yes=True, node_version="24.11.1")
+        assert cmds == [
+            ["brew", "install", "node@24"],
+            ["brew", "link", "--force", "node@24"],
+        ]
+
+    def test_windows_winget_pins_exact_version(self, monkeypatch):
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "C:\\winget.exe" if cmd == "winget" else None
+        )
+        monkeypatch.setattr("platform.system", lambda: "Windows")
+        cmds = installer._build_node_install_cmds(auto_yes=True, node_version="24.11.1")
+        assert cmds == [
+            [
+                "winget",
+                "install",
+                "OpenJS.NodeJS",
+                "--version",
+                "24.11.1",
+                "--silent",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+            ]
+        ]
+
+    def test_windows_choco_pins_exact_version(self, monkeypatch):
+        monkeypatch.setattr("shutil.which", lambda cmd: "C:\\choco.exe" if cmd == "choco" else None)
+        monkeypatch.setattr("platform.system", lambda: "Windows")
+        cmds = installer._build_node_install_cmds(auto_yes=True, node_version="24.11.1")
+        assert cmds == [["choco", "install", "nodejs", "--version=24.11.1", "-y"]]
+
+    def test_windows_pinned_failure_falls_back_to_lts(self, monkeypatch, capsys):
+        """When the exact-version winget pin fails, retry with the default LTS package."""
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "C:\\cmd.exe" if cmd in ("node", "npm", "winget") else None
+        )
+        monkeypatch.setattr("platform.system", lambda: "Windows")
+        monkeypatch.setattr(installer, "_get_node_version", lambda: (18, 0, 0))
+
+        attempted = []
+
+        def mock_run(cmd, **k):
+            attempted.append(cmd)
+            # The exact-version pin fails; the LTS fallback succeeds.
+            if "--version" in cmd and "24.11.1" in cmd:
+                raise RuntimeError("No applicable installer version found")
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(installer, "run", mock_run)
+
+        assert installer.ensure_node_installed(auto_yes=True, node_version="24.11.1") is True
+        captured = capsys.readouterr()
+        # Pinned attempt happened first, then the fallback to the LTS package.
+        assert any("--version" in c and "24.11.1" in c for c in attempted)
+        assert [
+            "winget",
+            "install",
+            "OpenJS.NodeJS.LTS",
+            "--silent",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+        ] in attempted
+        assert "falling back to the package manager's default build" in captured.out
+
+    def test_pinned_failure_no_fallback_when_unversioned(self, monkeypatch, capsys):
+        """Without a target version there's nothing to fall back from; failure stays a failure."""
+        monkeypatch.setattr("shutil.which", lambda cmd: "/bin/brew" if cmd == "brew" else None)
+        monkeypatch.setattr("platform.system", lambda: "Darwin")
+        monkeypatch.setattr(
+            installer, "run", lambda cmd, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
+        assert installer.ensure_node_installed(auto_yes=True) is False
+        assert "falling back" not in capsys.readouterr().out
+
+    def test_linux_uses_distro_default_with_note(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/usr/bin/apt-get" if cmd == "apt-get" else None
+        )
+        monkeypatch.setattr("platform.system", lambda: "Linux")
+        cmds = installer._build_node_install_cmds(auto_yes=True, node_version="24.11.1")
+        assert ["sudo", "apt-get", "install", "-y", "nodejs", "npm"] in cmds
+        assert "closest available to 24.11.1" in capsys.readouterr().out
+
+    def test_outdated_node_user_declines_upgrade(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/bin/cmd" if cmd in ("node", "npm", "brew") else None
+        )
+        monkeypatch.setattr("platform.system", lambda: "Darwin")
+        monkeypatch.setattr(installer, "_get_node_version", lambda: (18, 0, 0))
+        monkeypatch.setattr("builtins.input", lambda prompt: "n")
+
+        runs = []
+        monkeypatch.setattr(
+            installer, "run", lambda cmd, **k: runs.append(cmd) or MagicMock(returncode=0)
+        )
+
+        # Declining the upgrade still leaves Node usable, so the prereq passes.
+        assert installer.ensure_node_installed(auto_yes=False, node_version="24.11.1") is True
+        captured = capsys.readouterr()
+        assert "WARNING Node.js 18.0.0 is outdated" in captured.out
+        assert runs == []  # no upgrade attempted
+
+    def test_node_version_undetectable_stays_quiet(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/bin/cmd" if cmd in ("node", "npm") else None
+        )
+        monkeypatch.setattr(installer, "_get_node_version", lambda: None)
+        assert installer.ensure_node_installed(auto_yes=True, node_version="24.11.1") is True
+        assert "is outdated" not in capsys.readouterr().out
+
+    def test_get_node_version_parses_v_prefix(self, monkeypatch):
+        monkeypatch.setattr("shutil.which", lambda cmd: "/bin/node" if cmd == "node" else None)
+        monkeypatch.setattr(installer, "run", lambda cmd, **k: MagicMock(stdout="v24.11.1\n"))
+        assert installer._get_node_version() == (24, 11, 1)
+
+    def test_get_node_version_refreshes_path_for_nvm_node(self, monkeypatch):
+        """Node reachable only via an un-indexed (NVM) dir: PATH is refreshed before probing."""
+        on_path = {"node": False}
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/nvm/node" if cmd == "node" and on_path["node"] else None
+        )
+        monkeypatch.setattr(installer, "_find_win_npm_executable", lambda name: "C:\\nvm\\node.exe")
+
+        def fake_refresh(*a, **k):
+            on_path["node"] = True  # simulate the NVM dir being added to PATH
+
+        monkeypatch.setattr(installer, "_update_process_path_for_nodejs", fake_refresh)
+
+        probed = []
+
+        def mock_run(cmd, **k):
+            probed.append(cmd)
+            return MagicMock(stdout="v24.11.1\n")
+
+        monkeypatch.setattr(installer, "run", mock_run)
+
+        assert installer._get_node_version() == (24, 11, 1)
+        # The literal "node" is invoked (never the env-derived path), after the refresh.
+        assert probed == [["node", "--version"]]
+
+    def test_get_node_version_none_when_node_absent_after_refresh(self, monkeypatch):
+        """If Node still isn't resolvable after the PATH refresh, return None without probing."""
+        monkeypatch.setattr("shutil.which", lambda cmd: None)
+        monkeypatch.setattr(installer, "_find_win_npm_executable", lambda name: "C:\\nvm\\node.exe")
+        monkeypatch.setattr(installer, "_update_process_path_for_nodejs", lambda *a, **k: None)
+
+        def fail_run(*a, **k):
+            raise AssertionError("run() must not be called when node is unresolvable")
+
+        monkeypatch.setattr(installer, "run", fail_run)
+        assert installer._get_node_version() is None
 
     def test_darwin_brew_install(self, monkeypatch, capsys):
         def mock_which(cmd):

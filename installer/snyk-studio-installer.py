@@ -530,14 +530,35 @@ def _find_win_npm_executable(name: str) -> Optional[str]:
 # =============================================================================
 
 
-def _get_node_install_cmd_darwin(auto_yes: bool) -> Optional[List[str]]:
-    """Return the appropriate Node.js installation command for macOS."""
+def _node_major(node_version: Optional[str]) -> Optional[int]:
+    """Major version from a manifest version string (e.g. '24.11.1' -> 24), or None."""
+    if not node_version:
+        return None
+    try:
+        return int(node_version.split(".")[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _get_node_install_cmds_darwin(
+    auto_yes: bool, node_version: Optional[str] = None
+) -> List[List[str]]:
+    """Return the Node.js install command(s) for macOS, closest to ``node_version``.
+
+    Homebrew only carries major-versioned formulae (``node@N``), so the closest
+    it can offer to e.g. ``24.11.1`` is ``node@24``. Versioned formulae are
+    keg-only and aren't symlinked by default, so we link it onto PATH with
+    ``--force`` (required for keg-only formulae) but deliberately WITHOUT
+    ``--overwrite``, so an existing node/npm managed by another tool or formula
+    is left intact (brew aborts rather than clobbering it; reversible via
+    ``brew unlink``). With no target version, install the latest ``node`` formula.
+    """
     if not shutil.which("brew"):
         print(f"  {C.yellow('WARNING')} Homebrew not found.")
         if not auto_yes:
             reply = input("  Install Homebrew? (y/n) ").strip().lower()
             if reply not in ("y", "yes"):
-                return None
+                return []
         print(f"  {C.cyan('INFO')} Installing Homebrew...")
         try:
             # Set NONINTERACTIVE=1 to skip the "Press RETURN to continue" prompt.
@@ -557,30 +578,73 @@ def _get_node_install_cmd_darwin(auto_yes: bool) -> Optional[List[str]]:
             )
         except Exception as e:
             print(f"  {C.red('ERROR')} Failed to install Homebrew: {e}")
-            return None
+            return []
 
-    return ["brew", "install", "node"]
-
-
-def _get_node_install_cmd_windows(auto_yes: bool) -> Optional[List[str]]:
-    """Return the appropriate Node.js installation command for Windows."""
-    if shutil.which("winget"):
+    major = _node_major(node_version)
+    if major is not None:
+        formula = f"node@{major}"
+        print(
+            f"  {C.cyan('INFO')} Installing Node.js {major}.x via Homebrew '{formula}' "
+            f"(closest available to {node_version})."
+        )
         return [
-            "winget",
-            "install",
-            "OpenJS.NodeJS.LTS",
-            "--silent",
-            "--accept-package-agreements",
-            "--accept-source-agreements",
+            ["brew", "install", formula],
+            ["brew", "link", "--force", formula],
         ]
+    return [["brew", "install", "node"]]
+
+
+def _get_node_install_cmds_windows(
+    auto_yes: bool, node_version: Optional[str] = None
+) -> List[List[str]]:
+    """Return the Node.js install command(s) for Windows, closest to ``node_version``.
+
+    winget and choco both support pinning an exact version, so when a target is
+    given we request it directly (``OpenJS.NodeJS --version <v>`` / ``nodejs
+    --version=<v>``). With no target, install the current LTS.
+    """
+    if node_version:
+        print(f"  {C.cyan('INFO')} Targeting Node.js {node_version}.")
+
+    if shutil.which("winget"):
+        if node_version:
+            return [
+                [
+                    "winget",
+                    "install",
+                    "OpenJS.NodeJS",
+                    "--version",
+                    node_version,
+                    "--silent",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                ]
+            ]
+        return [
+            [
+                "winget",
+                "install",
+                "OpenJS.NodeJS.LTS",
+                "--silent",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+            ]
+        ]
+
+    # choco: pin the exact version against the `nodejs` package, else track LTS.
+    choco_cmd = (
+        ["choco", "install", "nodejs", f"--version={node_version}", "-y"]
+        if node_version
+        else ["choco", "install", "nodejs-lts", "-y"]
+    )
     if shutil.which("choco"):
-        return ["choco", "install", "nodejs-lts", "-y"]
+        return [choco_cmd]
 
     print(f"  {C.yellow('WARNING')} Neither winget nor chocolatey found.")
     if not auto_yes:
         reply = input("  Install Chocolatey? (y/n) ").strip().lower()
         if reply not in ("y", "yes"):
-            return None
+            return []
 
     print(f"  {C.cyan('INFO')} Installing Chocolatey...")
     try:
@@ -596,14 +660,25 @@ def _get_node_install_cmd_windows(auto_yes: bool) -> Optional[List[str]]:
             ],
             check=True,
         )
-        return ["choco", "install", "nodejs-lts", "-y"]
+        return [choco_cmd]
     except Exception as e:
         print(f"  {C.red('ERROR')} Failed to install Chocolatey: {e}")
-        return None
+        return []
 
 
-def _get_node_install_cmds_linux() -> List[List[str]]:
-    """Return the appropriate Node.js installation command for the detected Linux package manager."""
+def _get_node_install_cmds_linux(node_version: Optional[str] = None) -> List[List[str]]:
+    """Return the Node.js install command(s) for the detected Linux package manager.
+
+    Distro repositories install their own pinned Node.js and can't target an
+    arbitrary upstream version, so the distro build is the closest available
+    without adding a third-party repo; the requested version is noted only.
+    """
+    if node_version:
+        note = (
+            f"Note: installing the distro's Node.js build (closest available to "
+            f"{node_version}); the package manager can't target an exact version."
+        )
+        print(f"  {C.dim(note)}")
 
     if shutil.which("apt-get"):
         print(f"  {C.dim('Note: This may prompt for your sudo password.')}")
@@ -674,44 +749,26 @@ def _update_process_path_for_nodejs(base_paths: Optional[List[str]] = None) -> N
         os.environ["PATH"] = path_sep.join(added) + path_sep + current_path
 
 
-def ensure_node_installed(auto_yes: bool) -> bool:
-    """Confirm that Node.js and npm are installed and configured."""
-    if shutil.which("node") and shutil.which("npm"):
-        # On Windows, ensure %APPDATA%\npm (global npm packages like snyk) is also on PATH
-        # even when node/npm themselves are already found via NVM_SYMLINK or similar.
-        if _IS_WINDOWS:
-            _update_process_path_for_nodejs()
-        return True
-    # On Windows with nvm-windows, node/npm may live in paths not yet on PATH
-    if _IS_WINDOWS and _find_win_npm_executable("node") and _find_win_npm_executable("npm"):
-        _update_process_path_for_nodejs()
-        return True
+def _build_node_install_cmds(auto_yes: bool, node_version: Optional[str] = None) -> List[List[str]]:
+    """Return the platform-appropriate Node.js install command(s), or [] if none can be built.
 
-    print(f"  {C.yellow('WARNING')} Node.js and/or npm not found on system PATH.")
-
+    Shared by the missing-Node install path and the outdated-Node upgrade path.
+    ``node_version`` is the target version from the manifest; each platform
+    installs as close to it as its package manager allows: an exact pin on
+    Windows (winget/choco), the major-versioned Homebrew formula on macOS, and
+    the distro build on Linux.
+    """
     sys_os = platform.system().lower()
-    cmds: List[List[str]] = []
 
     if sys_os == "darwin":
-        cmd = _get_node_install_cmd_darwin(auto_yes)
-        if cmd:
-            cmds.append(cmd)
-    elif sys_os == "windows":
-        cmd = _get_node_install_cmd_windows(auto_yes)
-        if cmd:
-            cmds.append(cmd)
-    else:  # Linux
-        cmds = _get_node_install_cmds_linux()
+        return _get_node_install_cmds_darwin(auto_yes, node_version)
+    if sys_os == "windows":
+        return _get_node_install_cmds_windows(auto_yes, node_version)
+    return _get_node_install_cmds_linux(node_version)
 
-    if not cmds:
-        return False
 
-    if not auto_yes:
-        display_cmd = " && ".join([" ".join(c) for c in cmds])
-        reply = input(f"  Install Node.js globally via '{display_cmd}'? (y/n) ").strip().lower()
-        if reply not in ("y", "yes"):
-            return False
-
+def _run_node_install(cmds: List[List[str]]) -> bool:
+    """Run the given Node.js install command(s) and refresh PATH for the current process."""
     print(f"  {C.cyan('INFO')} Installing Node.js...")
     try:
         for cmd in cmds:
@@ -734,6 +791,125 @@ def ensure_node_installed(auto_yes: bool) -> bool:
         return False
 
 
+def _run_node_install_with_fallback(
+    auto_yes: bool, primary: List[List[str]], node_version: Optional[str]
+) -> bool:
+    """Run the version-pinned install; on failure, retry with the unpinned default build.
+
+    The exact-version pin (e.g. winget ``--version 24.11.1``) can fail when that
+    build isn't published. Falling back to the package manager's default — LTS on
+    Windows, latest ``node`` on macOS — keeps the install best-effort rather than
+    hard-failing on an unavailable pin.
+    """
+    if _run_node_install(primary):
+        return True
+    if not node_version:
+        return False
+    fallback = _build_node_install_cmds(auto_yes, None)
+    if not fallback or fallback == primary:
+        return False
+    print(
+        f"  {C.yellow('WARNING')} Pinned Node.js {node_version} install failed; "
+        f"falling back to the package manager's default build."
+    )
+    return _run_node_install(fallback)
+
+
+def _get_node_version() -> Optional[tuple[int, ...]]:
+    """Return the installed Node.js version as a (major, minor, patch) tuple, or None if undetectable."""
+    # Presence guard only: never pass the resolved (env-derived) path into run().
+    # Invoke the literal "node" — mirrors the Snyk version probe below.
+    if not shutil.which("node"):
+        # Node may exist only in a location not yet on PATH (e.g. an NVM dir).
+        # Refresh PATH so the literal "node" below resolves; bail if still absent.
+        if not _find_win_npm_executable("node"):
+            return None
+        _update_process_path_for_nodejs()
+        if not shutil.which("node"):
+            return None
+    try:
+        r = run(
+            ["node", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            shell=_IS_WINDOWS,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+    except Exception:
+        return None
+    match = re.match(r"v?(\d+)\.(\d+)\.(\d+)", (r.stdout or "").strip())
+    if not match:
+        return None
+    return tuple(int(x) for x in match.groups())
+
+
+def _warn_if_node_outdated(auto_yes: bool, node_version: Optional[str]) -> None:
+    """When Node is present but older than the manifest minimum, warn and offer to upgrade.
+
+    Best-effort: if the version can't be parsed/detected we stay quiet rather than
+    block, mirroring how a soft prerequisite should behave.
+    """
+    if not node_version:
+        return
+    try:
+        minimum = tuple(map(int, node_version.split(".")))
+    except ValueError:
+        return
+    current = _get_node_version()
+    if current is None or current >= minimum:
+        return
+
+    cur_str = ".".join(map(str, current))
+    print(f"  {C.yellow('WARNING')} Node.js {cur_str} is outdated (min: {node_version}).")
+
+    cmds = _build_node_install_cmds(auto_yes, node_version)
+    if not cmds:
+        return
+    if not auto_yes:
+        display_cmd = " && ".join(" ".join(c) for c in cmds)
+        reply = input(f"  Upgrade Node.js via '{display_cmd}'? (y/n) ").strip().lower()
+        if reply not in ("y", "yes"):
+            return
+    _run_node_install_with_fallback(auto_yes, cmds, node_version) or sys.exit(1)
+
+
+def ensure_node_installed(auto_yes: bool, node_version: Optional[str] = None) -> bool:
+    """Confirm that Node.js and npm are installed and configured.
+
+    ``node_version`` is the target Node version from the manifest prerequisites.
+    It doubles as the minimum: when Node is present but older, the user is warned
+    and offered an upgrade; when Node is installed (or upgraded), each platform
+    installs as close to this version as its package manager allows.
+    """
+    if shutil.which("node") and shutil.which("npm"):
+        # On Windows, ensure %APPDATA%\npm (global npm packages like snyk) is also on PATH
+        # even when node/npm themselves are already found via NVM_SYMLINK or similar.
+        if _IS_WINDOWS:
+            _update_process_path_for_nodejs()
+        _warn_if_node_outdated(auto_yes, node_version)
+        return True
+    # On Windows with nvm-windows, node/npm may live in paths not yet on PATH
+    if _IS_WINDOWS and _find_win_npm_executable("node") and _find_win_npm_executable("npm"):
+        _update_process_path_for_nodejs()
+        _warn_if_node_outdated(auto_yes, node_version)
+        return True
+
+    print(f"  {C.yellow('WARNING')} Node.js and/or npm not found on system PATH.")
+
+    cmds = _build_node_install_cmds(auto_yes, node_version)
+    if not cmds:
+        return False
+
+    if not auto_yes:
+        display_cmd = " && ".join([" ".join(c) for c in cmds])
+        reply = input(f"  Install Node.js globally via '{display_cmd}'? (y/n) ").strip().lower()
+        if reply not in ("y", "yes"):
+            return False
+
+    return _run_node_install_with_fallback(auto_yes, cmds, node_version)
+
+
 def run_command(cmd: list[str], warn: str) -> int:
     """Run the given command and return the exit code (increments warning count in check_prerequisites)."""
     try:
@@ -745,7 +921,10 @@ def run_command(cmd: list[str], warn: str) -> int:
 
 
 def check_prerequisites(
-    auto_yes: bool, snyk_version: Optional[str] = None, global_mode: bool = False
+    auto_yes: bool,
+    snyk_version: Optional[str] = None,
+    node_version: Optional[str] = None,
+    global_mode: bool = False,
 ) -> None:
     """Check that the required prerequisites are installed and configured. If not, attempt to install them.
 
@@ -774,7 +953,7 @@ def check_prerequisites(
     def get_snyk_path():
         return shutil.which("snyk") or _find_win_npm_executable("snyk")
 
-    if not ensure_node_installed(auto_yes) and get_snyk_path():
+    if not ensure_node_installed(auto_yes, node_version) and get_snyk_path():
         print(f"  {C.red('ERROR')} Node.js is required to install Snyk CLI.")
         warnings += 1
 
@@ -1972,6 +2151,7 @@ def main() -> None:
     check_prerequisites(
         args.yes,
         snyk_version=manifest.prerequisite_version("snyk"),
+        node_version=manifest.prerequisite_version("node"),
         global_mode=args.global_mode,
     )
     print()

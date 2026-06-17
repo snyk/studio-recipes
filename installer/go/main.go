@@ -75,23 +75,23 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  install   Install Snyk Studio recipes (pass installer options after the command)")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Install options:")
-	fmt.Fprintln(w, "  --global  Install pinned dependency versions (uv, snyk) instead of the latest")
+	fmt.Fprintln(w, "  --no-latest-deps  Install versions from the manifest instead of the latest")
 }
 
 // runInstall extracts the embedded bundle and hands off to the Python installer.
 // installArgs are forwarded verbatim to snyk-studio-installer.py.
 func runInstall(installArgs []string) int {
 	ensureUvOnPath()
-	// --global pins binary dependencies (uv here, snyk in the Python installer)
-	// to the versions declared in the manifest's prerequisites, instead of
-	// tracking the latest release. The flag stays in installArgs so it also
-	// reaches the Python installer.
-	globalMode := hasFlag(installArgs, "--global")
+	// --no-latest-deps pins binary dependencies (uv here, snyk in the Python
+	// installer) to the versions declared in the manifest's prerequisites,
+	// instead of tracking the latest release (the default). The flag stays in
+	// installArgs so it also reaches the Python installer.
+	pinDeps := hasFlag(installArgs, "--no-latest-deps")
 	pinnedUv := ""
-	if globalMode {
+	if pinDeps {
 		pinnedUv = pinnedVersion("uv")
 	}
-	if err := ensureUv(installArgs, globalMode, pinnedUv); err != nil {
+	if err := ensureUv(installArgs, pinDeps, pinnedUv); err != nil {
 		fmt.Fprintf(os.Stderr, "  Error: %s\n", err)
 		return 1
 	}
@@ -168,17 +168,17 @@ func ensureUvOnPath() {
 // ensureUv probes for uv and, if missing, offers to install it via the official
 // script (mirrors install.sh / install.ps1 / install.py).
 //
-// In globalMode with a non-empty pinnedUv, an already-installed uv that is older
-// than the pin is upgraded to it; an equal-or-newer uv (or any uv outside global
-// mode) is accepted as-is. The version installed is the pin in global mode and
+// When pinDeps is set with a non-empty pinnedUv, an already-installed uv that is
+// older than the pin is upgraded to it; an equal-or-newer uv (or any uv when not
+// pinning) is accepted as-is. The version installed is the pin when pinning and
 // the latest release otherwise.
-func ensureUv(argv []string, globalMode bool, pinnedUv string) error {
+func ensureUv(argv []string, pinDeps bool, pinnedUv string) error {
 	autoYes := hasFlag(argv, "-y", "--yes")
 
 	if _, err := exec.LookPath("uv"); err == nil {
 		cur, haveVer := uvInstalledVersion()
-		// Outside global pinning, any installed uv is acceptable.
-		if !globalMode || pinnedUv == "" {
+		// When not pinning, any installed uv is acceptable.
+		if !pinDeps || pinnedUv == "" {
 			fmt.Printf("  OK uv %s\n", uvVersionLine())
 			return nil
 		}
@@ -204,9 +204,9 @@ func ensureUv(argv []string, globalMode bool, pinnedUv string) error {
 		fmt.Fprintln(os.Stderr, "  WARNING uv not found")
 	}
 
-	// In global mode install the manifest pin; otherwise track the latest.
+	// When pinning install the manifest pin; otherwise track the latest.
 	installVersion := ""
-	if globalMode {
+	if pinDeps {
 		installVersion = pinnedUv
 	}
 

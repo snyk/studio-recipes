@@ -135,7 +135,7 @@ class TestCheckPrerequisites:
         assert "WARNING Snyk CLI 1.1301.0 is outdated" in captured.out
 
     def test_global_pins_snyk_on_upgrade(self, monkeypatch, capsys):
-        """In --global mode an outdated Snyk upgrades to the pinned version, not latest."""
+        """In --no-latest-deps mode an outdated Snyk upgrades to the pinned version, not latest."""
         monkeypatch.setattr(
             "shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None
         )
@@ -153,13 +153,13 @@ class TestCheckPrerequisites:
 
         monkeypatch.setattr(installer, "run", mock_run)
 
-        installer.check_prerequisites(auto_yes=True, snyk_version="1.1304.0", global_mode=True)
+        installer.check_prerequisites(auto_yes=True, snyk_version="1.1304.0", no_latest_deps=True)
 
         assert ["sudo", "npm", "install", "-g", "snyk@1.1304.0"] in cmds_run
         assert ["sudo", "npm", "install", "-g", "snyk@latest"] not in cmds_run
 
     def test_global_pins_snyk_when_missing(self, monkeypatch, capsys):
-        """In --global mode a missing Snyk installs exactly the pinned version."""
+        """In --no-latest-deps mode a missing Snyk installs exactly the pinned version."""
         monkeypatch.setattr("shutil.which", lambda cmd: None)
         monkeypatch.setattr("sys.platform", "linux")
 
@@ -172,12 +172,12 @@ class TestCheckPrerequisites:
         monkeypatch.setattr(installer, "run", mock_run)
         monkeypatch.setattr("builtins.input", lambda _: "y")
 
-        installer.check_prerequisites(auto_yes=True, snyk_version="1.1304.0", global_mode=True)
+        installer.check_prerequisites(auto_yes=True, snyk_version="1.1304.0", no_latest_deps=True)
 
         assert ["sudo", "npm", "install", "-g", "snyk@1.1304.0"] in cmds_run
 
     def test_global_skips_snyk_when_newer_than_pin(self, monkeypatch, capsys):
-        """In --global mode an installed Snyk newer than the pin is left untouched."""
+        """In --no-latest-deps mode an installed Snyk newer than the pin is left untouched."""
         monkeypatch.setattr(
             "shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None
         )
@@ -195,7 +195,7 @@ class TestCheckPrerequisites:
 
         monkeypatch.setattr(installer, "run", mock_run)
 
-        installer.check_prerequisites(auto_yes=True, snyk_version="1.1304.0", global_mode=True)
+        installer.check_prerequisites(auto_yes=True, snyk_version="1.1304.0", no_latest_deps=True)
 
         assert not any(c[:3] == ["sudo", "npm", "install"] for c in cmds_run)
         captured = capsys.readouterr()
@@ -252,7 +252,8 @@ class TestParseArgs:
         assert args.verify is False
         assert args.list_mode is False
         assert args.yes is False
-        assert args.global_mode is False
+        assert args.no_latest_deps is False
+        assert args.control_identifier is None
 
     def test_all_flags(self):
         args = installer.parse_args(
@@ -265,7 +266,9 @@ class TestParseArgs:
                 "--verify",
                 "--list",
                 "-y",
-                "--global",
+                "--no-latest-deps",
+                "--control-identifier",
+                "machine-123",
             ]
         )
         assert args.profile == "minimal"
@@ -274,7 +277,12 @@ class TestParseArgs:
         assert args.verify is True
         assert args.list_mode is True
         assert args.yes is True
-        assert args.global_mode is True
+        assert args.no_latest_deps is True
+        assert args.control_identifier == "machine-123"
+
+    def test_no_latest_deps_explicit(self):
+        args = installer.parse_args(["--no-latest-deps"])
+        assert args.no_latest_deps is True
 
     def test_invalid_ade_rejected(self):
         with pytest.raises(SystemExit):
@@ -303,6 +311,60 @@ class TestParseArgs:
     def test_copilot_vscode_ade_accepted(self):
         args = installer.parse_args(["--ade", "copilot-vscode"])
         assert args.ade == "copilot-vscode"
+
+
+# ===========================================================================
+# TestControlIdentifier
+# ===========================================================================
+
+
+class TestControlIdentifier:
+    def test_device_id_path_under_home(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(installer.Path, "home", classmethod(lambda cls: tmp_path))
+        assert installer.device_id_path() == tmp_path / ".snyk-studio" / "device-id"
+
+    def test_write_creates_file_with_identifier(self, monkeypatch, tmp_path):
+        target = tmp_path / ".snyk-studio" / "device-id"
+        monkeypatch.setattr(installer, "device_id_path", lambda: target)
+
+        installer.write_control_identifier("machine-123", dry_run=False)
+
+        # Recipes read with .strip(), so a trailing newline is fine; the
+        # identifier itself must round-trip exactly.
+        assert target.read_text(encoding="utf-8").strip() == "machine-123"
+
+    def test_write_overwrites_existing_file(self, monkeypatch, tmp_path):
+        target = tmp_path / ".snyk-studio" / "device-id"
+        target.parent.mkdir(parents=True)
+        target.write_text("old-id\n", encoding="utf-8")
+        monkeypatch.setattr(installer, "device_id_path", lambda: target)
+
+        installer.write_control_identifier("new-id", dry_run=False)
+
+        assert target.read_text(encoding="utf-8").strip() == "new-id"
+
+    def test_write_dry_run_does_not_create_file(self, monkeypatch, tmp_path):
+        target = tmp_path / ".snyk-studio" / "device-id"
+        monkeypatch.setattr(installer, "device_id_path", lambda: target)
+
+        installer.write_control_identifier("machine-123", dry_run=True)
+
+        assert not target.exists()
+
+    def test_write_failure_warns_but_does_not_raise(self, monkeypatch, tmp_path, capsys):
+        target = tmp_path / ".snyk-studio" / "device-id"
+        monkeypatch.setattr(installer, "device_id_path", lambda: target)
+
+        def boom(*_args, **_kwargs):
+            raise OSError("permission denied")
+
+        monkeypatch.setattr(installer.Path, "write_text", boom)
+
+        installer.write_control_identifier("machine-123", dry_run=False)
+
+        err = capsys.readouterr().err
+        assert "WARNING" in err
+        assert "permission denied" in err
 
 
 # ===========================================================================

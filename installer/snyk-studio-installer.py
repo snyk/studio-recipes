@@ -19,8 +19,9 @@ Options:
     --uninstall                                Remove Snyk recipes from detected ADEs
     --verify                                   Verify installed files and merged configs match manifest
     --list                                     List available recipes and profiles
-    --global                                   Install pinned dependency versions (uv, snyk)
-                                               from the manifest instead of the latest
+    --no-latest-deps                           Install pinned manifest dependency versions,
+                                               upgrading only if missing or older than the pin
+    --control-identifier <id>                  Machine/control identifier to record
     -y, --yes                                  Skip confirmation prompts
     -h, --help                                 Show this help message
 """
@@ -158,12 +159,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompts")
     parser.add_argument(
-        "--global",
+        "--no-latest-deps",
         action="store_true",
-        dest="global_mode",
         help=(
-            "Install pinned dependency versions (from manifest prerequisites) "
-            "instead of the latest available."
+            "Install the dependency versions from the manifest prerequisites, "
+            "upgrading only dependencies that are missing or older."
         ),
     )
     parser.add_argument(
@@ -175,6 +175,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
             "for a git repository; if none is found, workspace-scoped recipes are "
             "skipped."
         ),
+    )
+    parser.add_argument(
+        "--control-identifier",
+        default=None,
+        dest="control_identifier",
+        help=("Machine/control identifier to record."),
     )
     return parser.parse_args(argv)
 
@@ -924,15 +930,14 @@ def check_prerequisites(
     auto_yes: bool,
     snyk_version: Optional[str] = None,
     node_version: Optional[str] = None,
-    global_mode: bool = False,
+    no_latest_deps: bool = False,
 ) -> None:
     """Check that the required prerequisites are installed and configured. If not, attempt to install them.
 
     ``snyk_version`` is the pinned Snyk CLI version from the manifest
     prerequisites; it doubles as the minimum-acceptable version. In
-    ``global_mode`` the installer pins to exactly that version (``snyk@<ver>``)
-    rather than tracking the latest release, and only (re)installs when Snyk is
-    missing or older than the pin.
+    ``no_latest_deps`` the installer does not upgrade to the latest dependency version when the dependency is
+    missing or older.
     """
 
     warnings = 0
@@ -942,8 +947,8 @@ def check_prerequisites(
         return ["sudo"] + cmd if not _IS_WINDOWS else cmd
 
     def snyk_pkg(latest_label: str) -> str:
-        """Package spec to install: the pin in global mode, else the latest label."""
-        if global_mode and snyk_version:
+        """Package spec to install: the manifest version if not installing latest, else the latest label."""
+        if no_latest_deps and snyk_version:
             return f"snyk@{snyk_version}"
         return latest_label
 
@@ -979,7 +984,7 @@ def check_prerequisites(
             # pin/minimum; an equal-or-newer build is left untouched in both
             # global and default mode.
             if minimum_snyk_version is not None and current_version < minimum_snyk_version:
-                target = "pinned" if global_mode else "latest"
+                target = "pinned" if no_latest_deps else "latest"
                 print(
                     f"  {C.yellow('WARNING')} Snyk CLI {ver_str} is outdated "
                     f"(min: {snyk_version}). Upgrade to {target}?"
@@ -995,7 +1000,7 @@ def check_prerequisites(
             else:
                 print(f"  {C.green('OK')} Snyk CLI {ver_str}")
     else:
-        target = "pinned" if global_mode and snyk_version else "latest"
+        target = "pinned" if no_latest_deps and snyk_version else "latest"
         print(f"  {C.yellow('WARNING')} Snyk CLI not found, install {target} version?")
         if not auto_yes:
             reply = input("  (y/n) ").strip().lower()
@@ -2118,6 +2123,40 @@ def print_summary(ades: List[str], recipes: List[str], dry_run: bool) -> None:
 
 
 # =============================================================================
+# CONTROL IDENTIFIER (device-id)
+# =============================================================================
+
+
+def device_id_path() -> Path:
+    """Path of the snyk-studio device-id file."""
+    return Path.home() / ".snyk-studio" / "device-id"
+
+
+def write_control_identifier(identifier: str, dry_run: bool) -> None:
+    """Record the control identifier in the device-id file the recipes read."""
+    path = device_id_path()
+    print(f"  {C.bold('Control identifier')}")
+    if dry_run:
+        print(f"    [DRY RUN] would write device-id to {path}")
+        print()
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Plain UTF-8 (no BOM); recipes read with utf-8-sig + .strip(), so a
+        # trailing newline is harmless and keeps the file editor-friendly.
+        path.write_text(identifier + "\n", encoding="utf-8")
+        print(f"    {C.green('OK')} wrote device-id to {path}")
+    except OSError as exc:
+        # A device-id write failure only degrades telemetry (recipes tolerate
+        # its absence), so warn but don't abort the recipe install.
+        print(
+            f"    {C.yellow('WARNING')} could not write device-id to {path}: {exc}",
+            file=sys.stderr,
+        )
+    print()
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 
@@ -2146,13 +2185,20 @@ def main() -> None:
 
     print_banner()
 
+    # Record the control identifier (the ADS installer passes
+    # --control-identifier) before anything that can fail, so the device-id is
+    # provisioned even if a later step (prerequisites, ADE selection) does not
+    # complete.
+    if args.control_identifier:
+        write_control_identifier(args.control_identifier, args.dry_run)
+
     # Prerequisites
     print(f"  {C.bold('Prerequisites')}")
     check_prerequisites(
         args.yes,
         snyk_version=manifest.prerequisite_version("snyk"),
         node_version=manifest.prerequisite_version("node"),
-        global_mode=args.global_mode,
+        no_latest_deps=args.no_latest_deps,
     )
     print()
 

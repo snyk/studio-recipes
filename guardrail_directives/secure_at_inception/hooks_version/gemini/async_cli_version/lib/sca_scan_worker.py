@@ -29,9 +29,10 @@ CACHE_DIR = ""
 LIB_DIR = str(Path(__file__).parent.resolve())
 PID_FILE = ""
 DONE_FILE = ""
-LOG_FILE = ""
+LOG_FILE: Optional[str] = None
 
-SNYK_STUDIO_VERSION = "1.0.0"
+from platform_utils import STUDIO_VERSION as SNYK_STUDIO_VERSION  # noqa: E402
+from platform_utils import log as _platform_log  # noqa: E402
 
 _IS_WINDOWS = sys.platform == "win32"
 # Console apps (snyk / the cmd.exe shim) spawned from this windowless background
@@ -42,15 +43,19 @@ _CREATE_NO_WINDOW = 0
 if sys.platform == "win32":
     _CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW
 
+_IS_WINDOWS = sys.platform == "win32"
+# Console apps (snyk / the cmd.exe shim) spawned from this windowless background
+# worker allocate a new console window on Windows; CREATE_NO_WINDOW suppresses the
+# flash. The flag only exists on Windows; elsewhere this is 0 (subprocess's
+# default creationflags, i.e. a no-op).
+_CREATE_NO_WINDOW = 0
+if sys.platform == "win32":
+    _CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW
 
-def log(msg: str) -> None:
+def log(msg: str, debug: bool = False) -> None:
     if not LOG_FILE:
         return
-    try:
-        with open(LOG_FILE, "a") as f:
-            f.write(f"[{datetime.now().isoformat()}] {msg}\n")
-    except Exception:
-        pass
+    _platform_log(f"[worker] {msg}", LOG_FILE, debug=debug)
 
 
 def finish(
@@ -148,7 +153,7 @@ def main() -> None:
 
     PID_FILE = os.path.join(CACHE_DIR, "sca_scan.pid")
     DONE_FILE = os.path.join(CACHE_DIR, "sca_scan.done")
-    LOG_FILE = os.path.realpath(os.path.join(CACHE_DIR, "sca_scan.log"))
+    LOG_FILE = os.environ.get("SAI_LOG_FILE", None)
 
     sys.path.insert(0, LIB_DIR)
 
@@ -192,15 +197,7 @@ def main() -> None:
     env["SNYK_INTEGRATION_ENVIRONMENT"] = "gemini_cli"
     env["SNYK_INTEGRATION_ENVIRONMENT_VERSION"] = SNYK_STUDIO_VERSION
     try:
-        _device_id = (
-            os.path.join(
-                os.environ.get("ProgramData", "C:\\ProgramData"), "snyk-studio", "device-id"
-            )
-            if sys.platform == "win32"  # Windows
-            else "/Library/Application Support/snyk-studio/device-id"
-            if sys.platform == "darwin"  # macOS
-            else "/var/lib/snyk-studio/device-id"  # Linux
-        )
+        _device_id = os.path.join(os.path.expanduser("~"), ".snyk-studio", "device-id")
         _machine_id = open(_device_id, encoding="utf-8-sig").read().strip()
         if _machine_id:
             env["SNYK_CLIENT_MACHINE_ID"] = _machine_id

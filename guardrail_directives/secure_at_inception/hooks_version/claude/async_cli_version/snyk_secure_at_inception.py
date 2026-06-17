@@ -38,7 +38,14 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 LIB_DIR = SCRIPT_DIR / "lib"
 sys.path.insert(0, str(LIB_DIR))
 
-from platform_utils import file_lock, normalize_path  # noqa: E402 — imports follow sys.path setup
+from platform_utils import (  # noqa: E402 — imports follow sys.path setup
+    STUDIO_VERSION,
+    file_lock,
+    normalize_path,
+    resolve_log_file,
+    scan_duration_secs,
+)
+from platform_utils import log as _shared_log  # noqa: E402 — imports follow sys.path setup
 from scan_runner import (  # noqa: E402 — imports follow sys.path setup
     check_snyk_auth,
     check_snyk_cli,
@@ -62,6 +69,11 @@ from scan_runner import (  # noqa: E402 — imports follow sys.path setup
 # =============================================================================
 
 DEBUG = os.environ.get("CLAUDE_HOOK_DEBUG", "0") == "1"
+
+# Resolved per-invocation in main() once the workspace is known (the hook is a
+# short-lived process and the workspace comes from parsed stdin). Until then it
+# is None and log_to_panel/debug_log degrade to stderr-only.
+_LOG_FILE: Optional[str] = None
 
 CODE_EXTENSIONS = {
     ".js",
@@ -143,6 +155,26 @@ MAX_STOP_CYCLES = 3
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 
+def _severity_counts(vulns: List[Dict[str, Any]]) -> str:
+    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    for vuln in vulns:
+        sev = vuln.get("severity", "").lower()
+        if sev in counts:
+            counts[sev] += 1
+    return f"critical:{counts['critical']} high:{counts['high']} medium:{counts['medium']} low:{counts['low']}"
+
+
+def _top_vuln_ids(vulns: List[Dict[str, Any]], max_result_count: int = 3) -> str:
+    results: List[str] = []
+    for vuln in vulns:
+        if len(results) >= max_result_count:
+            break
+        vuln_id = vuln.get("id", "")
+        if vuln_id:
+            results.append(f"{vuln_id}({vuln.get('severity', 'unknown')})")
+    return ", ".join(results)
+
+
 # =============================================================================
 # UTILITY FUNCTIONS
 # =============================================================================
@@ -151,10 +183,13 @@ _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 def debug_log(message: str) -> None:
     if DEBUG:
         print(f"[DEBUG] {message}", file=sys.stderr)
+    _shared_log(message, _LOG_FILE, debug=True)
 
 
 def log_to_panel(message: str) -> None:
     print(message, file=sys.stderr)
+    if _LOG_FILE:
+        _shared_log(message, _LOG_FILE, debug=False)
 
 
 def output_response(response: Dict[str, Any]) -> None:
@@ -163,6 +198,10 @@ def output_response(response: Dict[str, Any]) -> None:
 
 def get_state_file_path(workspace: str) -> str:
     return os.path.join(get_cache_dir(workspace), "state.json")
+
+
+def get_invocation_marker_path(workspace: str) -> str:
+    return os.path.join(get_cache_dir(workspace), "hook.invoked")
 
 
 def get_workspace(data: Dict[str, Any]) -> str:
@@ -438,6 +477,8 @@ def handle_session_start(data: Dict[str, Any], workspace: str) -> None:
 
     # 4. All checks passed -- clear stale state on fresh sessions
     log_to_panel("[SAI] Snyk authenticated, CLI found")
+    if _LOG_FILE:
+        _shared_log(f"SessionStart: studio v{STUDIO_VERSION}", _LOG_FILE)
     if source in ("startup", "clear"):
         clear_state(workspace)
 
@@ -475,6 +516,15 @@ def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
         return
 
     if is_code_file(file_path):
+        # Write a persistent marker that survives clear_state() so tests and
+        # diagnostics can confirm the hook fired regardless of later cleanup.
+        try:
+            ensure_cache_dirs(workspace)
+            with open(get_invocation_marker_path(workspace), "a") as _mf:
+                _mf.write(datetime.now().isoformat() + "\n")
+        except OSError:
+            pass
+
         with _state_lock(workspace):
             state = read_state(workspace)
 
@@ -670,6 +720,7 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
                 )
 
     # --- Detect manifest changes and conditionally clear stale SCA state ---
+    sca_duration: Optional[float] = None
     baseline_keys = None
     if code_files:
         changed_manifests = detect_manifest_changes(
@@ -689,6 +740,7 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
         sca_status = wait_for_sca_scan(workspace, log_fn=log_to_panel)
         if sca_status == "success":
             sca_info = get_sca_completion_info(workspace)
+            sca_duration = scan_duration_secs(sca_info) if sca_info else None
             sca_vulns = sca_info.get("vulnerabilities", []) if sca_info else []
             log_to_panel(f"[SAI] SCA: {len(sca_vulns)} dependency vuln(s)")
             if not changed_manifests:
@@ -744,7 +796,16 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
 
     # --- Update state and decide ---
     if not new_vulns and not new_sca_vulns and not sca_fallback:
-        log_to_panel("[SAI] No new security issues found.")
+        _allow_duration_parts = []
+        _sast_dur = scan_duration_secs(scan_info)
+        if _sast_dur is not None:
+            _allow_duration_parts.append(f"SAST {_sast_dur:.1f}s")
+        if sca_duration is not None:
+            _allow_duration_parts.append(f"SCA {sca_duration:.1f}s")
+        _allow_log = "Stop: ALLOW"
+        if _allow_duration_parts:
+            _allow_log += " — scans: " + " ".join(_allow_duration_parts)
+        log_to_panel(_allow_log)
         clear_state(workspace)
         output_response({})
         return
@@ -791,7 +852,31 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
 
     reason_parts.append("\nAfter fixing, the security scan will run again automatically.")
 
-    log_to_panel(f"[SAI] Blocking: {len(new_vulns)} SAST + {len(new_sca_vulns)} SCA vuln(s)")
+    _threshold = os.environ.get("SAI_MIN_BLOCK_SEVERITY", "medium")
+    _sast_dur = scan_duration_secs(scan_info)
+    _block_parts: List[str] = []
+    if new_vulns:
+        _n = len(new_vulns)
+        _block_parts.append(
+            f"SAST {_n} {'vuln' if _n == 1 else 'vulns'} ({_severity_counts(new_vulns)})"
+        )
+    if new_sca_vulns:
+        _n = len(new_sca_vulns)
+        _block_parts.append(
+            f"SCA {_n} {'vuln' if _n == 1 else 'vulns'} ({_severity_counts(new_sca_vulns)})"
+        )
+    _block_parts.append(f"threshold: {_threshold}")
+    _dur_parts: List[str] = []
+    if _sast_dur is not None:
+        _dur_parts.append(f"SAST {_sast_dur:.1f}s")
+    if sca_duration is not None:
+        _dur_parts.append(f"SCA {sca_duration:.1f}s")
+    if _dur_parts:
+        _block_parts.append("scans: " + " ".join(_dur_parts))
+    _top_ids = _top_vuln_ids(list(new_vulns) + list(new_sca_vulns))
+    if _top_ids:
+        _block_parts.append(f"top vulns: {_top_ids}")
+    log_to_panel("Stop: BLOCK — " + " | ".join(_block_parts))
     output_response({"decision": "block", "reason": "\n".join(reason_parts)})
 
 
@@ -812,6 +897,12 @@ def main() -> None:
 
     hook_event = data.get("hook_event_name", "")
     workspace = get_workspace(data)
+
+    # Resolve the persistent log path once, now that the workspace is known.
+    # log_to_panel/debug_log read this global; calls before this point (e.g.
+    # stdin-parse errors above) degrade to stderr-only.
+    global _LOG_FILE
+    _LOG_FILE = resolve_log_file(workspace)
 
     debug_log(f"Event: {hook_event}, Workspace: {workspace}")
 

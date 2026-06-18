@@ -25,15 +25,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import platform_utils
+from platform_utils import STUDIO_VERSION as SNYK_STUDIO_VERSION  # noqa: E402
+from platform_utils import log as _platform_log  # noqa: E402
 
 WORKSPACE = ""
 CACHE_DIR = ""
 LIB_DIR = str(Path(__file__).parent.resolve())
 PID_FILE = ""
 DONE_FILE = ""
-LOG_FILE = ""
-
-SNYK_STUDIO_VERSION = "1.0.0"
+LOG_FILE: Optional[str] = None
 
 _IS_WINDOWS = sys.platform == "win32"
 # Console apps (snyk / the cmd.exe shim) spawned from this windowless background
@@ -45,14 +45,10 @@ if sys.platform == "win32":
     _CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW
 
 
-def log(msg: str) -> None:
+def log(msg: str, debug: bool = False) -> None:
     if not LOG_FILE:
         return
-    try:
-        with open(LOG_FILE, "a") as f:
-            f.write(f"[{datetime.now().isoformat()}] {msg}\n")
-    except Exception:
-        pass
+    _platform_log(f"[worker] {msg}", LOG_FILE, debug=debug)
 
 
 def finish(
@@ -150,7 +146,7 @@ def main() -> None:
 
     PID_FILE = os.path.join(CACHE_DIR, "sca_scan.pid")
     DONE_FILE = os.path.join(CACHE_DIR, "sca_scan.done")
-    LOG_FILE = os.path.realpath(os.path.join(CACHE_DIR, "sca_scan.log"))
+    LOG_FILE = os.environ.get("SAI_LOG_FILE", None)
 
     sys.path.insert(0, LIB_DIR)
 

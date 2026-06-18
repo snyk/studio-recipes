@@ -2,8 +2,105 @@ version: 2.1
 
 orbs:
   prodsec: snyk/prodsec-orb@1
+  gh: circleci/github-cli@2.7.2
+
+executors:
+  installer_macos:
+    macos:
+      xcode: 26.0.0
+    resource_class: m4pro.medium
+
+  installer_windows:
+    machine:
+      image: "windows-server-2022-gui:2024.01.1"
+    resource_class: windows.medium
+    shell: powershell
+
+  installer_linux:
+    docker:
+      - image: cimg/go:1.21
+    resource_class: medium
+
+parameters:
+  create_release:
+    description: When true, run the build/sign/release workflow.
+    type: boolean
+    default: false
+  release-version:
+    description: Version for the GitHub release/tag, of the form N.N.N (e.g. 1.0.2). Required when create_release is true.
+    type: string
+    default: ""
+
+workflows:
+  # Existing CI on every push (skipped when manually triggering a release):
+  # scans + build, but no signing or releasing.
+  CICD:
+    when:
+      not: << pipeline.parameters.create_release >>
+    jobs:
+      - prodsec/secrets-scan:
+          name: Scan repository for secrets
+          context:
+            - snyk-bot-slack
+          channel: snyk-on-snyk-productinfra_agentic-dev
+          filters:
+            branches:
+              ignore:
+                - main  
+
+      - security-scans:
+          name: Security Scans
+          context: productinfra-agentic-dev-sos
+
+      - installer-build:
+          name: Build Installer Binaries
+
+
+  release-installer:
+    when: << pipeline.parameters.create_release >>
+    jobs:
+      - validate-release:
+          name: Validate Release
+
+      - security-scans:
+          name: Security Scans
+          context: productinfra-agentic-dev-sos
+
+      - installer-build:
+          name: Build Installer Binaries
+          requires:
+            - Validate Release
+            - Security Scans
+
+      - sign-installer-macos:
+          name: Sign Installer (macOS)
+          context:
+            - mcp-scan-release
+          requires:
+            - Build Installer Binaries
+
+      - sign-installer-windows:
+          name: Sign Installer (Windows)
+          context:
+            - agent-scan-windows-signing
+          requires:
+            - Build Installer Binaries
+
+      - installer-generate-artifacts:
+          name: Generate Installer Artifacts
+          requires:
+            - Sign Installer (macOS)
+            - Sign Installer (Windows)
+
+      - installer-create-github-release:
+          name: Create GitHub Release
+          context:
+            - github-release
+          requires:
+            - Generate Installer Artifacts
 
 jobs:
+  # Existing security scanning (runs on every branch).
   security-scans:
     resource_class: small
     docker:
@@ -15,19 +112,195 @@ jobs:
           open-source-additional-arguments: --exclude=testdata
           iac-scan: disabled
 
-workflows:
-  version: 2
-  CICD:
-    jobs:
-      - prodsec/secrets-scan:
-          name: Scan repository for secrets
-          context:
-            - snyk-bot-slack
-          channel: snyk-on-snyk-productinfra_agentic-dev
-          filters:
-            branches:
-              ignore:
-                - main  
-          
-      - security-scans:
-          context: productinfra-agentic-dev-sos
+  # --------------------------------------------------------------------------
+  # INSTALLER RELEASE JOBS
+  # --------------------------------------------------------------------------
+
+  # Fail-fast gate: refuse to release unless release-version is N.N.N.
+  # The rest of the release jobs require this.
+  validate-release:
+    executor: installer_linux
+    steps:
+      - determine_version
+
+  # Cross-compiles all six Go installer binaries in one shot via
+  # build_installer.py (which stages the recipe bundle into go/bundle/ for
+  # //go:embed, then `go build`s each GOOS/GOARCH target). Outputs land in
+  # installer/dist/ and are persisted to the workspace. Used by both workflows.
+  installer-build:
+    executor: installer_linux
+    steps:
+      - checkout
+      - run:
+          name: Build Go installer binaries (all platforms)
+          command: |
+            python3 --version
+            go version
+            python3 installer/build_installer.py --only go
+            ls -lh installer/dist/
+      - persist_to_workspace:
+          root: installer/dist
+          paths:
+            - snyk-studio-linux-x86_64
+            - snyk-studio-linux-arm64
+            - snyk-studio-macos-x86_64
+            - snyk-studio-macos-arm64
+            - snyk-studio-windows-x86_64.exe
+            - snyk-studio-windows-arm64.exe
+
+  # Signs + notarizes both macOS binaries in place on a real macOS host.
+  sign-installer-macos:
+    executor: installer_macos
+    steps:
+      - checkout
+      - attach_workspace:
+          at: dist
+      - run:
+          name: Sign macOS binaries
+          command: |
+            ./scripts/sign_macos.sh dist snyk-studio-macos-arm64
+            ./scripts/sign_macos.sh dist snyk-studio-macos-x86_64
+            ls -lh dist/
+      - persist_to_workspace:
+          root: dist
+          paths:
+            - snyk-studio-macos-arm64
+            - snyk-studio-macos-arm64.signingmeta
+            - snyk-studio-macos-x86_64
+            - snyk-studio-macos-x86_64.signingmeta
+
+  # Signs both Windows binaries in place on a real Windows host.
+  sign-installer-windows:
+    executor: installer_windows
+    steps:
+      - checkout
+      - attach_workspace:
+          at: dist
+      - install_deps_windows_signing
+      - run:
+          name: Sign Windows binaries
+          shell: bash.exe
+          command: |
+            powershell -File ./scripts/sign_windows.ps1 -EXPORT_PATH dist -PRODUCT_NAME snyk-studio-windows-x86_64.exe
+            powershell -File ./scripts/sign_windows.ps1 -EXPORT_PATH dist -PRODUCT_NAME snyk-studio-windows-arm64.exe
+      - persist_to_workspace:
+          root: dist
+          paths:
+            - snyk-studio-windows-x86_64.exe
+            - snyk-studio-windows-x86_64.exe.signingmeta
+            - snyk-studio-windows-arm64.exe
+            - snyk-studio-windows-arm64.exe.signingmeta
+
+  # Renames binaries to include the version.
+  installer-generate-artifacts:
+    executor: installer_linux
+    steps:
+      - checkout
+      - attach_workspace:
+          at: dist
+      - determine_version
+      - run:
+          name: Rename binaries to include version
+          command: |
+            cd dist
+            for f in snyk-studio-linux-* snyk-studio-macos-* snyk-studio-windows-*; do
+              # only operate on the binaries, never their .signingmeta sidecars
+              case "$f" in
+                *.signingmeta) continue ;;
+              esac
+              [ -f "$f" ] || continue
+              suffix="${f#snyk-studio-}"
+              mv "$f" "snyk-studio-${VERSION}-${suffix}"
+            done
+            ls -lh
+      - persist_to_workspace:
+          root: dist
+          paths:
+            - "*"
+      - store_artifacts:
+          path: dist
+
+  # Creates (or updates) the GitHub release and uploads all assets.
+  installer-create-github-release:
+    executor: installer_linux
+    steps:
+      - checkout
+      - gh/install
+      - attach_workspace:
+          at: dist
+      - determine_version
+      - run:
+          name: Create GitHub release and upload assets
+          command: |
+            # Create the release if the tag does not already have one.
+            if ! gh release view "$GITHUB_TAG" >/dev/null 2>&1; then
+              gh release create "$GITHUB_TAG" \
+                --title "$GITHUB_TAG" \
+                --notes "Automated release $GITHUB_TAG" \
+                --target "$CIRCLE_SHA1"
+            fi
+            gh release upload "$GITHUB_TAG" \
+              dist/snyk-studio-${VERSION}-linux-x86_64 \
+              dist/snyk-studio-${VERSION}-linux-arm64 \
+              dist/snyk-studio-${VERSION}-macos-arm64 \
+              dist/snyk-studio-${VERSION}-macos-x86_64 \
+              dist/snyk-studio-${VERSION}-windows-x86_64.exe \
+              dist/snyk-studio-${VERSION}-windows-arm64.exe \
+              --clobber
+
+commands:
+  determine_version:
+    description: >
+      Validate the release-version pipeline parameter (must be N.N.N) and export
+      VERSION and GITHUB_TAG (vN.N.N) into $BASH_ENV. Fails the job otherwise.
+    steps:
+      - run:
+          name: Determine version
+          command: |
+            RAW="<< pipeline.parameters.release-version >>"
+            if ! printf '%s' "$RAW" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "ERROR: release-version must be of the form N.N.N (got: '${RAW:-<empty>}')." >&2
+              exit 1
+            fi
+            VERSION="$RAW"
+            GITHUB_TAG="v${VERSION}"
+            echo "export VERSION=$VERSION" >> "$BASH_ENV"
+            echo "export GITHUB_TAG=$GITHUB_TAG" >> "$BASH_ENV"
+            echo "Resolved version: $VERSION (tag: $GITHUB_TAG)"
+
+  install_deps_windows_signing:
+    description: Install DigiCert KeyLocker Tools on Windows
+    steps:
+      - run:
+          name: Generate Cache Key
+          shell: bash.exe
+          command: |
+            date +%U%Y >> ~/cache_key.txt
+            cat ~/cache_key.txt
+      - restore_cache:
+          name: Restoring DigiCert cache
+          keys:
+            - digicert-cache-v3-{{ arch }}-{{ checksum "~/cache_key.txt" }}
+      - run:
+          name: Install DigiCert KeyLocker Tools
+          shell: powershell
+          command: |
+            Set-Location C:\
+            $filePath = Join-Path $env:USERPROFILE 'smtools-windows-x64.msi'
+            if (Test-Path $filePath) {
+                Write-Host "File exists. Moving to C:"
+                Copy-Item $filePath -Destination .\
+            }
+            else {
+                Write-Host "No existing file found. Downloading..."
+                curl.exe -X GET https://one.digicert.com/signingmanager/api-ui/v1/releases/smtools-windows-x64.msi/download -H "x-api-key:$env:SM_API_KEY" -o smtools-windows-x64.msi
+                Copy-Item 'smtools-windows-x64.msi' -Destination $env:USERPROFILE
+            }
+            msiexec.exe /i smtools-windows-x64.msi /quiet /qn | Wait-Process
+            & 'C:\Program Files\DigiCert\DigiCert One Signing Manager Tools\smksp_cert_sync.exe'
+            & 'C:\Program Files\DigiCert\DigiCert One Signing Manager Tools\smctl.exe' windows certsync
+      - save_cache:
+          name: Saving DigiCert cache
+          key: digicert-cache-v3-{{ arch }}-{{ checksum "~/cache_key.txt" }}
+          paths:
+            - ~\smtools-windows-x64.msi

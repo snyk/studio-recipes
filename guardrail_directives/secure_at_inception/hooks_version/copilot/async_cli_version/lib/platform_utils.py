@@ -15,14 +15,18 @@ Windows vs Unix differences handled:
 """
 
 import glob
+import hashlib
 import os
 import subprocess
 import sys
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, Generator, Iterator, List
+from typing import Any, Dict, Generator, Iterator, List, Optional
 
 _IS_WINDOWS = sys.platform == "win32"
+
+STUDIO_VERSION: str = "1.0.0"
 
 
 # =============================================================================
@@ -235,3 +239,100 @@ def normalize_path(path: str) -> str:
     while path.startswith("./"):
         path = path[2:]
     return path.lstrip("/")
+
+
+# =============================================================================
+# PERSISTENT LOGGING
+# =============================================================================
+
+# 1 MiB cap; on overflow the log rotates a single generation to log.txt.1,
+# keeping total on-disk usage at ~2 MiB.
+LOG_MAX_BYTES = 1 * 1024 * 1024
+
+
+def workspace_hash(workspace: str) -> str:
+    """Short hash of a workspace path, used to name the temp cache directory."""
+    return hashlib.sha256(workspace.encode()).hexdigest()[:8]
+
+
+def _safe_workspace_name(workspace: str) -> str:
+    """Filesystem-safe basename of the workspace directory."""
+    base = os.path.basename(os.path.normpath(workspace))
+    safe = "".join(c if (c.isalnum() or c in "-_.") else "-" for c in base)
+    return safe or "workspace"
+
+
+def resolve_log_file(workspace: str) -> str:
+    """Resolve the persistent log path for a workspace.
+
+    Unix path: ``~/.snyk-studio/ades/copilot/ws/<workspace-name>/log.txt``.
+    Windows path ``C:\\Users\\<user>\\.snyk-studio\\ades\\copilot\\ws\\<name>\\log.txt``.
+    """
+    name = _safe_workspace_name(workspace)
+    return os.path.join(
+        os.path.expanduser("~"), ".snyk-studio", "ades", "copilot", "ws", name, "log.txt"
+    )
+
+
+def scan_duration_secs(scan_info: Optional[Dict[str, Any]]) -> Optional[float]:
+    """Return elapsed scan time in seconds from scan_info timestamps, or None."""
+    try:
+        if scan_info is None:
+            return None
+        started = scan_info.get("started_at")
+        completed = scan_info.get("completed_at")
+        if not started or not completed:
+            return None
+        from datetime import datetime as _dt
+
+        fmt = "%Y-%m-%dT%H:%M:%S.%f"
+        fmt_short = "%Y-%m-%dT%H:%M:%S"
+
+        def _parse(s: str) -> _dt:
+            try:
+                return _dt.strptime(s, fmt)
+            except ValueError:
+                return _dt.strptime(s, fmt_short)
+
+        return (_parse(completed) - _parse(started)).total_seconds()
+    except Exception:
+        return None
+
+
+def log(message: str, log_file: str, *, debug: bool = False) -> None:
+    """Append a timestamped line to the persistent log (best-effort).
+
+    Decision-level entries (debug=False) are always written. Debug-level
+    entries (debug=True) are written only when COPILOT_HOOK_DEBUG=1. The
+    parent dir is created 0700 and the file 0600 on first write. When the
+    file exceeds LOG_MAX_BYTES it is atomically rotated to ``<log>.1``.
+    Append + rotation are serialized via the cross-platform file_lock on a
+    sibling ``<log>.lock`` path (never the log file itself, which file_lock
+    would truncate). All exceptions are swallowed so logging never breaks
+    the hook.
+    """
+    if not log_file:
+        return
+    if debug and os.environ.get("COPILOT_HOOK_DEBUG") != "1":
+        return
+    try:
+        # Restrictive perms (dir 0700, file 0600) are set via the explicit mode
+        # arguments to os.makedirs and os.open. Both modes have no group/other
+        # bits so no umask value can widen them — no umask manipulation needed.
+        parent = os.path.dirname(log_file)
+        if parent and not os.path.isdir(parent):
+            os.makedirs(parent, mode=0o700, exist_ok=True)
+        with file_lock(log_file + ".lock"):
+            try:
+                if os.path.getsize(log_file) > LOG_MAX_BYTES:
+                    os.replace(log_file, log_file + ".1")
+            except FileNotFoundError:
+                pass
+            line = f"[{datetime.now().isoformat()}] {message}\n"
+            fd = os.open(log_file, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+            try:
+                os.write(fd, line.encode("utf-8", "replace"))
+            finally:
+                os.close(fd)
+    except Exception:
+        pass

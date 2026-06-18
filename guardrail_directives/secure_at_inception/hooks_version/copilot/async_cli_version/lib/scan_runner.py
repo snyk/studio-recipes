@@ -32,6 +32,7 @@ from platform_utils import (
     get_snyk_config_path,
     get_snyk_search_paths,
     is_pid_alive,
+    resolve_log_file,
 )
 
 # =============================================================================
@@ -385,6 +386,7 @@ def _do_launch(
         env["SAI_WORKSPACE"] = workspace
         env["SAI_CACHE_DIR"] = get_cache_dir(workspace)
         env["SAI_LIB_DIR"] = str(Path(__file__).parent.resolve())
+        env["SAI_LOG_FILE"] = resolve_log_file(workspace)
         try:
             proc = subprocess.Popen(
                 [sys.executable, worker],

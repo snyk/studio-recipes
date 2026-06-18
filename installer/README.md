@@ -94,16 +94,25 @@ bash ./snyk-studio-install.sh --uninstall -y
 
 The installer adapts each recipe to the assistant's native mechanism (slash commands, skills, hooks, MCP):
 
-| Assistant | Guardrails | Commands | Skills | MCP |
-|---|---|---|---|---|
-| Cursor | ✓ | ✓ | ✓ | ✓ |
-| Claude Code | ✓ | ✓ | ✓ | ✓ |
-| Gemini | ✓ | ✓ | ✓ | ✓ |
-| Kiro | — | ✓ | ✓ | ✓ |
-| Codex | ✓ | - *(Prompts have been deprecated)* | ✓ | ✓ |
-| Windsurf | — | ✓ | ✓ | ✓ |
-| GitHub Copilot in VS Code | — | ✓ | ✓ | ✓ |
-| GitHub Copilot CLI | — | — *(not yet supported by Copilot CLI)* | ✓ | ✓ |
+### Tier 1
+| Secure At Inception Hooks | Commands and/or skills  |
+|---|---|
+| ✓ | ✓ |
+
+Codex  
+Claude Code  
+Cursor  
+Gemini  
+GitHub Copilot (CLI)  
+GitHub Copilot (VS Code)
+
+### Tier 2
+| Secure At Inception Hooks | Commands and/or skills  |
+|---|---|
+| ✗ | ✓ |
+
+Kiro  
+Windsurf 
 
 ---
 

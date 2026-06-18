@@ -536,68 +536,118 @@ def _find_win_npm_executable(name: str) -> Optional[str]:
 # =============================================================================
 
 
-def _node_major(node_version: Optional[str]) -> Optional[int]:
-    """Major version from a manifest version string (e.g. '24.11.1' -> 24), or None."""
-    if not node_version:
-        return None
-    try:
-        return int(node_version.split(".")[0])
-    except (ValueError, IndexError):
-        return None
+# nvm installs Node under $NVM_DIR (default ~/.nvm). The release to pin when
+# nvm is absent comes from the manifest's ``prerequisites.nvm`` entry — see
+# ``_nvm_install_tag`` / ``_nvm_install_url``.
 
 
-def _get_node_install_cmds_darwin(
-    auto_yes: bool, node_version: Optional[str] = None
-) -> List[List[str]]:
-    """Return the Node.js install command(s) for macOS, closest to ``node_version``.
+def _nvm_install_tag(nvm_version: Optional[str]) -> str:
+    """Return the git tag for the nvm release to install.
 
-    Homebrew only carries major-versioned formulae (``node@N``), so the closest
-    it can offer to e.g. ``24.11.1`` is ``node@24``. Versioned formulae are
-    keg-only and aren't symlinked by default, so we link it onto PATH with
-    ``--force`` (required for keg-only formulae) but deliberately WITHOUT
-    ``--overwrite``, so an existing node/npm managed by another tool or formula
-    is left intact (brew aborts rather than clobbering it; reversible via
-    ``brew unlink``). With no target version, install the latest ``node`` formula.
+    The manifest stores a bare version (e.g. ``0.40.3``) for consistency with
+    the other prerequisites; nvm's release tags are ``v``-prefixed, so prepend
+    it when absent. A ``v``-prefixed manifest value is accepted as-is.
     """
-    if not shutil.which("brew"):
-        print(f"  {C.yellow('WARNING')} Homebrew not found.")
-        if not auto_yes:
-            reply = input("  Install Homebrew? (y/n) ").strip().lower()
-            if reply not in ("y", "yes"):
-                return []
-        print(f"  {C.cyan('INFO')} Installing Homebrew...")
-        try:
-            # Set NONINTERACTIVE=1 to skip the "Press RETURN to continue" prompt.
-            # We don't redirect stdout/stderr to DEVNULL so the user can see progress and any sudo prompts.
-            env = os.environ.copy()
-            if auto_yes:
-                env["NONINTERACTIVE"] = "1"
+    version = (nvm_version or "").strip() or "0.40.3"
+    return version if version.startswith("v") else f"v{version}"
 
-            run(
-                [
-                    "/bin/bash",
-                    "-c",
-                    "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)",
-                ],
-                env=env,
-                check=True,
-            )
-        except Exception as e:
-            print(f"  {C.red('ERROR')} Failed to install Homebrew: {e}")
-            return []
 
-    major = _node_major(node_version)
-    if major is not None:
-        formula = f"node@{major}"
-        print(
-            f"  {C.cyan('INFO')} Installing Node.js {major}.x via Homebrew '{formula}' "
-            f"(closest available to {node_version})."
-        )
-        return [
-            ["brew", "install", formula],
-            ["brew", "link", "--force", formula],
+def _nvm_install_url(nvm_version: Optional[str]) -> str:
+    """Return the install.sh URL for the pinned nvm release."""
+    tag = _nvm_install_tag(nvm_version)
+    return f"https://raw.githubusercontent.com/nvm-sh/nvm/{tag}/install.sh"
+
+
+def _nvm_dir() -> Path:
+    """Return the nvm install directory: ``$NVM_DIR`` if set, else ``~/.nvm``."""
+    nvm_dir = os.environ.get("NVM_DIR", "").strip()
+    return Path(nvm_dir) if nvm_dir else Path.home() / ".nvm"
+
+
+def _nvm_latest_node_bin_dir() -> Optional[str]:
+    """Return the ``bin`` dir of the newest Node version nvm has installed, or None.
+
+    nvm places each installed Node under ``$NVM_DIR/versions/node/v<X.Y.Z>/bin``.
+    After an install we prepend this to the current process PATH so
+    ``node``/``npm`` resolve immediately, without sourcing a shell profile. When
+    several versions are installed only the newest is added — whichever dir comes
+    first on PATH wins, so adding the older ones would just be shadowed.
+    """
+    versions = _nvm_dir() / "versions" / "node"
+    if not versions.is_dir():
+        return None
+
+    best_dir: Optional[Path] = None
+    best_key: Tuple[int, ...] = (-1, -1, -1)
+    for d in versions.iterdir():
+        if not (d / "bin").is_dir():
+            continue
+        m = re.match(r"v?(\d+)\.(\d+)\.(\d+)", d.name)
+        if m is None:
+            # Not a vX.Y.Z version dir (e.g. a temp/metadata folder) — skip it
+            # so it can never be picked and add a bogus dir to PATH.
+            continue
+        key = tuple(int(x) for x in m.groups())
+        if key > best_key:
+            best_key = key
+            best_dir = d
+
+    return str(best_dir / "bin") if best_dir is not None else None
+
+
+def _get_node_install_cmds_nvm(
+    node_version: Optional[str] = None, nvm_version: Optional[str] = None
+) -> List[List[str]]:
+    """Return the Node.js install command for macOS/Linux via nvm.
+
+    The returned command is a single ``sh -c`` invocation that installs nvm
+    (pinned to ``nvm_version`` from the manifest) if it isn't already present,
+    sources it, then installs the requested Node version (or the latest LTS when
+    no version is given) and marks it the default for the user's future shells.
+    nvm can install an exact upstream version, so the manifest's pinned Node
+    version is honoured directly.
+    """
+    if node_version:
+        install_sel, alias_sel, label = node_version, node_version, node_version
+    else:
+        install_sel, alias_sel, label = "--lts", "lts/*", "the latest LTS"
+
+    print(f"  {C.cyan('INFO')} Installing Node.js {label} via nvm.")
+
+    # The script is a constant and POSIX-compatible, so it runs under the
+    # minimal /bin/sh that stripped-down distros (e.g. Alpine) ship as well as
+    # under bash — hence ``sh -c`` rather than a hardcoded ``bash``. The install
+    # URL and version selectors are passed as positional parameters ($1-$3)
+    # rather than interpolated into the command text, so no value is ever
+    # shell-interpreted. NVM_DIR is resolved by the script from its own
+    # (inherited) environment rather than read in Python and passed in. The nvm
+    # installer is piped to bash when present, falling back to sh. $0 is a label
+    # for diagnostics.
+    script = (
+        "set -e; "
+        'export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"; '
+        'if [ ! -s "$NVM_DIR/nvm.sh" ]; then '
+        'echo "Installing nvm..."; '
+        "if command -v bash >/dev/null 2>&1; then nvm_sh=bash; else nvm_sh=sh; fi; "
+        'if command -v curl >/dev/null 2>&1; then curl -fsSL "$1" | "$nvm_sh"; '
+        'elif command -v wget >/dev/null 2>&1; then wget -qO- "$1" | "$nvm_sh"; '
+        'else echo "Neither curl nor wget is available to download nvm." >&2; exit 1; fi; '
+        "fi; "
+        '. "$NVM_DIR/nvm.sh"; '
+        'nvm install "$2"; '
+        'nvm alias default "$3"'
+    )
+    return [
+        [
+            "sh",
+            "-c",
+            script,
+            "snyk-nvm-install",
+            _nvm_install_url(nvm_version),
+            install_sel,
+            alias_sel,
         ]
-    return [["brew", "install", "node"]]
+    ]
 
 
 def _get_node_install_cmds_windows(
@@ -672,45 +722,6 @@ def _get_node_install_cmds_windows(
         return []
 
 
-def _get_node_install_cmds_linux(node_version: Optional[str] = None) -> List[List[str]]:
-    """Return the Node.js install command(s) for the detected Linux package manager.
-
-    Distro repositories install their own pinned Node.js and can't target an
-    arbitrary upstream version, so the distro build is the closest available
-    without adding a third-party repo; the requested version is noted only.
-    """
-    if node_version:
-        note = (
-            f"Note: installing the distro's Node.js build (closest available to "
-            f"{node_version}); the package manager can't target an exact version."
-        )
-        print(f"  {C.dim(note)}")
-
-    if shutil.which("apt-get"):
-        print(f"  {C.dim('Note: This may prompt for your sudo password.')}")
-        return [
-            ["sudo", "apt-get", "update"],
-            ["sudo", "apt-get", "install", "-y", "nodejs", "npm"],
-        ]
-    if shutil.which("yum"):
-        print(f"  {C.dim('Note: This may prompt for your sudo password.')}")
-        return [["sudo", "yum", "install", "-y", "nodejs", "npm"]]
-    if shutil.which("dnf"):
-        print(f"  {C.dim('Note: This may prompt for your sudo password.')}")
-        return [["sudo", "dnf", "install", "-y", "nodejs", "npm"]]
-    if shutil.which("pacman"):
-        print(f"  {C.dim('Note: This may prompt for your sudo password.')}")
-        return [["sudo", "pacman", "-Sy", "--noconfirm", "nodejs", "npm"]]
-    if shutil.which("apk"):
-        print(f"  {C.dim('Note: This may prompt for your sudo password.')}")
-        return [["sudo", "apk", "add", "nodejs", "npm"]]
-
-    print(
-        f"  {C.red('ERROR')} Supported Linux package manager not found. Please install Node.js manually."
-    )
-    return []
-
-
 def _update_process_path_for_nodejs(base_paths: Optional[List[str]] = None) -> None:
     """Add standard Node.js and npm installation paths to the current process's PATH.
 
@@ -722,9 +733,7 @@ def _update_process_path_for_nodejs(base_paths: Optional[List[str]] = None) -> N
     if base_paths:
         new_paths.extend(base_paths)
     else:
-        if sys.platform == "darwin":
-            new_paths.extend(["brew --prefix"])
-        elif _IS_WINDOWS:
+        if _IS_WINDOWS:
             new_paths.append("C:\\Program Files\\nodejs")
             appdata = os.environ.get("APPDATA")
             if appdata:
@@ -739,8 +748,10 @@ def _update_process_path_for_nodejs(base_paths: Optional[List[str]] = None) -> N
             nvm_symlink = os.environ.get("NVM_SYMLINK", "")
             if nvm_symlink:
                 new_paths.append(nvm_symlink)
-        else:  # Linux
-            new_paths.extend(["/usr/local/bin", "/usr/bin"])
+        else:  # macOS and Linux: Node is installed via nvm
+            latest_node_bin = _nvm_latest_node_bin_dir()
+            if latest_node_bin:
+                new_paths.append(latest_node_bin)
 
     current_path = os.environ.get("PATH", "")
     path_sep = ";" if _IS_WINDOWS else ":"
@@ -755,22 +766,23 @@ def _update_process_path_for_nodejs(base_paths: Optional[List[str]] = None) -> N
         os.environ["PATH"] = path_sep.join(added) + path_sep + current_path
 
 
-def _build_node_install_cmds(auto_yes: bool, node_version: Optional[str] = None) -> List[List[str]]:
+def _build_node_install_cmds(
+    auto_yes: bool, node_version: Optional[str] = None, nvm_version: Optional[str] = None
+) -> List[List[str]]:
     """Return the platform-appropriate Node.js install command(s), or [] if none can be built.
 
     Shared by the missing-Node install path and the outdated-Node upgrade path.
-    ``node_version`` is the target version from the manifest; each platform
-    installs as close to it as its package manager allows: an exact pin on
-    Windows (winget/choco), the major-versioned Homebrew formula on macOS, and
-    the distro build on Linux.
+    ``node_version`` is the target version from the manifest. On Windows it is
+    an exact pin via winget/choco; on macOS and Linux it is installed via nvm,
+    which honours the exact upstream version directly. ``nvm_version`` is the
+    pinned nvm release from the manifest, used only on the macOS/Linux path.
     """
     sys_os = platform.system().lower()
 
-    if sys_os == "darwin":
-        return _get_node_install_cmds_darwin(auto_yes, node_version)
     if sys_os == "windows":
         return _get_node_install_cmds_windows(auto_yes, node_version)
-    return _get_node_install_cmds_linux(node_version)
+    # macOS and Linux both install Node via nvm.
+    return _get_node_install_cmds_nvm(node_version, nvm_version)
 
 
 def _run_node_install(cmds: List[List[str]]) -> bool:
@@ -798,20 +810,23 @@ def _run_node_install(cmds: List[List[str]]) -> bool:
 
 
 def _run_node_install_with_fallback(
-    auto_yes: bool, primary: List[List[str]], node_version: Optional[str]
+    auto_yes: bool,
+    primary: List[List[str]],
+    node_version: Optional[str],
+    nvm_version: Optional[str] = None,
 ) -> bool:
     """Run the version-pinned install; on failure, retry with the unpinned default build.
 
-    The exact-version pin (e.g. winget ``--version 24.11.1``) can fail when that
-    build isn't published. Falling back to the package manager's default — LTS on
-    Windows, latest ``node`` on macOS — keeps the install best-effort rather than
-    hard-failing on an unavailable pin.
+    The exact-version pin (e.g. winget ``--version 24.11.1`` or ``nvm install
+    24.11.1``) can fail when that build isn't published. Falling back to the
+    default — LTS on Windows, the latest LTS via nvm on macOS/Linux — keeps the
+    install best-effort rather than hard-failing on an unavailable pin.
     """
     if _run_node_install(primary):
         return True
     if not node_version:
         return False
-    fallback = _build_node_install_cmds(auto_yes, None)
+    fallback = _build_node_install_cmds(auto_yes, None, nvm_version)
     if not fallback or fallback == primary:
         return False
     print(
@@ -850,7 +865,9 @@ def _get_node_version() -> Optional[tuple[int, ...]]:
     return tuple(int(x) for x in match.groups())
 
 
-def _warn_if_node_outdated(auto_yes: bool, node_version: Optional[str]) -> None:
+def _warn_if_node_outdated(
+    auto_yes: bool, node_version: Optional[str], nvm_version: Optional[str] = None
+) -> None:
     """When Node is present but older than the manifest minimum, warn and offer to upgrade.
 
     Best-effort: if the version can't be parsed/detected we stay quiet rather than
@@ -869,51 +886,104 @@ def _warn_if_node_outdated(auto_yes: bool, node_version: Optional[str]) -> None:
     cur_str = ".".join(map(str, current))
     print(f"  {C.yellow('WARNING')} Node.js {cur_str} is outdated (min: {node_version}).")
 
-    cmds = _build_node_install_cmds(auto_yes, node_version)
+    cmds = _build_node_install_cmds(auto_yes, node_version, nvm_version)
     if not cmds:
         return
     if not auto_yes:
-        display_cmd = " && ".join(" ".join(c) for c in cmds)
-        reply = input(f"  Upgrade Node.js via '{display_cmd}'? (y/n) ").strip().lower()
+        reply = input(f"  Upgrade Node.js to {node_version}? (y/n) ").strip().lower()
         if reply not in ("y", "yes"):
             return
-    _run_node_install_with_fallback(auto_yes, cmds, node_version) or sys.exit(1)
+    _run_node_install_with_fallback(auto_yes, cmds, node_version, nvm_version) or sys.exit(1)
 
 
-def ensure_node_installed(auto_yes: bool, node_version: Optional[str] = None) -> bool:
+def ensure_node_installed(
+    auto_yes: bool, node_version: Optional[str] = None, nvm_version: Optional[str] = None
+) -> bool:
     """Confirm that Node.js and npm are installed and configured.
 
     ``node_version`` is the target Node version from the manifest prerequisites.
     It doubles as the minimum: when Node is present but older, the user is warned
-    and offered an upgrade; when Node is installed (or upgraded), each platform
-    installs as close to this version as its package manager allows.
+    and offered an upgrade. When Node is missing it is installed via nvm on
+    macOS/Linux (pinned to ``nvm_version`` from the manifest) and via
+    winget/choco on Windows — in every case targeting ``node_version``.
+
+    The installer never uses sudo. On macOS/Linux an existing Node on PATH is
+    accepted only when its global npm prefix is user-writable, so a later
+    ``npm install -g`` (e.g. the Snyk CLI) needs no elevation. A root-owned
+    system Node would force sudo for global installs, so instead a per-user Node
+    is installed via nvm — which also lands the Snyk CLI in a directory the
+    recipes already search on PATH.
     """
     if shutil.which("node") and shutil.which("npm"):
         # On Windows, ensure %APPDATA%\npm (global npm packages like snyk) is also on PATH
         # even when node/npm themselves are already found via NVM_SYMLINK or similar.
         if _IS_WINDOWS:
             _update_process_path_for_nodejs()
-        _warn_if_node_outdated(auto_yes, node_version)
-        return True
+            _warn_if_node_outdated(auto_yes, node_version, nvm_version)
+            return True
+        # macOS/Linux: only accept the existing Node when global installs don't
+        # need root; otherwise fall through to install a per-user Node via nvm.
+        if _npm_global_prefix_writable():
+            _warn_if_node_outdated(auto_yes, node_version, nvm_version)
+            return True
+        print(
+            f"  {C.yellow('WARNING')} Node.js is installed but its global package "
+            "directory is not writable; installing a per-user Node via nvm."
+        )
     # On Windows with nvm-windows, node/npm may live in paths not yet on PATH
-    if _IS_WINDOWS and _find_win_npm_executable("node") and _find_win_npm_executable("npm"):
+    elif _IS_WINDOWS and _find_win_npm_executable("node") and _find_win_npm_executable("npm"):
         _update_process_path_for_nodejs()
-        _warn_if_node_outdated(auto_yes, node_version)
+        _warn_if_node_outdated(auto_yes, node_version, nvm_version)
         return True
+    else:
+        print(f"  {C.yellow('WARNING')} Node.js and/or npm not found on system PATH.")
 
-    print(f"  {C.yellow('WARNING')} Node.js and/or npm not found on system PATH.")
-
-    cmds = _build_node_install_cmds(auto_yes, node_version)
+    cmds = _build_node_install_cmds(auto_yes, node_version, nvm_version)
     if not cmds:
         return False
 
     if not auto_yes:
-        display_cmd = " && ".join([" ".join(c) for c in cmds])
-        reply = input(f"  Install Node.js globally via '{display_cmd}'? (y/n) ").strip().lower()
+        reply = input("  Install Node.js now? (y/n) ").strip().lower()
         if reply not in ("y", "yes"):
             return False
 
-    return _run_node_install_with_fallback(auto_yes, cmds, node_version)
+    return _run_node_install_with_fallback(auto_yes, cmds, node_version, nvm_version)
+
+
+def _npm_global_prefix_writable() -> bool:
+    """Return True if the current user can write to npm's global install prefix.
+
+    Node installed via nvm lives under the user's home, so its global prefix is
+    writable and ``npm install -g`` works directly. A pre-existing system-wide
+    Node (e.g. ``/usr/bin/node``) usually has a root-owned prefix where a global
+    install would fail with EACCES. Probing the prefix lets ensure_node_installed
+    decide whether the existing Node is usable or a per-user Node must be
+    installed via nvm — the installer never escalates privileges.
+
+    Errs on the side of "writable" when the prefix can't be determined, so a
+    transient ``npm`` hiccup never triggers an unnecessary nvm install.
+    """
+    try:
+        r = run(
+            ["npm", "prefix", "-g"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            shell=_IS_WINDOWS,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+    except Exception:
+        return True
+    stdout = getattr(r, "stdout", None)
+    prefix = stdout.strip() if isinstance(stdout, str) else ""
+    if not prefix:
+        return True
+    # npm creates lib/node_modules and bin under the prefix on demand, so test
+    # write access at the nearest existing ancestor of the prefix.
+    path = Path(prefix)
+    while not path.exists() and path != path.parent:
+        path = path.parent
+    return os.access(path, os.W_OK)
 
 
 def run_command(cmd: list[str], warn: str) -> int:
@@ -931,6 +1001,7 @@ def check_prerequisites(
     snyk_version: Optional[str] = None,
     node_version: Optional[str] = None,
     no_latest_deps: bool = False,
+    nvm_version: Optional[str] = None,
 ) -> None:
     """Check that the required prerequisites are installed and configured. If not, attempt to install them.
 
@@ -943,8 +1014,8 @@ def check_prerequisites(
     warnings = 0
 
     def get_npm_install_cmd(pkg: str) -> List[str]:
-        cmd = ["npm", "install", "-g", pkg]
-        return ["sudo"] + cmd if not _IS_WINDOWS else cmd
+        # Assumes node was installed per-user.
+        return ["npm", "install", "-g", pkg]
 
     def snyk_pkg(latest_label: str) -> str:
         """Package spec to install: the manifest version if not installing latest, else the latest label."""
@@ -958,7 +1029,7 @@ def check_prerequisites(
     def get_snyk_path():
         return shutil.which("snyk") or _find_win_npm_executable("snyk")
 
-    if not ensure_node_installed(auto_yes, node_version) and get_snyk_path():
+    if not ensure_node_installed(auto_yes, node_version, nvm_version) and get_snyk_path():
         print(f"  {C.red('ERROR')} Node.js is required to install Snyk CLI.")
         warnings += 1
 
@@ -967,17 +1038,29 @@ def check_prerequisites(
 
     minimum_snyk_version = parse_version(snyk_version) if snyk_version else None
 
+    # Probe the installed Snyk version. get_snyk_path() only confirms that a
+    # `snyk` entry resolves on PATH; actually executing it can still fail (a
+    # stale/broken shim, or a bin dir that became invalid after the Node/PATH
+    # refresh) with FileNotFoundError. Treat any such failure as "Snyk not
+    # usable" and fall through to (re)install it, mirroring how _get_node_version
+    # guards its own probe — never let the exception crash the installer.
+    snyk_ver_str: Optional[str] = None
     if get_snyk_path():
-        r = run(
-            ["snyk", "--version"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            shell=_IS_WINDOWS,
-            creationflags=_CREATE_NO_WINDOW,
-        )
-        ver_str = r.stdout.strip().splitlines()[0] if r.stdout else "unknown"
-        match = re.match(r"(\d+\.\d+\.\d+)", ver_str)
+        try:
+            r = run(
+                ["snyk", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                shell=_IS_WINDOWS,
+                creationflags=_CREATE_NO_WINDOW,
+            )
+            snyk_ver_str = r.stdout.strip().splitlines()[0] if r.stdout else "unknown"
+        except Exception:
+            snyk_ver_str = None
+
+    if snyk_ver_str is not None:
+        match = re.match(r"(\d+\.\d+\.\d+)", snyk_ver_str)
         if match:
             current_version = parse_version(match.group(1))
             # Only (re)install when the installed Snyk is older than the
@@ -986,7 +1069,7 @@ def check_prerequisites(
             if minimum_snyk_version is not None and current_version < minimum_snyk_version:
                 target = "pinned" if no_latest_deps else "latest"
                 print(
-                    f"  {C.yellow('WARNING')} Snyk CLI {ver_str} is outdated "
+                    f"  {C.yellow('WARNING')} Snyk CLI {snyk_ver_str} is outdated "
                     f"(min: {snyk_version}). Upgrade to {target}?"
                 )
                 if not auto_yes:
@@ -998,7 +1081,7 @@ def check_prerequisites(
                     f"  {C.yellow('WARNING')} Failed to upgrade Snyk CLI to {target} via npm",
                 )
             else:
-                print(f"  {C.green('OK')} Snyk CLI {ver_str}")
+                print(f"  {C.green('OK')} Snyk CLI {snyk_ver_str}")
     else:
         target = "pinned" if no_latest_deps and snyk_version else "latest"
         print(f"  {C.yellow('WARNING')} Snyk CLI not found, install {target} version?")
@@ -2199,6 +2282,7 @@ def main() -> None:
         snyk_version=manifest.prerequisite_version("snyk"),
         node_version=manifest.prerequisite_version("node"),
         no_latest_deps=args.no_latest_deps,
+        nvm_version=manifest.prerequisite_version("nvm"),
     )
     print()
 
@@ -2321,26 +2405,34 @@ def main() -> None:
             )
         if manifest.are_rules_conflicting(ade):
             print(f"  {C.yellow('WARNING')} Conflicting rule(s) found for: {ade}")
-            reply = (
-                input(
-                    f"  Run 'snyk mcp configure' to remove the conflicting rules for {ade}? (y/n) "
+            if args.yes:
+                accept = True
+            else:
+                reply = (
+                    input(
+                        f"  Run 'snyk mcp configure' to remove the conflicting rules for {ade}? (y/n) "
+                    )
+                    .strip()
+                    .lower()
                 )
-                .strip()
-                .lower()
-            )
-            if reply in ("y", "yes"):
+                accept = reply in ("y", "yes")
+            if accept:
                 for scope in manifest.get_conflicting_resource_scope(ade, "rules"):
                     remove_legacy_SAI_directives(ade, scope)
         if manifest.are_skills_conflicting(ade):
             print(f"  {C.yellow('WARNING')} Conflicting skill(s) found for: {ade}")
-            reply = (
-                input(
-                    f"  Run 'snyk mcp configure' to remove the conflicting skills for {ade}? (y/n) "
+            if args.yes:
+                accept = True
+            else:
+                reply = (
+                    input(
+                        f"  Run 'snyk mcp configure' to remove the conflicting skills for {ade}? (y/n) "
+                    )
+                    .strip()
+                    .lower()
                 )
-                .strip()
-                .lower()
-            )
-            if reply in ("y", "yes"):
+                accept = reply in ("y", "yes")
+            if accept:
                 for scope in manifest.get_conflicting_resource_scope(ade, "skills"):
                     remove_legacy_SAI_directives(ade, scope)
 

@@ -105,7 +105,7 @@ class TestCheckPrerequisites:
         monkeypatch.setattr("builtins.input", lambda _: "y")
 
         installer.check_prerequisites(auto_yes=False)
-        assert ["sudo", "npm", "install", "-g", "snyk"] in cmds_run
+        assert ["npm", "install", "-g", "snyk"] in cmds_run
         captured = capsys.readouterr()
         assert "WARNING Snyk CLI not found" in captured.out
 
@@ -130,7 +130,7 @@ class TestCheckPrerequisites:
         installer.check_prerequisites(auto_yes=True, snyk_version="1.1302.0")
 
         # Verify that npm install was called
-        assert ["sudo", "npm", "install", "-g", "snyk@latest"] in cmds_run
+        assert ["npm", "install", "-g", "snyk@latest"] in cmds_run
         captured = capsys.readouterr()
         assert "WARNING Snyk CLI 1.1301.0 is outdated" in captured.out
 
@@ -155,8 +155,8 @@ class TestCheckPrerequisites:
 
         installer.check_prerequisites(auto_yes=True, snyk_version="1.1304.0", no_latest_deps=True)
 
-        assert ["sudo", "npm", "install", "-g", "snyk@1.1304.0"] in cmds_run
-        assert ["sudo", "npm", "install", "-g", "snyk@latest"] not in cmds_run
+        assert ["npm", "install", "-g", "snyk@1.1304.0"] in cmds_run
+        assert ["npm", "install", "-g", "snyk@latest"] not in cmds_run
 
     def test_global_pins_snyk_when_missing(self, monkeypatch, capsys):
         """In --no-latest-deps mode a missing Snyk installs exactly the pinned version."""
@@ -174,7 +174,7 @@ class TestCheckPrerequisites:
 
         installer.check_prerequisites(auto_yes=True, snyk_version="1.1304.0", no_latest_deps=True)
 
-        assert ["sudo", "npm", "install", "-g", "snyk@1.1304.0"] in cmds_run
+        assert ["npm", "install", "-g", "snyk@1.1304.0"] in cmds_run
 
     def test_global_skips_snyk_when_newer_than_pin(self, monkeypatch, capsys):
         """In --no-latest-deps mode an installed Snyk newer than the pin is left untouched."""
@@ -197,7 +197,7 @@ class TestCheckPrerequisites:
 
         installer.check_prerequisites(auto_yes=True, snyk_version="1.1304.0", no_latest_deps=True)
 
-        assert not any(c[:3] == ["sudo", "npm", "install"] for c in cmds_run)
+        assert not any(c[:2] == ["npm", "install"] for c in cmds_run)
         captured = capsys.readouterr()
         assert "OK Snyk CLI 1.1310.0" in captured.out
 
@@ -235,6 +235,31 @@ class TestCheckPrerequisites:
         monkeypatch.setattr(installer, "run", mock_run)
 
         installer.check_prerequisites(auto_yes=True)
+
+    def test_snyk_on_path_but_not_executable_installs_instead_of_crashing(
+        self, monkeypatch, capsys
+    ):
+        """snyk resolves via `which` but exec raises FileNotFoundError — install, don't crash."""
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None
+        )
+        monkeypatch.setattr(installer, "ensure_node_installed", lambda *_: True)
+
+        cmds_run = []
+
+        def mock_run(cmd, **kwargs):
+            # The version probe (the literal "snyk") fails like the real crash.
+            if cmd[:2] == ["snyk", "--version"]:
+                raise FileNotFoundError(2, "No such file or directory", "snyk")
+            cmds_run.append(cmd)
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr(installer, "run", mock_run)
+
+        # Must not raise; falls through to (re)install Snyk.
+        installer.check_prerequisites(auto_yes=True)
+        assert ["npm", "install", "-g", "snyk"] in cmds_run
+        assert "Snyk CLI not found" in capsys.readouterr().out
 
 
 # ===========================================================================
@@ -420,12 +445,14 @@ class TestEnsureNodeInstalled:
         monkeypatch.setattr(
             "shutil.which", lambda cmd: "/bin/cmd" if cmd in ("node", "npm") else None
         )
+        monkeypatch.setattr(installer, "_npm_global_prefix_writable", lambda: True)
         assert installer.ensure_node_installed(auto_yes=True) is True
 
     def test_node_meets_minimum_no_warning(self, monkeypatch, capsys):
         monkeypatch.setattr(
             "shutil.which", lambda cmd: "/bin/cmd" if cmd in ("node", "npm") else None
         )
+        monkeypatch.setattr(installer, "_npm_global_prefix_writable", lambda: True)
         monkeypatch.setattr(installer, "_get_node_version", lambda: (24, 12, 0))
         assert installer.ensure_node_installed(auto_yes=True, node_version="24.11.1") is True
         assert "is outdated" not in capsys.readouterr().out
@@ -434,6 +461,7 @@ class TestEnsureNodeInstalled:
         monkeypatch.setattr(
             "shutil.which", lambda cmd: "/bin/cmd" if cmd in ("node", "npm", "brew") else None
         )
+        monkeypatch.setattr(installer, "_npm_global_prefix_writable", lambda: True)
         monkeypatch.setattr("platform.system", lambda: "Darwin")
         monkeypatch.setattr(installer, "_get_node_version", lambda: (18, 0, 0))
 
@@ -445,16 +473,18 @@ class TestEnsureNodeInstalled:
         assert installer.ensure_node_installed(auto_yes=True, node_version="24.11.1") is True
         captured = capsys.readouterr()
         assert "WARNING Node.js 18.0.0 is outdated (min: 24.11.1)" in captured.out
-        # macOS pins to the closest Homebrew formula (node@24) and links it.
-        assert ["brew", "install", "node@24"] in cmds_run
-        # --force (keg-only) but NOT --overwrite, so existing node/npm isn't clobbered.
-        assert ["brew", "link", "--force", "node@24"] in cmds_run
+        # macOS installs the exact version via nvm (no brew). The version is an
+        # argv parameter, not interpolated into the shell script text.
+        assert any(c[0] == "sh" and "nvm install" in c[2] and "24.11.1" in c for c in cmds_run), (
+            cmds_run
+        )
 
     def test_outdated_node_failed_upgrade_exits(self, monkeypatch, capsys):
         """A failed upgrade of an outdated Node must not silently proceed — it exits."""
         monkeypatch.setattr(
             "shutil.which", lambda cmd: "/bin/cmd" if cmd in ("node", "npm", "brew") else None
         )
+        monkeypatch.setattr(installer, "_npm_global_prefix_writable", lambda: True)
         monkeypatch.setattr("platform.system", lambda: "Darwin")
         monkeypatch.setattr(installer, "_get_node_version", lambda: (18, 0, 0))
         # Every install command (pin + fallback) fails.
@@ -474,6 +504,7 @@ class TestEnsureNodeInstalled:
         monkeypatch.setattr(
             "shutil.which", lambda cmd: "/bin/cmd" if cmd in ("node", "npm", "brew") else None
         )
+        monkeypatch.setattr(installer, "_npm_global_prefix_writable", lambda: True)
         monkeypatch.setattr("platform.system", lambda: "Darwin")
         monkeypatch.setattr(installer, "_get_node_version", lambda: (18, 0, 0))
         monkeypatch.setattr("builtins.input", lambda prompt: "n")
@@ -483,15 +514,19 @@ class TestEnsureNodeInstalled:
 
         assert installer.ensure_node_installed(auto_yes=False, node_version="24.11.1") is True
 
-    def test_darwin_install_pins_major_formula(self, monkeypatch):
-        """A target version installs the closest major Homebrew formula + link."""
-        monkeypatch.setattr("shutil.which", lambda cmd: "/bin/brew" if cmd == "brew" else None)
+    def test_darwin_installs_exact_version_via_nvm(self, monkeypatch):
+        """On macOS a target version installs that exact version via nvm."""
+        monkeypatch.setattr("shutil.which", lambda cmd: None)
         monkeypatch.setattr("platform.system", lambda: "Darwin")
         cmds = installer._build_node_install_cmds(auto_yes=True, node_version="24.11.1")
-        assert cmds == [
-            ["brew", "install", "node@24"],
-            ["brew", "link", "--force", "node@24"],
-        ]
+        assert len(cmds) == 1
+        cmd = cmds[0]
+        assert cmd[0] == "sh"
+        assert cmd[1] == "-c"
+        # The script is constant; the version is passed as an argv parameter.
+        assert "nvm install" in cmd[2]
+        assert "nvm alias default" in cmd[2]
+        assert "24.11.1" in cmd
 
     def test_windows_winget_pins_exact_version(self, monkeypatch):
         monkeypatch.setattr(
@@ -561,19 +596,43 @@ class TestEnsureNodeInstalled:
         assert installer.ensure_node_installed(auto_yes=True) is False
         assert "falling back" not in capsys.readouterr().out
 
-    def test_linux_uses_distro_default_with_note(self, monkeypatch, capsys):
-        monkeypatch.setattr(
-            "shutil.which", lambda cmd: "/usr/bin/apt-get" if cmd == "apt-get" else None
-        )
+    def test_linux_installs_exact_version_via_nvm(self, monkeypatch, capsys):
+        monkeypatch.setattr("shutil.which", lambda cmd: None)
         monkeypatch.setattr("platform.system", lambda: "Linux")
         cmds = installer._build_node_install_cmds(auto_yes=True, node_version="24.11.1")
-        assert ["sudo", "apt-get", "install", "-y", "nodejs", "npm"] in cmds
-        assert "closest available to 24.11.1" in capsys.readouterr().out
+        assert len(cmds) == 1
+        cmd = cmds[0]
+        assert cmd[0] == "sh"
+        assert cmd[1] == "-c"
+        # nvm honours the exact upstream version directly — no distro pkg.
+        assert "nvm install" in cmd[2]
+        assert "24.11.1" in cmd
+        assert "via nvm" in capsys.readouterr().out
+
+    def test_nvm_install_tag_normalizes_version(self):
+        # Manifest stores a bare version; the release tag is v-prefixed.
+        assert installer._nvm_install_tag("0.40.3") == "v0.40.3"
+        assert installer._nvm_install_tag("v0.40.3") == "v0.40.3"
+        # Falls back to a sane default when the manifest omits the pin.
+        assert installer._nvm_install_tag(None) == "v0.40.3"
+        assert installer._nvm_install_tag("") == "v0.40.3"
+
+    def test_nvm_version_from_manifest_pins_install_url(self, monkeypatch):
+        """The nvm release pinned by the manifest drives the install.sh URL."""
+        monkeypatch.setattr("shutil.which", lambda cmd: None)
+        monkeypatch.setattr("platform.system", lambda: "Linux")
+        cmds = installer._build_node_install_cmds(
+            auto_yes=True, node_version="24.11.1", nvm_version="0.39.7"
+        )
+        # The install.sh URL is passed as an argv parameter to the shell script.
+        cmd = cmds[0]
+        assert any("nvm-sh/nvm/v0.39.7/install.sh" in str(a) for a in cmd)
 
     def test_outdated_node_user_declines_upgrade(self, monkeypatch, capsys):
         monkeypatch.setattr(
             "shutil.which", lambda cmd: "/bin/cmd" if cmd in ("node", "npm", "brew") else None
         )
+        monkeypatch.setattr(installer, "_npm_global_prefix_writable", lambda: True)
         monkeypatch.setattr("platform.system", lambda: "Darwin")
         monkeypatch.setattr(installer, "_get_node_version", lambda: (18, 0, 0))
         monkeypatch.setattr("builtins.input", lambda prompt: "n")
@@ -593,6 +652,7 @@ class TestEnsureNodeInstalled:
         monkeypatch.setattr(
             "shutil.which", lambda cmd: "/bin/cmd" if cmd in ("node", "npm") else None
         )
+        monkeypatch.setattr(installer, "_npm_global_prefix_writable", lambda: True)
         monkeypatch.setattr(installer, "_get_node_version", lambda: None)
         assert installer.ensure_node_installed(auto_yes=True, node_version="24.11.1") is True
         assert "is outdated" not in capsys.readouterr().out
@@ -639,63 +699,25 @@ class TestEnsureNodeInstalled:
         monkeypatch.setattr(installer, "run", fail_run)
         assert installer._get_node_version() is None
 
-    def test_darwin_brew_install(self, monkeypatch, capsys):
-        def mock_which(cmd):
-            if cmd == "brew":
-                return "/opt/homebrew/bin/brew"
-            return None
+    def test_darwin_nvm_install(self, monkeypatch, capsys):
+        """On macOS a missing Node is installed via nvm (no brew)."""
 
-        monkeypatch.setattr("shutil.which", mock_which)
+        monkeypatch.setattr("shutil.which", lambda cmd: None)
         monkeypatch.setattr("platform.system", lambda: "Darwin")
 
         cmds_run = []
 
         def mock_run(cmd, **kwargs):
             cmds_run.append(cmd)
-            # simulate node being available after run
+            # simulate node being available after the nvm install
             monkeypatch.setattr(
-                "shutil.which", lambda c: "/bin/cmd" if c in ("node", "npm") else mock_which(c)
+                "shutil.which", lambda c: "/bin/cmd" if c in ("node", "npm") else None
             )
             return MagicMock(returncode=0)
 
         monkeypatch.setattr(installer, "run", mock_run)
         assert installer.ensure_node_installed(auto_yes=True) is True
-        assert ["brew", "install", "node"] in cmds_run
-
-    def test_darwin_homebrew_install(self, monkeypatch, capsys):
-        """Verify that the installer correctly attempts to install Homebrew when missing on macOS."""
-
-        def mock_which(cmd):
-            return None
-
-        monkeypatch.setattr("shutil.which", mock_which)
-        monkeypatch.setattr("platform.system", lambda: "Darwin")
-
-        runs = []
-
-        def mock_run(cmd, **kwargs):
-            runs.append((cmd, kwargs))
-
-            # After Homebrew install, simulate brew being found
-            def next_which(c):
-                if c == "brew":
-                    return "/opt/homebrew/bin/brew"
-                if c in ("node", "npm") and any("node" in r[0] for r in runs):
-                    return "/bin/cmd"
-                return None
-
-            monkeypatch.setattr("shutil.which", next_which)
-            return MagicMock(returncode=0)
-
-        monkeypatch.setattr(installer, "run", mock_run)
-
-        # Test with auto_yes=True
-        assert installer.ensure_node_installed(auto_yes=True) is True
-
-        # Check that Homebrew install was attempted with NONINTERACTIVE=1
-        homebrew_run = next(r for r in runs if "Homebrew/install" in r[0][2])
-        assert homebrew_run[1].get("env", {}).get("NONINTERACTIVE") == "1"
-        assert "stdout" not in homebrew_run[1]  # Should not be redirected to DEVNULL
+        assert any(c[0] == "sh" and "nvm install" in c[2] for c in cmds_run), cmds_run
 
     def test_windows_winget_install(self, monkeypatch, capsys):
         def mock_which(cmd):
@@ -726,13 +748,8 @@ class TestEnsureNodeInstalled:
             "--accept-source-agreements",
         ] in cmds_run
 
-    def test_linux_apt_get_install(self, monkeypatch, capsys):
-        def mock_which(cmd):
-            if cmd == "apt-get":
-                return "/usr/bin/apt-get"
-            return None
-
-        monkeypatch.setattr("shutil.which", mock_which)
+    def test_linux_nvm_install(self, monkeypatch, capsys):
+        monkeypatch.setattr("shutil.which", lambda cmd: None)
         monkeypatch.setattr("platform.system", lambda: "Linux")
 
         cmds_run = []
@@ -740,22 +757,17 @@ class TestEnsureNodeInstalled:
         def mock_run(cmd, **kwargs):
             cmds_run.append(cmd)
             monkeypatch.setattr(
-                "shutil.which", lambda c: "/bin/cmd" if c in ("node", "npm") else mock_which(c)
+                "shutil.which", lambda c: "/bin/cmd" if c in ("node", "npm") else None
             )
             return MagicMock(returncode=0)
 
         monkeypatch.setattr(installer, "run", mock_run)
         assert installer.ensure_node_installed(auto_yes=True) is True
-        assert ["sudo", "apt-get", "update"] in cmds_run
-        assert ["sudo", "apt-get", "install", "-y", "nodejs", "npm"] in cmds_run
+        # nvm install, never apt-get.
+        assert any(c[0] == "sh" and "nvm install" in c[2] for c in cmds_run), cmds_run
 
     def test_user_declines_install(self, monkeypatch, capsys):
-        def mock_which(cmd):
-            if cmd == "brew":
-                return "/usr/local/bin/brew"
-            return None
-
-        monkeypatch.setattr(installer.shutil, "which", mock_which)
+        monkeypatch.setattr(installer.shutil, "which", lambda cmd: None)
         monkeypatch.setattr(installer.platform, "system", lambda: "Darwin")
 
         input_prompts = []
@@ -767,7 +779,7 @@ class TestEnsureNodeInstalled:
         monkeypatch.setattr("builtins.input", mock_input)
 
         assert installer.ensure_node_installed(auto_yes=False) is False
-        assert any("Install Node.js globally" in p for p in input_prompts)
+        assert any("Install Node.js" in p for p in input_prompts)
 
     def test_path_refresh_after_install(self, monkeypatch, tmp_path):
         """Verify that _update_process_path correctly updates os.environ['PATH']."""
@@ -802,6 +814,78 @@ class TestEnsureNodeInstalled:
         # Now node should be found
         assert str(fake_bin) in os.environ["PATH"]
         assert installer.shutil.which("node") == str(fake_bin / "node")
+
+    def test_nvm_latest_picks_highest_version(self, monkeypatch, tmp_path):
+        """The newest installed Node version's bin dir is returned."""
+        node_root = tmp_path / "versions" / "node"
+        for v in ("v18.20.4", "v20.11.0", "v24.11.1"):
+            (node_root / v / "bin").mkdir(parents=True)
+        monkeypatch.setattr(installer, "_nvm_dir", lambda: tmp_path)
+        assert installer._nvm_latest_node_bin_dir() == str(node_root / "v24.11.1" / "bin")
+
+    def test_nvm_latest_skips_non_version_dirs(self, monkeypatch, tmp_path):
+        """A non-vX.Y.Z dir (e.g. metadata) is never chosen, even with a bin/ child."""
+        node_root = tmp_path / "versions" / "node"
+        (node_root / "v18.20.4" / "bin").mkdir(parents=True)
+        # A junk directory that has a bin/ child but no parseable version.
+        (node_root / "cache" / "bin").mkdir(parents=True)
+        monkeypatch.setattr(installer, "_nvm_dir", lambda: tmp_path)
+        assert installer._nvm_latest_node_bin_dir() == str(node_root / "v18.20.4" / "bin")
+
+    def test_nvm_latest_none_when_only_non_version_dirs(self, monkeypatch, tmp_path):
+        """With no parseable version dir, returns None rather than a bogus path."""
+        node_root = tmp_path / "versions" / "node"
+        (node_root / "cache" / "bin").mkdir(parents=True)
+        monkeypatch.setattr(installer, "_nvm_dir", lambda: tmp_path)
+        assert installer._nvm_latest_node_bin_dir() is None
+
+    def test_system_node_not_writable_forces_nvm_never_sudo(self, monkeypatch, capsys):
+        """A system Node with a root-owned global prefix triggers a per-user nvm install — never sudo."""
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/usr/bin/" + cmd if cmd in ("node", "npm") else None
+        )
+        monkeypatch.setattr("platform.system", lambda: "Linux")
+        monkeypatch.setattr(installer, "_npm_global_prefix_writable", lambda: False)
+
+        cmds_run = []
+        monkeypatch.setattr(
+            installer, "run", lambda cmd, **k: cmds_run.append(cmd) or MagicMock(returncode=0)
+        )
+
+        assert installer.ensure_node_installed(auto_yes=True, node_version="24.11.1") is True
+        assert "not writable" in capsys.readouterr().out
+        # Installs a per-user Node via nvm; never escalates with sudo.
+        assert any(c[0] == "sh" and "nvm install" in c[2] for c in cmds_run), cmds_run
+        assert not any(c and c[0] == "sudo" for c in cmds_run)
+
+    def test_snyk_install_never_uses_sudo(self, monkeypatch):
+        """The Snyk CLI global install is always a plain `npm install -g`, never sudo."""
+        monkeypatch.setattr("shutil.which", lambda cmd: None)
+        monkeypatch.setattr("sys.platform", "linux")
+        monkeypatch.setattr(installer, "ensure_node_installed", lambda *_: True)
+
+        cmds_run = []
+        monkeypatch.setattr(
+            installer, "run", lambda cmd, **k: cmds_run.append(cmd) or MagicMock(returncode=0)
+        )
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+
+        installer.check_prerequisites(auto_yes=True)
+        assert ["npm", "install", "-g", "snyk"] in cmds_run
+        assert not any(c and c[0] == "sudo" for c in cmds_run)
+
+    def test_npm_global_prefix_writable_probes_npm_prefix(self, monkeypatch, tmp_path):
+        """A writable prefix reported by `npm prefix -g` yields True; an exception yields True."""
+        monkeypatch.setattr(
+            installer, "run", lambda *a, **k: MagicMock(stdout=str(tmp_path) + "\n")
+        )
+        assert installer._npm_global_prefix_writable() is True
+
+        def boom(*a, **k):
+            raise RuntimeError("npm missing")
+
+        monkeypatch.setattr(installer, "run", boom)
+        assert installer._npm_global_prefix_writable() is True
 
 
 # ===========================================================================
@@ -2070,6 +2154,99 @@ class TestConflictResolution:
             manifest.resolve_extension_conflicts([str(settings_file)])
 
         assert "Failed to update settings file" in capsys.readouterr().out
+
+
+# ===========================================================================
+# TestConflictPromptAutoYes
+# ===========================================================================
+
+
+class TestConflictPromptAutoYes:
+    """The -y flag must auto-accept the rule/skill conflict prompts."""
+
+    @staticmethod
+    def _args():
+        return MagicMock(
+            list_mode=False,
+            yes=True,
+            dry_run=False,
+            control_identifier=None,
+            uninstall=False,
+            verify=False,
+            ade=None,
+            profile="default",
+            workspace=None,
+            no_latest_deps=False,
+        )
+
+    def _stub_main(self, monkeypatch, manifest, ade="cursor"):
+        monkeypatch.setattr(installer, "parse_args", lambda: self._args())
+        monkeypatch.setattr(installer, "PayloadContext", lambda: MagicMock())
+        monkeypatch.setattr(installer, "Manifest", lambda *a, **kw: manifest)
+        monkeypatch.setattr(installer, "check_prerequisites", lambda *a, **kw: None)
+        monkeypatch.setattr(installer, "get_target_ades", lambda *a, **kw: [ade])
+        monkeypatch.setattr(installer, "resolve_workspace", lambda *a, **kw: None)
+        monkeypatch.setattr(installer, "show_plan", lambda *a, **kw: None)
+        monkeypatch.setattr(installer, "install_recipe", lambda *a, **kw: None)
+        monkeypatch.setattr(installer, "install_workspace_recipe", lambda *a, **kw: None)
+        monkeypatch.setattr(installer, "verify_recipe", lambda *a, **kw: True)
+        monkeypatch.setattr(installer, "print_banner", lambda: None)
+
+        def boom(*_a, **_kw):
+            raise AssertionError("input() must not be called when -y is set")
+
+        monkeypatch.setattr("builtins.input", boom)
+
+    @staticmethod
+    def _base_manifest():
+        m = MagicMock()
+        m.resolve_recipes.return_value = []
+        m.detect_stale_conflicts.return_value = []
+        m.are_extension_settings_conflicting.return_value = []
+        m.are_rules_conflicting.return_value = False
+        m.are_skills_conflicting.return_value = False
+        m.is_workspace_scoped.return_value = False
+        return m
+
+    def test_rules_conflict_auto_accepts_under_yes(self, monkeypatch, capsys):
+        manifest = self._base_manifest()
+        manifest.are_rules_conflicting.return_value = True
+        manifest.get_conflicting_resource_scope.return_value = ["workspace"]
+        self._stub_main(monkeypatch, manifest)
+
+        cmds: list = []
+        monkeypatch.setattr(
+            installer,
+            "run",
+            lambda cmd, **kw: cmds.append(cmd) or MagicMock(returncode=0),
+        )
+
+        installer.main()
+
+        manifest.get_conflicting_resource_scope.assert_any_call("cursor", "rules")
+        assert any(isinstance(c, list) and c[:3] == ["snyk", "mcp", "configure"] for c in cmds), (
+            f"expected snyk mcp configure invocation, got {cmds}"
+        )
+
+    def test_skills_conflict_auto_accepts_under_yes(self, monkeypatch, capsys):
+        manifest = self._base_manifest()
+        manifest.are_skills_conflicting.return_value = True
+        manifest.get_conflicting_resource_scope.return_value = ["global"]
+        self._stub_main(monkeypatch, manifest)
+
+        cmds: list = []
+        monkeypatch.setattr(
+            installer,
+            "run",
+            lambda cmd, **kw: cmds.append(cmd) or MagicMock(returncode=0),
+        )
+
+        installer.main()
+
+        manifest.get_conflicting_resource_scope.assert_any_call("cursor", "skills")
+        assert any(isinstance(c, list) and c[:3] == ["snyk", "mcp", "configure"] for c in cmds), (
+            f"expected snyk mcp configure invocation, got {cmds}"
+        )
 
 
 # ===========================================================================

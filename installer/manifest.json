@@ -3,6 +3,7 @@
   "description": "Snyk Studio Recipes - Default Distribution",
   "prerequisites": {
     "uv": "0.11.19",
+    "nvm": "0.40.3",
     "node": "24.11.1",
     "snyk": "1.1304.0"
   },

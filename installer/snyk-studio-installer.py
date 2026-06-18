@@ -2321,26 +2321,34 @@ def main() -> None:
             )
         if manifest.are_rules_conflicting(ade):
             print(f"  {C.yellow('WARNING')} Conflicting rule(s) found for: {ade}")
-            reply = (
-                input(
-                    f"  Run 'snyk mcp configure' to remove the conflicting rules for {ade}? (y/n) "
+            if args.yes:
+                accept = True
+            else:
+                reply = (
+                    input(
+                        f"  Run 'snyk mcp configure' to remove the conflicting rules for {ade}? (y/n) "
+                    )
+                    .strip()
+                    .lower()
                 )
-                .strip()
-                .lower()
-            )
-            if reply in ("y", "yes"):
+                accept = reply in ("y", "yes")
+            if accept:
                 for scope in manifest.get_conflicting_resource_scope(ade, "rules"):
                     remove_legacy_SAI_directives(ade, scope)
         if manifest.are_skills_conflicting(ade):
             print(f"  {C.yellow('WARNING')} Conflicting skill(s) found for: {ade}")
-            reply = (
-                input(
-                    f"  Run 'snyk mcp configure' to remove the conflicting skills for {ade}? (y/n) "
+            if args.yes:
+                accept = True
+            else:
+                reply = (
+                    input(
+                        f"  Run 'snyk mcp configure' to remove the conflicting skills for {ade}? (y/n) "
+                    )
+                    .strip()
+                    .lower()
                 )
-                .strip()
-                .lower()
-            )
-            if reply in ("y", "yes"):
+                accept = reply in ("y", "yes")
+            if accept:
                 for scope in manifest.get_conflicting_resource_scope(ade, "skills"):
                     remove_legacy_SAI_directives(ade, scope)
 

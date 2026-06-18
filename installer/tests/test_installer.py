@@ -2073,6 +2073,99 @@ class TestConflictResolution:
 
 
 # ===========================================================================
+# TestConflictPromptAutoYes
+# ===========================================================================
+
+
+class TestConflictPromptAutoYes:
+    """The -y flag must auto-accept the rule/skill conflict prompts."""
+
+    @staticmethod
+    def _args():
+        return MagicMock(
+            list_mode=False,
+            yes=True,
+            dry_run=False,
+            control_identifier=None,
+            uninstall=False,
+            verify=False,
+            ade=None,
+            profile="default",
+            workspace=None,
+            no_latest_deps=False,
+        )
+
+    def _stub_main(self, monkeypatch, manifest, ade="cursor"):
+        monkeypatch.setattr(installer, "parse_args", lambda: self._args())
+        monkeypatch.setattr(installer, "PayloadContext", lambda: MagicMock())
+        monkeypatch.setattr(installer, "Manifest", lambda *a, **kw: manifest)
+        monkeypatch.setattr(installer, "check_prerequisites", lambda *a, **kw: None)
+        monkeypatch.setattr(installer, "get_target_ades", lambda *a, **kw: [ade])
+        monkeypatch.setattr(installer, "resolve_workspace", lambda *a, **kw: None)
+        monkeypatch.setattr(installer, "show_plan", lambda *a, **kw: None)
+        monkeypatch.setattr(installer, "install_recipe", lambda *a, **kw: None)
+        monkeypatch.setattr(installer, "install_workspace_recipe", lambda *a, **kw: None)
+        monkeypatch.setattr(installer, "verify_recipe", lambda *a, **kw: True)
+        monkeypatch.setattr(installer, "print_banner", lambda: None)
+
+        def boom(*_a, **_kw):
+            raise AssertionError("input() must not be called when -y is set")
+
+        monkeypatch.setattr("builtins.input", boom)
+
+    @staticmethod
+    def _base_manifest():
+        m = MagicMock()
+        m.resolve_recipes.return_value = []
+        m.detect_stale_conflicts.return_value = []
+        m.are_extension_settings_conflicting.return_value = []
+        m.are_rules_conflicting.return_value = False
+        m.are_skills_conflicting.return_value = False
+        m.is_workspace_scoped.return_value = False
+        return m
+
+    def test_rules_conflict_auto_accepts_under_yes(self, monkeypatch, capsys):
+        manifest = self._base_manifest()
+        manifest.are_rules_conflicting.return_value = True
+        manifest.get_conflicting_resource_scope.return_value = ["workspace"]
+        self._stub_main(monkeypatch, manifest)
+
+        cmds: list = []
+        monkeypatch.setattr(
+            installer,
+            "run",
+            lambda cmd, **kw: cmds.append(cmd) or MagicMock(returncode=0),
+        )
+
+        installer.main()
+
+        manifest.get_conflicting_resource_scope.assert_any_call("cursor", "rules")
+        assert any(isinstance(c, list) and c[:3] == ["snyk", "mcp", "configure"] for c in cmds), (
+            f"expected snyk mcp configure invocation, got {cmds}"
+        )
+
+    def test_skills_conflict_auto_accepts_under_yes(self, monkeypatch, capsys):
+        manifest = self._base_manifest()
+        manifest.are_skills_conflicting.return_value = True
+        manifest.get_conflicting_resource_scope.return_value = ["global"]
+        self._stub_main(monkeypatch, manifest)
+
+        cmds: list = []
+        monkeypatch.setattr(
+            installer,
+            "run",
+            lambda cmd, **kw: cmds.append(cmd) or MagicMock(returncode=0),
+        )
+
+        installer.main()
+
+        manifest.get_conflicting_resource_scope.assert_any_call("cursor", "skills")
+        assert any(isinstance(c, list) and c[:3] == ["snyk", "mcp", "configure"] for c in cmds), (
+            f"expected snyk mcp configure invocation, got {cmds}"
+        )
+
+
+# ===========================================================================
 # TestMacMcpLogic
 # ===========================================================================
 

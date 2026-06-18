@@ -21,10 +21,22 @@ executors:
       - image: cimg/go:1.21
     resource_class: medium
 
+parameters:
+  create_release:
+    description: When true, run the build/sign/release workflow.
+    type: boolean
+    default: false
+  release-version:
+    description: Version for the GitHub release/tag, of the form N.N.N (e.g. 1.0.2). Required when create_release is true.
+    type: string
+    default: ""
+
 workflows:
-  # Existing CI on every branch push: scans + build, but no signing or releasing.
-  # Jobs here have no tag filter, so this workflow does not run on tag pushes.
+  # Existing CI on every push (skipped when manually triggering a release):
+  # scans + build, but no signing or releasing.
   CICD:
+    when:
+      not: << pipeline.parameters.create_release >>
     jobs:
       - prodsec/secrets-scan:
           name: Scan repository for secrets
@@ -43,28 +55,22 @@ workflows:
       - installer-build:
           name: Build Installer Binaries
 
-  # Release: triggered by pushing a vN.N.N tag (e.g. v1.0.2).
+
   release-installer:
+    when: << pipeline.parameters.create_release >>
     jobs:
-      - verify-tag-on-main:
-          name: Verify Tag On Main
-          filters: &release_tag_filters
-            tags:
-              only: /^v\d+\.\d+\.\d+$/
-            branches:
-              ignore: /.*/
+      - validate-release:
+          name: Validate Release
 
       - security-scans:
           name: Security Scans
           context: productinfra-agentic-dev-sos
-          filters: *release_tag_filters
 
       - installer-build:
           name: Build Installer Binaries
           requires:
-            - Verify Tag On Main
+            - Validate Release
             - Security Scans
-          filters: *release_tag_filters
 
       - sign-installer-macos:
           name: Sign Installer (macOS)
@@ -72,7 +78,6 @@ workflows:
             - mcp-scan-release
           requires:
             - Build Installer Binaries
-          filters: *release_tag_filters
 
       - sign-installer-windows:
           name: Sign Installer (Windows)
@@ -80,14 +85,12 @@ workflows:
             - agent-scan-windows-signing
           requires:
             - Build Installer Binaries
-          filters: *release_tag_filters
 
       - installer-generate-artifacts:
           name: Generate Installer Artifacts
           requires:
             - Sign Installer (macOS)
             - Sign Installer (Windows)
-          filters: *release_tag_filters
 
       - installer-create-github-release:
           name: Create GitHub Release
@@ -95,7 +98,6 @@ workflows:
             - github-release
           requires:
             - Generate Installer Artifacts
-          filters: *release_tag_filters
 
 jobs:
   # Existing security scanning (runs on every branch).
@@ -114,23 +116,12 @@ jobs:
   # INSTALLER RELEASE JOBS
   # --------------------------------------------------------------------------
 
-  # Fail-fast gate: CircleCI tag filters can't restrict a tag to a branch, so
-  # verify here that the tagged commit is contained in origin/main and refuse
-  # to release otherwise. The rest of the release jobs require this.
-  verify-tag-on-main:
+  # Fail-fast gate: refuse to release unless release-version is N.N.N.
+  # The rest of the release jobs require this.
+  validate-release:
     executor: installer_linux
     steps:
-      - checkout
-      - run:
-          name: Verify tag is on main
-          command: |
-            git fetch --force origin main:refs/remotes/origin/main
-            if git merge-base --is-ancestor "$CIRCLE_SHA1" origin/main; then
-              echo "OK: tag $CIRCLE_TAG ($CIRCLE_SHA1) is contained in main."
-            else
-              echo "ERROR: tag $CIRCLE_TAG ($CIRCLE_SHA1) is not on main; refusing to release." >&2
-              exit 1
-            fi
+      - determine_version
 
   # Cross-compiles all six Go installer binaries in one shot via
   # build_installer.py (which stages the recipe bundle into go/bundle/ for
@@ -260,18 +251,19 @@ jobs:
 commands:
   determine_version:
     description: >
-      Resolve VERSION and GITHUB_TAG from the git tag that triggered the
-      pipeline (CIRCLE_TAG, e.g. v1.0.2). Exports both into $BASH_ENV.
+      Validate the release-version pipeline parameter (must be N.N.N) and export
+      VERSION and GITHUB_TAG (vN.N.N) into $BASH_ENV. Fails the job otherwise.
     steps:
       - run:
           name: Determine version
           command: |
-            GITHUB_TAG="${CIRCLE_TAG}"
-            if [ -z "$GITHUB_TAG" ]; then
-              echo "ERROR: CIRCLE_TAG is empty; this runs only on vN.N.N tag pushes." >&2
+            RAW="<< pipeline.parameters.release-version >>"
+            if ! printf '%s' "$RAW" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "ERROR: release-version must be of the form N.N.N (got: '${RAW:-<empty>}')." >&2
               exit 1
             fi
-            VERSION="${GITHUB_TAG#v}"
+            VERSION="$RAW"
+            GITHUB_TAG="v${VERSION}"
             echo "export VERSION=$VERSION" >> "$BASH_ENV"
             echo "export GITHUB_TAG=$GITHUB_TAG" >> "$BASH_ENV"
             echo "Resolved version: $VERSION (tag: $GITHUB_TAG)"

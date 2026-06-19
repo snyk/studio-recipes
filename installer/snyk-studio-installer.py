@@ -50,13 +50,23 @@ WORKSPACE = "workspace"
 
 _IS_WINDOWS = sys.platform == "win32"
 
-# When the installer runs inside a GUI ADE (no attached console), spawning a
-# console subprocess via shell=True (which goes through cmd.exe) pops up a
-# console window. CREATE_NO_WINDOW suppresses it. The flag only exists on
-# Windows; elsewhere this is 0 (subprocess's default creationflags, i.e. no-op).
+# Windows-only setup:
+# - CREATE_NO_WINDOW suppresses the console window that would otherwise pop up
+#   when the installer (running inside a GUI ADE with no attached console)
+#   spawns a subprocess via shell=True. Elsewhere the flag is 0 (no-op).
+# - stdout/stderr reconfigure: when stdout isn't a console (e.g. piped by a CI
+#   runner), Python defaults to the active code page (cp1252 on most locales),
+#   which can't encode the box-drawing chars in the banner and separators.
+#   UTF-8 covers every char we emit; the try/except keeps unusual stream
+#   replacements (test doubles, GUI wrappers) safe.
 _CREATE_NO_WINDOW = 0
-if sys.platform == "win32":
-    _CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW
+if _IS_WINDOWS:
+    _CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="backslashreplace")  # type: ignore[union-attr]
+        except Exception:
+            pass
 
 
 # =============================================================================

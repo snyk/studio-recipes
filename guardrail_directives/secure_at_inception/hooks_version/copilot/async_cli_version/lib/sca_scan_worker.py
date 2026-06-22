@@ -194,7 +194,7 @@ def main() -> None:
         _device_id = os.path.join(os.path.expanduser("~"), ".snyk-studio", "device-id")
         _machine_id = open(_device_id, encoding="utf-8-sig").read().strip()
         if _machine_id:
-            env["SNYK_CLIENT_MACHINE_ID"] = _machine_id
+            env["INTERNAL_SNYK_CLIENT_MACHINE_ID"] = _machine_id
     except Exception:
         pass
 

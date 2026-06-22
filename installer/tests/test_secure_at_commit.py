@@ -1230,7 +1230,7 @@ class TestSnykEnv:
 
         monkeypatch.setattr("builtins.open", mock_open)
         env = sac_hook._snyk_env()
-        assert env["SNYK_CLIENT_MACHINE_ID"] == "my-device-id"
+        assert env["INTERNAL_SNYK_CLIENT_MACHINE_ID"] == "my-device-id"
 
     def test_machine_id_absent_when_file_missing(self, monkeypatch):
         import builtins
@@ -1244,7 +1244,7 @@ class TestSnykEnv:
 
         monkeypatch.setattr("builtins.open", mock_open)
         env = sac_hook._snyk_env()
-        assert "SNYK_CLIENT_MACHINE_ID" not in env
+        assert "INTERNAL_SNYK_CLIENT_MACHINE_ID" not in env
 
     def test_machine_id_absent_when_file_empty(self, monkeypatch):
         import builtins
@@ -1259,7 +1259,7 @@ class TestSnykEnv:
 
         monkeypatch.setattr("builtins.open", mock_open)
         env = sac_hook._snyk_env()
-        assert "SNYK_CLIENT_MACHINE_ID" not in env
+        assert "INTERNAL_SNYK_CLIENT_MACHINE_ID" not in env
 
 
 # ============================================================================

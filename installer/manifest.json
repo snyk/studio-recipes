@@ -211,7 +211,7 @@
         },
         "claude": {
           "config_merge": {
-            "target": ".claude/.mcp.json",
+            "target": ".claude.json",
             "source": "mcp/.mcp.json",
             "strategy": "merge_mcp_servers"
           }

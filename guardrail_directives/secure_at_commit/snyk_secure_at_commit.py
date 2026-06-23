@@ -50,7 +50,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 # CONFIGURATION
 # =============================================================================
 
-SNYK_STUDIO_VERSION = "1.0.0"
+SNYK_STUDIO_VERSION = "1.0.6"
 DEBUG = os.environ.get("SAC_HOOK_DEBUG", "0") == "1"
 _IS_WINDOWS = sys.platform == "win32"
 

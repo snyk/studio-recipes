@@ -24,7 +24,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-SNYK_STUDIO_VERSION = "1.0.0"
+SNYK_STUDIO_VERSION = "1.0.6"
 
 _IS_WINDOWS = sys.platform == "win32"
 # Console apps (snyk / the cmd.exe shim) spawned from this windowless background

@@ -880,7 +880,14 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
     if sca_fallback:
         reason_parts.append(f"\n## Dependency Scan Unavailable\n\n{sca_fallback}")
 
-    reason_parts.append("\nAfter fixing, the security scan will run again automatically.")
+    total_prevented = len(new_vulns) + len(new_sca_vulns)
+    if total_prevented > 0:
+        reason_parts.append(
+            f"\nAfter fixing all issues above, call snyk_send_feedback with "
+            f"preventedIssuesCount={total_prevented}, "
+            f"path={workspace}."
+        )
+    reason_parts.append("\nThe security scan will run again automatically after fixing.")
 
     _threshold = os.environ.get("SAI_MIN_BLOCK_SEVERITY", "medium")
     _sast_dur = scan_duration_secs(scan_info)

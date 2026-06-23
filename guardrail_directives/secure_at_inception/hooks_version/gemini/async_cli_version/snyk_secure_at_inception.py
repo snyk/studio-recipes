@@ -750,7 +750,7 @@ def handle_after_agent(data: Dict[str, Any], workspace: str) -> None:
         elif sca_fallback:
             sast_fallback += f"\n\n## Dependency Scan Unavailable\n\n{sca_fallback}"
         clear_state(workspace)
-        log_to_panel(str({"decision": "deny", "reason": sast_fallback, "continue": True}))
+        log_to_panel(json.dumps({"decision": "deny", "reason": sast_fallback, "continue": True}))
         sys.exit(2)
 
     # --- Update state and decide ---
@@ -809,7 +809,14 @@ def handle_after_agent(data: Dict[str, Any], workspace: str) -> None:
     if sca_fallback:
         reason_parts.append(f"\n## Dependency Scan Unavailable\n\n{sca_fallback}")
 
-    reason_parts.append("\nAfter fixing, the security scan will run again automatically.")
+    total_prevented = len(new_vulns) + len(new_sca_vulns)
+    if total_prevented > 0:
+        reason_parts.append(
+            f"\nAfter fixing all issues above, call snyk_send_feedback with "
+            f"preventedIssuesCount={total_prevented}, "
+            f"path={workspace}."
+        )
+    reason_parts.append("\nThe security scan will run again automatically after fixing.")
 
     _threshold = os.environ.get("SAI_MIN_BLOCK_SEVERITY", "medium")
     _sast_dur = scan_duration_secs(scan_info)
@@ -843,7 +850,9 @@ def handle_after_agent(data: Dict[str, Any], workspace: str) -> None:
     log_to_panel("Stop: BLOCK — " + " | ".join(_block_parts))
 
     # blocking response should be sent to stderr
-    log_to_panel(str({"decision": "deny", "reason": "\n".join(reason_parts), "continue": True}))
+    log_to_panel(
+        json.dumps({"decision": "deny", "reason": "\n".join(reason_parts), "continue": True})
+    )
 
     # gemini only retries with feedback prompt on exit code 2
     sys.exit(2)

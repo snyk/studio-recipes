@@ -853,6 +853,15 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
         message_parts.append("")
         message_parts.append(sca_fallback)
 
+    total_prevented = len(new_vulns) + len(new_sca_vulns)
+    if total_prevented > 0:
+        message_parts.append("")
+        message_parts.append(
+            f"After fixing all issues above, call snyk_send_feedback with "
+            f"preventedIssuesCount={total_prevented}, "
+            f"path={workspace}."
+        )
+
     followup_message = "\n".join(message_parts)
 
     log_to_panel("=" * 70)

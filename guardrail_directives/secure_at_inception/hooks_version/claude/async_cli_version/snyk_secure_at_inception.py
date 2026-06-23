@@ -12,7 +12,7 @@ introduced in agent-modified code.
 
 WORKFLOW:
   1. SessionStart -> verify auth + CLI, launch cache-warming scan
-  2. PostToolUse (Edit|Write) -> track modified line ranges, launch background scan
+  2. PostToolUse (Edit|Write|Bash) -> track modified line ranges / manifest mutations, launch background scan
   3. Stop -> wait for scan, filter results to modified lines, block if new vulns
 
 INSTALLATION:
@@ -28,6 +28,7 @@ PREREQUISITES:
 
 import json
 import os
+import re
 import sys
 from contextlib import contextmanager
 from datetime import datetime
@@ -151,6 +152,31 @@ MANIFEST_FILES = {
 MANIFEST_SUFFIXES = {".csproj", ".lock", ".fsproj", ".vbproj"}
 
 MAX_STOP_CYCLES = 3
+
+# Matches Bash commands that mutate dependency manifests across all ecosystems
+# covered by MANIFEST_FILES / MANIFEST_SUFFIXES.
+_MANIFEST_MUTATION_RE = re.compile(
+    r"""\b(?:
+        npm   \s+ (?:install|i|ci|add|update|up|upgrade|uninstall|remove|rm|prune|shrinkwrap)
+      | yarn  \s+ (?:install|add|remove|upgrade|up)
+      | pnpm  \s+ (?:install|i|add|remove|update|up)
+      | pip[23]?  \s+ (?:install|uninstall|download)
+      | poetry \s+ (?:install|add|remove|update|lock)
+      | uv    \s+ (?:add|remove|sync|pip)
+      | cargo \s+ (?:add|install|remove|update|fetch)
+      | go    \s+ (?:get|mod)
+      | bundle \s+ (?:install|add|remove|update)
+      | gem   \s+ (?:install|uninstall|update)
+      | composer \s+ (?:install|require|remove|update)
+      | (?:gradle|gradlew|mvnw?|maven) \s
+      | pod   \s+ (?:install|update)
+      | swift \s+ package
+      | mix   \s+ deps
+      | flutter \s+ pub
+      | dotnet \s+ (?:add \s+ package|restore)
+    )\b""",
+    re.VERBOSE | re.IGNORECASE,
+)
 
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
@@ -523,6 +549,23 @@ def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
     """Track file edits and launch background scans."""
     tool_name = data.get("tool_name", "")
     tool_input = data.get("tool_input", {})
+
+    # Bash-driven manifest mutations (npm install, pip install, etc.) bypass the
+    # Edit|Write file_path path. Detect them via command pattern and mark dirty so
+    # the Stop hook runs SCA even when no code file was edited.
+    if tool_name == "Bash":
+        command = tool_input.get("command", "")
+        if _MANIFEST_MUTATION_RE.search(command):
+            with _state_lock(workspace):
+                state = read_state(workspace)
+                state["manifest_dirty"] = True
+                state["last_edit_ts"] = datetime.now().isoformat()
+                write_state(workspace, state)
+            log_to_panel("[SAI] Bash manifest mutation detected")
+            if launch_background_sca_scan(workspace):
+                log_to_panel("[SAI] Background SCA scan launched")
+        output_response({})
+        return
 
     file_path = tool_input.get("file_path", "")
     if not file_path:

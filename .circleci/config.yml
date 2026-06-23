@@ -219,6 +219,13 @@ jobs:
               mv "$f" "snyk-studio-${VERSION}-${suffix}"
             done
             ls -lh
+      - run:
+          name: Generate checksums
+          command: |
+            cd dist
+            # exclude signing metadata sidecars; they are not release artifacts
+            sha256sum $(ls -1 | grep -v '\.signingmeta$') > checksums.txt
+            cat checksums.txt
       - persist_to_workspace:
           root: dist
           paths:
@@ -252,6 +259,7 @@ jobs:
               dist/snyk-studio-${VERSION}-macos-x86_64 \
               dist/snyk-studio-${VERSION}-windows-x86_64.exe \
               dist/snyk-studio-${VERSION}-windows-arm64.exe \
+              dist/checksums.txt \
               --clobber
 
   installer-create-s3-release:
@@ -283,6 +291,7 @@ jobs:
               "dist/snyk-studio-${VERSION}-macos-x86_64"
               "dist/snyk-studio-${VERSION}-windows-x86_64.exe"
               "dist/snyk-studio-${VERSION}-windows-arm64.exe"
+              "dist/checksums.txt"
             )
 
             for f in "${files[@]}"; do

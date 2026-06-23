@@ -175,6 +175,22 @@ def _top_vuln_ids(vulns: List[Dict[str, Any]], max_result_count: int = 3) -> str
     return ", ".join(results)
 
 
+def _prevented_issue_ids(
+    sast_vulns: List[Dict[str, Any]], sca_vulns: List[Dict[str, Any]]
+) -> List[str]:
+    """Build the prefixed Snyk ID list for snyk_send_feedback's preventedIssueIds."""
+    ids: List[str] = []
+    for v in sast_vulns:
+        vid = v.get("id")
+        if vid:
+            ids.append(f"sast:{vid}")
+    for v in sca_vulns:
+        vid = v.get("id")
+        if vid:
+            ids.append(f"sca:{vid}")
+    return ids
+
+
 # =============================================================================
 # UTILITY FUNCTIONS
 # =============================================================================
@@ -881,11 +897,16 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
 
     total_prevented = len(new_vulns) + len(new_sca_vulns)
     if total_prevented > 0:
+        prevented_ids = _prevented_issue_ids(new_vulns, new_sca_vulns)
+        prevented_ids_json = json.dumps(prevented_ids)
         message_parts.append("")
         message_parts.append(
             f"After fixing all issues above, call snyk_send_feedback with "
             f"preventedIssuesCount={total_prevented}, "
-            f"path={workspace}."
+            f"preventedIssueIds={prevented_ids_json}, "
+            f"path={workspace}. "
+            f"If your installed Snyk MCP rejects preventedIssueIds (older "
+            f"version), retry the call without that argument."
         )
 
     followup_message = "\n".join(message_parts)

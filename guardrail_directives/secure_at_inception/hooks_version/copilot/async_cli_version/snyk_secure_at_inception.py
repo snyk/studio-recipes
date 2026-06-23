@@ -169,6 +169,22 @@ def _top_vuln_ids(vulns: List[Dict[str, Any]], max_result_count: int = 3) -> str
     return ", ".join(results)
 
 
+def _prevented_issue_ids(
+    sast_vulns: List[Dict[str, Any]], sca_vulns: List[Dict[str, Any]]
+) -> List[str]:
+    """Build the prefixed Snyk ID list for snyk_send_feedback's preventedIssueIds."""
+    ids: List[str] = []
+    for v in sast_vulns:
+        vid = v.get("id")
+        if vid:
+            ids.append(f"sast:{vid}")
+    for v in sca_vulns:
+        vid = v.get("id")
+        if vid:
+            ids.append(f"sca:{vid}")
+    return ids
+
+
 # =============================================================================
 # UTILITY FUNCTIONS
 # =============================================================================
@@ -220,6 +236,14 @@ def get_workspace(data: Dict[str, Any]) -> str:
 
 def is_code_file(file_path: str) -> bool:
     return Path(file_path).suffix.lower() in CODE_EXTENSIONS
+
+
+# Note: Bash-driven manifest mutations (`npm install`, `pip install`, etc.) bypass
+# the postToolUse edit/write matcher and won't set manifest_dirty. The hash-diff
+# in detect_manifest_changes still catches them when some code file is also edited.
+def is_manifest_file(file_path: str) -> bool:
+    p = Path(file_path)
+    return p.name in MANIFEST_FILES or p.suffix.lower() in MANIFEST_SUFFIXES
 
 
 def _parse_tool_args(raw: Any) -> Dict[str, Any]:
@@ -433,6 +457,7 @@ def read_state(workspace: str) -> Dict[str, Any]:
     return {
         "code_files": {},
         "manifest_baseline": {},
+        "manifest_dirty": False,
         "stop_cycles": 0,
         "session_initialized": False,
         "last_update": None,
@@ -459,7 +484,7 @@ def clear_state(workspace: str) -> None:
 
 
 def has_pending_changes(state: Dict[str, Any]) -> bool:
-    return bool(state.get("code_files"))
+    return bool(state.get("code_files")) or bool(state.get("manifest_dirty"))
 
 
 # =============================================================================
@@ -538,91 +563,108 @@ def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
         output_response({})
         return
 
-    if not is_code_file(file_path):
+    is_code = is_code_file(file_path)
+    is_manifest = is_manifest_file(file_path)
+    if not is_code and not is_manifest:
         debug_log(f"File not scannable, ignoring: {file_path}")
         output_response({})
         return
 
-    with _state_lock(workspace):
-        state = read_state(workspace)
-        _initialize_session(workspace, state)
+    if is_code:
+        with _state_lock(workspace):
+            state = read_state(workspace)
+            _initialize_session(workspace, state)
 
-        if edit_kind == "edit":
-            new_content = (
-                tool_args.get("content")
-                or tool_args.get("newContent")
-                or tool_args.get("new_string")
-                or tool_args.get("newString")  # Copilot Chat replace_string_in_file
-                or tool_args.get("code", "")  # Copilot Chat insert_edit_into_file
-            )
-            if new_content:
-                try:
-                    file_content = Path(file_path).read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    file_content = new_content
-                new_ranges = compute_modified_ranges(file_content, [{"new_string": new_content}])
-                if not new_ranges:
-                    line_count = file_content.count("\n") + 1 if file_content else 1
+            if edit_kind == "edit":
+                new_content = (
+                    tool_args.get("content")
+                    or tool_args.get("newContent")
+                    or tool_args.get("new_string")
+                    or tool_args.get("newString")  # Copilot Chat replace_string_in_file
+                    or tool_args.get("code", "")  # Copilot Chat insert_edit_into_file
+                )
+                if new_content:
+                    try:
+                        file_content = Path(file_path).read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        file_content = new_content
+                    new_ranges = compute_modified_ranges(
+                        file_content, [{"new_string": new_content}]
+                    )
+                    if not new_ranges:
+                        line_count = file_content.count("\n") + 1 if file_content else 1
+                        new_ranges = [{"start": 1, "end": line_count}]
+                else:
+                    try:
+                        file_content = Path(file_path).read_text(encoding="utf-8", errors="replace")
+                        line_count = file_content.count("\n") + 1
+                    except OSError:
+                        line_count = 1
                     new_ranges = [{"start": 1, "end": line_count}]
-            else:
-                try:
-                    file_content = Path(file_path).read_text(encoding="utf-8", errors="replace")
-                    line_count = file_content.count("\n") + 1
-                except OSError:
-                    line_count = 1
-                new_ranges = [{"start": 1, "end": line_count}]
 
-            code_files = state.get("code_files", {})
-            existing = code_files.get(file_path, {}).get("modified_ranges", [])
-            code_files[file_path] = {
-                "modified_ranges": _accumulate_ranges(existing, new_ranges),
-                "last_edit": datetime.now().isoformat(),
-            }
-            state["code_files"] = code_files
-        else:  # write / create
-            content = tool_args.get("content", "")
-            if not content:
-                try:
-                    content = Path(file_path).read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    content = ""
-            line_count = content.count("\n") + 1 if content else 1
-            code_files = state.get("code_files", {})
-            code_files[file_path] = {
-                "modified_ranges": [{"start": 1, "end": line_count}],
-                "last_edit": datetime.now().isoformat(),
-            }
-            state["code_files"] = code_files
+                code_files = state.get("code_files", {})
+                existing = code_files.get(file_path, {}).get("modified_ranges", [])
+                code_files[file_path] = {
+                    "modified_ranges": _accumulate_ranges(existing, new_ranges),
+                    "last_edit": datetime.now().isoformat(),
+                }
+                state["code_files"] = code_files
+            else:  # write / create
+                content = tool_args.get("content", "")
+                if not content:
+                    try:
+                        content = Path(file_path).read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        content = ""
+                line_count = content.count("\n") + 1 if content else 1
+                code_files = state.get("code_files", {})
+                code_files[file_path] = {
+                    "modified_ranges": [{"start": 1, "end": line_count}],
+                    "last_edit": datetime.now().isoformat(),
+                }
+                state["code_files"] = code_files
 
-        state["last_edit_ts"] = datetime.now().isoformat()
-        write_state(workspace, state)
-        range_count = len(state["code_files"][file_path]["modified_ranges"])
+            state["last_edit_ts"] = datetime.now().isoformat()
+            write_state(workspace, state)
+            range_count = len(state["code_files"][file_path]["modified_ranges"])
 
-    log_to_panel(f"[SAI] Tracked: {Path(file_path).name} ({range_count} range(s))")
+        log_to_panel(f"[SAI] Tracked: {Path(file_path).name} ({range_count} range(s))")
 
-    # Early error detection: if a prior scan failed for auth/cli reasons,
-    # surface it now so the agent stops introducing more code.
-    scan_info = get_scan_completion_info(workspace)
-    if scan_info:
-        cached_status = scan_info.get("status")
-        if cached_status in ("auth_required", "snyk_not_found"):
-            log_to_panel(f"[SAI] Prerequisite issue detected: {cached_status}")
-            clear_scan_state(workspace)
-            if cached_status == "auth_required":
-                reason = (
-                    "Snyk CLI is not authenticated. Security scanning cannot run. "
-                    "Run `snyk auth` in a terminal to authenticate, then continue editing."
-                )
-            else:
-                reason = (
-                    "Snyk CLI is not installed or not on PATH. Install it with "
-                    "`npm install -g snyk` and authenticate with `snyk auth`."
-                )
-            output_block(reason, data)
-            return
+        # Early error detection: if a prior scan failed for auth/cli reasons,
+        # surface it now so the agent stops introducing more code.
+        scan_info = get_scan_completion_info(workspace)
+        if scan_info:
+            cached_status = scan_info.get("status")
+            if cached_status in ("auth_required", "snyk_not_found"):
+                log_to_panel(f"[SAI] Prerequisite issue detected: {cached_status}")
+                clear_scan_state(workspace)
+                if cached_status == "auth_required":
+                    reason = (
+                        "Snyk CLI is not authenticated. Security scanning cannot run. "
+                        "Run `snyk auth` in a terminal to authenticate, then continue editing."
+                    )
+                else:
+                    reason = (
+                        "Snyk CLI is not installed or not on PATH. Install it with "
+                        "`npm install -g snyk` and authenticate with `snyk auth`."
+                    )
+                output_block(reason, data)
+                return
 
-    if launch_background_scan(workspace):
-        log_to_panel("[SAI] Background scan launched")
+        if launch_background_scan(workspace):
+            log_to_panel("[SAI] Background scan launched")
+
+    if is_manifest:
+        with _state_lock(workspace):
+            state = read_state(workspace)
+            _initialize_session(workspace, state)
+            state["manifest_dirty"] = True
+            state["last_edit_ts"] = datetime.now().isoformat()
+            write_state(workspace, state)
+
+        log_to_panel(f"[SAI] Manifest edit tracked: {Path(file_path).name}")
+        if launch_background_sca_scan(workspace):
+            log_to_panel("[SAI] Background SCA scan launched")
 
     output_response({})
 
@@ -649,6 +691,7 @@ def handle_agent_stop(data: Dict[str, Any], workspace: str) -> None:
         write_state(workspace, state)
 
     code_files = state.get("code_files", {})
+    manifest_dirty = bool(state.get("manifest_dirty", False))
 
     new_vulns: List[Dict[str, Any]] = []
     new_sca_vulns: List[Dict[str, Any]] = []
@@ -658,6 +701,7 @@ def handle_agent_stop(data: Dict[str, Any], workspace: str) -> None:
     sast_fallback = ""
     sca_fallback = ""
     changed_manifests: List[str] = []
+    scan_info: Optional[Dict[str, Any]] = None
 
     if code_files:
         scan_status = wait_for_scan(workspace, log_fn=log_to_panel)
@@ -742,7 +786,7 @@ def handle_agent_stop(data: Dict[str, Any], workspace: str) -> None:
 
     sca_duration: Optional[float] = None
     baseline_keys = None
-    if code_files:
+    if code_files or manifest_dirty:
         changed_manifests = detect_manifest_changes(
             workspace, state.get("manifest_baseline", {}), MANIFEST_FILES, MANIFEST_SUFFIXES
         )
@@ -856,7 +900,19 @@ def handle_agent_stop(data: Dict[str, Any], workspace: str) -> None:
     if sca_fallback:
         reason_parts.append(f"\n## Dependency Scan Unavailable\n\n{sca_fallback}")
 
-    reason_parts.append("\nAfter fixing, the security scan will run again automatically.")
+    total_prevented = len(new_vulns) + len(new_sca_vulns)
+    if total_prevented > 0:
+        prevented_ids = _prevented_issue_ids(new_vulns, new_sca_vulns)
+        prevented_ids_json = json.dumps(prevented_ids)
+        reason_parts.append(
+            f"\nAfter fixing all issues above, call snyk_send_feedback with "
+            f"preventedIssuesCount={total_prevented}, "
+            f"preventedIssueIds={prevented_ids_json}, "
+            f"path={workspace}. "
+            f"If your installed Snyk MCP rejects preventedIssueIds (older "
+            f"version), retry the call without that argument."
+        )
+    reason_parts.append("\nThe security scan will run again automatically after fixing.")
 
     _threshold = os.environ.get("SAI_MIN_BLOCK_SEVERITY", "medium")
     _sast_dur = scan_duration_secs(scan_info)

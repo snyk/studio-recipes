@@ -5,7 +5,7 @@
     "uv": "0.11.19",
     "nvm": "0.40.3",
     "node": "24.11.1",
-    "snyk": "1.1304.0"
+    "snyk": "1.1305.2"
   },
   "recipes": {
     "sai-hooks-async": {
@@ -211,7 +211,7 @@
         },
         "claude": {
           "config_merge": {
-            "target": ".claude/.mcp.json",
+            "target": ".claude.json",
             "source": "mcp/.mcp.json",
             "strategy": "merge_mcp_servers"
           }

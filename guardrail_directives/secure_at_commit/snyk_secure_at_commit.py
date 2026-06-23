@@ -50,7 +50,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 # CONFIGURATION
 # =============================================================================
 
-SNYK_STUDIO_VERSION = "1.0.0"
+SNYK_STUDIO_VERSION = "1.0.6"
 DEBUG = os.environ.get("SAC_HOOK_DEBUG", "0") == "1"
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -574,7 +574,7 @@ def _snyk_env() -> Dict[str, str]:
         _device_id = os.path.join(os.path.expanduser("~"), ".snyk-studio", "device-id")
         _machine_id = open(_device_id, encoding="utf-8-sig").read().strip()
         if _machine_id:
-            env["SNYK_CLIENT_MACHINE_ID"] = _machine_id
+            env["INTERNAL_SNYK_CLIENT_MACHINE_ID"] = _machine_id
     except Exception:
         pass
 

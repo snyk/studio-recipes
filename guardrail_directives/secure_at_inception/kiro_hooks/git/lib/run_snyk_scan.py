@@ -24,7 +24,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-SNYK_STUDIO_VERSION = "1.0.0"
+SNYK_STUDIO_VERSION = "1.0.6"
 
 _IS_WINDOWS = sys.platform == "win32"
 # Console apps (snyk / the cmd.exe shim) spawned from this windowless background
@@ -178,7 +178,7 @@ def run_snyk_cli(args: List[str], timeout: int = 300) -> tuple[int, str, str]:
         _device_id = os.path.join(os.path.expanduser("~"), ".snyk-studio", "device-id")
         _machine_id = open(_device_id, encoding="utf-8-sig").read().strip()
         if _machine_id:
-            env["SNYK_CLIENT_MACHINE_ID"] = _machine_id
+            env["INTERNAL_SNYK_CLIENT_MACHINE_ID"] = _machine_id
     except Exception:
         pass
 

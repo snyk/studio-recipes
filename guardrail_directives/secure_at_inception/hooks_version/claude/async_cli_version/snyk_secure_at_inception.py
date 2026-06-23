@@ -12,7 +12,7 @@ introduced in agent-modified code.
 
 WORKFLOW:
   1. SessionStart -> verify auth + CLI, launch cache-warming scan
-  2. PostToolUse (Edit|Write) -> track modified line ranges, launch background scan
+  2. PostToolUse (Edit|Write|Bash) -> track modified line ranges / manifest mutations, launch background scan
   3. Stop -> wait for scan, filter results to modified lines, block if new vulns
 
 INSTALLATION:
@@ -28,6 +28,7 @@ PREREQUISITES:
 
 import json
 import os
+import re
 import sys
 from contextlib import contextmanager
 from datetime import datetime
@@ -152,6 +153,31 @@ MANIFEST_SUFFIXES = {".csproj", ".lock", ".fsproj", ".vbproj"}
 
 MAX_STOP_CYCLES = 3
 
+# Matches Bash commands that mutate dependency manifests across all ecosystems
+# covered by MANIFEST_FILES / MANIFEST_SUFFIXES.
+_MANIFEST_MUTATION_RE = re.compile(
+    r"""\b(?:
+        npm   \s+ (?:install|i|ci|add|update|up|upgrade|uninstall|remove|rm|prune|shrinkwrap)
+      | yarn  \s+ (?:install|add|remove|upgrade|up)
+      | pnpm  \s+ (?:install|i|add|remove|update|up)
+      | pip[23]?  \s+ (?:install|uninstall|download)
+      | poetry \s+ (?:install|add|remove|update|lock)
+      | uv    \s+ (?:add|remove|sync|pip)
+      | cargo \s+ (?:add|install|remove|update|fetch)
+      | go    \s+ (?:get|mod)
+      | bundle \s+ (?:install|add|remove|update)
+      | gem   \s+ (?:install|uninstall|update)
+      | composer \s+ (?:install|require|remove|update)
+      | (?:gradle|gradlew|mvnw?|maven) \s
+      | pod   \s+ (?:install|update)
+      | swift \s+ package
+      | mix   \s+ deps
+      | flutter \s+ pub
+      | dotnet \s+ (?:add \s+ package|restore)
+    )\b""",
+    re.VERBOSE | re.IGNORECASE,
+)
+
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 
@@ -173,6 +199,22 @@ def _top_vuln_ids(vulns: List[Dict[str, Any]], max_result_count: int = 3) -> str
         if vuln_id:
             results.append(f"{vuln_id}({vuln.get('severity', 'unknown')})")
     return ", ".join(results)
+
+
+def _prevented_issue_ids(
+    sast_vulns: List[Dict[str, Any]], sca_vulns: List[Dict[str, Any]]
+) -> List[str]:
+    """Build the prefixed Snyk ID list for snyk_send_feedback's preventedIssueIds."""
+    ids: List[str] = []
+    for v in sast_vulns:
+        vid = v.get("id")
+        if vid:
+            ids.append(f"sast:{vid}")
+    for v in sca_vulns:
+        vid = v.get("id")
+        if vid:
+            ids.append(f"sca:{vid}")
+    return ids
 
 
 # =============================================================================
@@ -210,6 +252,14 @@ def get_workspace(data: Dict[str, Any]) -> str:
 
 def is_code_file(file_path: str) -> bool:
     return Path(file_path).suffix.lower() in CODE_EXTENSIONS
+
+
+# Note: Bash-driven manifest mutations (`npm install`, `pip install`, etc.) bypass
+# the Edit|Write PostToolUse matcher and won't populate manifest_edits. The hash-diff
+# in detect_manifest_changes still catches them when some code file is also edited.
+def is_manifest_file(file_path: str) -> bool:
+    p = Path(file_path)
+    return p.name in MANIFEST_FILES or p.suffix.lower() in MANIFEST_SUFFIXES
 
 
 # =============================================================================
@@ -388,7 +438,13 @@ def read_state(workspace: str) -> Dict[str, Any]:
                 return cast(Dict[str, Any], json.load(f))
     except (OSError, json.JSONDecodeError):
         pass
-    return {"code_files": {}, "manifest_baseline": {}, "stop_cycles": 0, "last_update": None}
+    return {
+        "code_files": {},
+        "manifest_baseline": {},
+        "manifest_dirty": False,
+        "stop_cycles": 0,
+        "last_update": None,
+    }
 
 
 def write_state(workspace: str, state: Dict[str, Any]) -> None:
@@ -411,7 +467,7 @@ def clear_state(workspace: str) -> None:
 
 
 def has_pending_changes(state: Dict[str, Any]) -> bool:
-    return bool(state.get("code_files"))
+    return bool(state.get("code_files")) or bool(state.get("manifest_dirty"))
 
 
 # =============================================================================
@@ -510,21 +566,44 @@ def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
     tool_name = data.get("tool_name", "")
     tool_input = data.get("tool_input", {})
 
+    # Bash-driven manifest mutations (npm install, pip install, etc.) bypass the
+    # Edit|Write file_path path. Detect them via command pattern and mark dirty so
+    # the Stop hook runs SCA even when no code file was edited.
+    if tool_name == "Bash":
+        command = tool_input.get("command", "")
+        if _MANIFEST_MUTATION_RE.search(command):
+            with _state_lock(workspace):
+                state = read_state(workspace)
+                state["manifest_dirty"] = True
+                state["last_edit_ts"] = datetime.now().isoformat()
+                write_state(workspace, state)
+            log_to_panel("[SAI] Bash manifest mutation detected")
+            if launch_background_sca_scan(workspace):
+                log_to_panel("[SAI] Background SCA scan launched")
+        output_response({})
+        return
+
     file_path = tool_input.get("file_path", "")
     if not file_path:
         output_response({})
         return
 
-    if is_code_file(file_path):
-        # Write a persistent marker that survives clear_state() so tests and
-        # diagnostics can confirm the hook fired regardless of later cleanup.
-        try:
-            ensure_cache_dirs(workspace)
-            with open(get_invocation_marker_path(workspace), "a") as _mf:
-                _mf.write(datetime.now().isoformat() + "\n")
-        except OSError:
-            pass
+    is_code = is_code_file(file_path)
+    is_manifest = is_manifest_file(file_path)
+    if not is_code and not is_manifest:
+        debug_log(f"File not scannable, ignoring: {file_path}")
+        output_response({})
+        return
 
+    # Persistent invocation marker survives clear_state(); useful for diagnostics.
+    try:
+        ensure_cache_dirs(workspace)
+        with open(get_invocation_marker_path(workspace), "a") as _mf:
+            _mf.write(datetime.now().isoformat() + "\n")
+    except OSError:
+        pass
+
+    if is_code:
         with _state_lock(workspace):
             state = read_state(workspace)
 
@@ -592,8 +671,16 @@ def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
         if launch_background_scan(workspace):
             log_to_panel("[SAI] Background scan launched")
 
-    else:
-        debug_log(f"File not scannable, ignoring: {file_path}")
+    if is_manifest:
+        with _state_lock(workspace):
+            state = read_state(workspace)
+            state["manifest_dirty"] = True
+            state["last_edit_ts"] = datetime.now().isoformat()
+            write_state(workspace, state)
+
+        log_to_panel(f"[SAI] Manifest edit tracked: {Path(file_path).name}")
+        if launch_background_sca_scan(workspace):
+            log_to_panel("[SAI] Background SCA scan launched")
 
     output_response({})
 
@@ -621,6 +708,7 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
         write_state(workspace, state)
 
     code_files = state.get("code_files", {})
+    manifest_dirty = bool(state.get("manifest_dirty", False))
 
     new_vulns: List[Dict[str, Any]] = []
     new_sca_vulns: List[Dict[str, Any]] = []
@@ -630,6 +718,7 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
     sast_fallback = ""
     sca_fallback = ""
     changed_manifests: List[str] = []
+    scan_info: Optional[Dict[str, Any]] = None
 
     # --- Wait for SAST scan and evaluate results ---
     if code_files:
@@ -722,7 +811,7 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
     # --- Detect manifest changes and conditionally clear stale SCA state ---
     sca_duration: Optional[float] = None
     baseline_keys = None
-    if code_files:
+    if code_files or manifest_dirty:
         changed_manifests = detect_manifest_changes(
             workspace, state.get("manifest_baseline", {}), MANIFEST_FILES, MANIFEST_SUFFIXES
         )
@@ -850,7 +939,19 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
     if sca_fallback:
         reason_parts.append(f"\n## Dependency Scan Unavailable\n\n{sca_fallback}")
 
-    reason_parts.append("\nAfter fixing, the security scan will run again automatically.")
+    total_prevented = len(new_vulns) + len(new_sca_vulns)
+    if total_prevented > 0:
+        prevented_ids = _prevented_issue_ids(new_vulns, new_sca_vulns)
+        prevented_ids_json = json.dumps(prevented_ids)
+        reason_parts.append(
+            f"\nAfter fixing all issues above, call snyk_send_feedback with "
+            f"preventedIssuesCount={total_prevented}, "
+            f"preventedIssueIds={prevented_ids_json}, "
+            f"path={workspace}. "
+            f"If your installed Snyk MCP rejects preventedIssueIds (older version), "
+            f"retry the call without that argument."
+        )
+    reason_parts.append("\nThe security scan will run again automatically after fixing.")
 
     _threshold = os.environ.get("SAI_MIN_BLOCK_SEVERITY", "medium")
     _sast_dur = scan_duration_secs(scan_info)

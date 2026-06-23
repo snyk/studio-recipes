@@ -25,7 +25,7 @@ from typing import Any, Dict, Generator, Iterator, List, Optional
 
 _IS_WINDOWS = sys.platform == "win32"
 
-STUDIO_VERSION: str = "1.0.0"
+STUDIO_VERSION: str = "1.0.6"
 
 
 # =============================================================================

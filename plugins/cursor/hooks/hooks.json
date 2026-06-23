@@ -3,12 +3,14 @@
   "hooks": {
     "afterFileEdit": [
       {
-        "command": "uv run ./scripts/snyk_secure_at_inception.py"
+        "command": "uv run ./scripts/snyk_secure_at_inception.py",
+        "timeout": 600
       }
     ],
     "stop": [
       {
-        "command": "uv run ./scripts/snyk_secure_at_inception.py"
+        "command": "uv run ./scripts/snyk_secure_at_inception.py",
+        "timeout": 600
       }
     ]
   }

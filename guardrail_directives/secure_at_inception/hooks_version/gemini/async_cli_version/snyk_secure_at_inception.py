@@ -203,6 +203,14 @@ def is_code_file(file_path: str) -> bool:
     return Path(file_path).suffix.lower() in CODE_EXTENSIONS
 
 
+# Note: Bash-driven manifest mutations (`npm install`, `pip install`, etc.) bypass
+# the write_file|replace AfterTool matcher and won't populate manifest_edits. The hash-diff
+# in detect_manifest_changes still catches them when some code file is also edited.
+def is_manifest_file(file_path: str) -> bool:
+    p = Path(file_path)
+    return p.name in MANIFEST_FILES or p.suffix.lower() in MANIFEST_SUFFIXES
+
+
 # =============================================================================
 # LINE TRACKING (computes which lines the agent modified)
 # =============================================================================
@@ -379,7 +387,13 @@ def read_state(workspace: str) -> Dict[str, Any]:
                 return cast(Dict[str, Any], json.load(f))
     except (OSError, json.JSONDecodeError):
         pass
-    return {"code_files": {}, "manifest_baseline": {}, "stop_cycles": 0, "last_update": None}
+    return {
+        "code_files": {},
+        "manifest_baseline": {},
+        "manifest_dirty": False,
+        "stop_cycles": 0,
+        "last_update": None,
+    }
 
 
 def write_state(workspace: str, state: Dict[str, Any]) -> None:
@@ -402,7 +416,7 @@ def clear_state(workspace: str) -> None:
 
 
 def has_pending_changes(state: Dict[str, Any]) -> bool:
-    return bool(state.get("code_files"))
+    return bool(state.get("code_files")) or bool(state.get("manifest_dirty"))
 
 
 # =============================================================================
@@ -509,7 +523,14 @@ def handle_after_tool(data: Dict[str, Any], workspace: str) -> None:
         output_response({})
         return
 
-    if is_code_file(file_path):
+    is_code = is_code_file(file_path)
+    is_manifest = is_manifest_file(file_path)
+    if not is_code and not is_manifest:
+        debug_log(f"File not scannable, ignoring: {file_path}")
+        output_response({})
+        return
+
+    if is_code:
         with _state_lock(workspace):
             state = read_state(workspace)
 
@@ -551,8 +572,16 @@ def handle_after_tool(data: Dict[str, Any], workspace: str) -> None:
         if launch_background_scan(workspace):
             log_to_panel("[SAI] Background scan launched")
 
-    else:
-        debug_log(f"File not scannable, ignoring: {file_path}")
+    if is_manifest:
+        with _state_lock(workspace):
+            state = read_state(workspace)
+            state["manifest_dirty"] = True
+            state["last_edit_ts"] = datetime.now().isoformat()
+            write_state(workspace, state)
+
+        log_to_panel(f"[SAI] Manifest edit tracked: {Path(file_path).name}")
+        if launch_background_sca_scan(workspace):
+            log_to_panel("[SAI] Background SCA scan launched")
 
     output_response({})
 
@@ -580,6 +609,7 @@ def handle_after_agent(data: Dict[str, Any], workspace: str) -> None:
         write_state(workspace, state)
 
     code_files = state.get("code_files", {})
+    manifest_dirty = bool(state.get("manifest_dirty", False))
 
     new_vulns: List[Dict[str, Any]] = []
     new_sca_vulns: List[Dict[str, Any]] = []
@@ -589,6 +619,7 @@ def handle_after_agent(data: Dict[str, Any], workspace: str) -> None:
     sast_fallback = ""
     sca_fallback = ""
     changed_manifests: List[str] = []
+    scan_info: Optional[Dict[str, Any]] = None
 
     # --- Wait for SAST scan and evaluate results ---
     if code_files:
@@ -681,7 +712,7 @@ def handle_after_agent(data: Dict[str, Any], workspace: str) -> None:
     # --- Detect manifest changes and conditionally clear stale SCA state ---
     sca_duration: Optional[float] = None
     baseline_keys = None
-    if code_files:
+    if code_files or manifest_dirty:
         changed_manifests = detect_manifest_changes(
             workspace, state.get("manifest_baseline", {}), MANIFEST_FILES, MANIFEST_SUFFIXES
         )

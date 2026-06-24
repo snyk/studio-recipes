@@ -28,7 +28,6 @@ PREREQUISITES:
 
 import json
 import os
-import re
 import sys
 from contextlib import contextmanager
 from datetime import datetime
@@ -153,31 +152,6 @@ MANIFEST_SUFFIXES = {".csproj", ".lock", ".fsproj", ".vbproj"}
 
 MAX_STOP_CYCLES = 3
 
-# Matches Bash commands that mutate dependency manifests across all ecosystems
-# covered by MANIFEST_FILES / MANIFEST_SUFFIXES.
-_MANIFEST_MUTATION_RE = re.compile(
-    r"""\b(?:
-        npm   \s+ (?:install|i|ci|add|update|up|upgrade|uninstall|remove|rm|prune|shrinkwrap)
-      | yarn  \s+ (?:install|add|remove|upgrade|up)
-      | pnpm  \s+ (?:install|i|add|remove|update|up)
-      | pip[23]?  \s+ (?:install|uninstall|download)
-      | poetry \s+ (?:install|add|remove|update|lock)
-      | uv    \s+ (?:add|remove|sync|pip)
-      | cargo \s+ (?:add|install|remove|update|fetch)
-      | go    \s+ (?:get|mod)
-      | bundle \s+ (?:install|add|remove|update)
-      | gem   \s+ (?:install|uninstall|update)
-      | composer \s+ (?:install|require|remove|update)
-      | (?:gradle|gradlew|mvnw?|maven) \s
-      | pod   \s+ (?:install|update)
-      | swift \s+ package
-      | mix   \s+ deps
-      | flutter \s+ pub
-      | dotnet \s+ (?:add \s+ package|restore)
-    )\b""",
-    re.VERBOSE | re.IGNORECASE,
-)
-
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 
@@ -254,9 +228,6 @@ def is_code_file(file_path: str) -> bool:
     return Path(file_path).suffix.lower() in CODE_EXTENSIONS
 
 
-# Note: Bash-driven manifest mutations (`npm install`, `pip install`, etc.) bypass
-# the Edit|Write PostToolUse matcher and won't populate manifest_edits. The hash-diff
-# in detect_manifest_changes still catches them when some code file is also edited.
 def is_manifest_file(file_path: str) -> bool:
     p = Path(file_path)
     return p.name in MANIFEST_FILES or p.suffix.lower() in MANIFEST_SUFFIXES
@@ -566,18 +537,23 @@ def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
     tool_name = data.get("tool_name", "")
     tool_input = data.get("tool_input", {})
 
-    # Bash-driven manifest mutations (npm install, pip install, etc.) bypass the
-    # Edit|Write file_path path. Detect them via command pattern and mark dirty so
-    # the Stop hook runs SCA even when no code file was edited.
+    # Bash commands that mutate manifests (npm install, pip install, etc.) bypass
+    # the Edit|Write file_path path. Detect them by checking whether any manifest
+    # file actually changed on disk after the command ran.
     if tool_name == "Bash":
-        command = tool_input.get("command", "")
-        if _MANIFEST_MUTATION_RE.search(command):
+        with _state_lock(workspace):
+            state = read_state(workspace)
+            baseline = state.get("manifest_baseline", {})
+        changed = detect_manifest_changes(workspace, baseline, MANIFEST_FILES, MANIFEST_SUFFIXES)
+        if changed:
             with _state_lock(workspace):
                 state = read_state(workspace)
                 state["manifest_dirty"] = True
                 state["last_edit_ts"] = datetime.now().isoformat()
                 write_state(workspace, state)
-            log_to_panel("[SAI] Bash manifest mutation detected")
+            log_to_panel(
+                f"[SAI] Manifest change detected: {', '.join(Path(f).name for f in changed)}"
+            )
             if launch_background_sca_scan(workspace):
                 log_to_panel("[SAI] Background SCA scan launched")
         output_response({})

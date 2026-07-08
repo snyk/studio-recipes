@@ -33,9 +33,10 @@ import json
 import os
 import sys
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional, cast
+from typing import Any, Dict, Generator, List, Optional, Tuple, cast
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 LIB_DIR = SCRIPT_DIR / "lib"
@@ -155,6 +156,35 @@ MAX_STOP_CYCLES = 3
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 
+# =============================================================================
+# STOP HANDLER RESULT TYPES
+# =============================================================================
+
+
+@dataclass
+class StopContext:
+    """State carried out of _check_stop_preconditions."""
+
+    state: Dict[str, Any]
+
+
+@dataclass
+class SastResult:
+    new_vulns: List[Dict[str, Any]] = field(default_factory=list)
+    clean_file_paths: List[str] = field(default_factory=list)
+    dirty_file_paths: List[str] = field(default_factory=list)
+    failed: bool = False
+    fallback: str = ""
+    scan_info: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class ScaResult:
+    new_sca_vulns: List[Dict[str, Any]] = field(default_factory=list)
+    fallback: str = ""
+    duration: Optional[float] = None
+
+
 def _severity_counts(vulns: List[Dict[str, Any]]) -> str:
     counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
     for vuln in vulns:
@@ -214,6 +244,10 @@ def output_response(response: Dict[str, Any]) -> None:
 
 def get_state_file_path(workspace: str) -> str:
     return os.path.join(get_cache_dir(workspace), "state.json")
+
+
+def get_invocation_marker_path(workspace: str) -> str:
+    return os.path.join(get_cache_dir(workspace), "hook.invoked")
 
 
 def get_workspace(data: Dict[str, Any]) -> str:
@@ -838,6 +872,15 @@ def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
         output_response({})
         return
 
+    if edits_tracked or manifests_touched:
+        # Persistent invocation marker survives clear_state(); useful for diagnostics.
+        try:
+            ensure_cache_dirs(workspace)
+            with open(get_invocation_marker_path(workspace), "a") as _mf:
+                _mf.write(datetime.now().isoformat() + "\n")
+        except OSError:
+            pass
+
     if edits_tracked:
         log_to_panel(
             f"[SAI] Tracked {len(edits_tracked)} code file(s): "
@@ -882,217 +925,243 @@ def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
     output_response({})
 
 
-def handle_stop(data: Dict[str, Any], workspace: str) -> None:
-    """Evaluate scan results and block if new vulnerabilities were introduced."""
+def _check_stop_preconditions(workspace: str) -> Tuple[Optional[Dict[str, Any]], StopContext]:
+    """Read state and handle the no-pending-changes and max-cycles-reached
+    early exits. Runs under _state_lock.
 
-    # --- Read state and check preconditions ---
+    Returns (early_response, ctx). If early_response is not None, the caller
+    should output_response(early_response) and return immediately."""
     with _state_lock(workspace):
         state = read_state(workspace)
 
         if not has_pending_changes(state):
             debug_log("No pending changes")
-            output_response({})
-            return
+            return {}, StopContext(state=state)
 
         stop_cycles = state.get("stop_cycles", 0)
         if stop_cycles >= MAX_STOP_CYCLES:
             log_to_panel(f"[SAI] Max cycles ({MAX_STOP_CYCLES}) reached, allowing stop")
             clear_state(workspace)
-            output_response({})
-            return
+            return {}, StopContext(state=state)
 
         state["stop_cycles"] = stop_cycles + 1
         write_state(workspace, state)
 
+    return None, StopContext(state=state)
+
+
+def _evaluate_sast(
+    state: Dict[str, Any],
+    workspace: str,
+    code_files: Dict[str, Dict[str, Any]],
+) -> SastResult:
+    """Wait for the SAST scan, re-scanning once if stale, and filter results
+    down to newly introduced vulns on agent-modified lines."""
+    if not code_files:
+        return SastResult()
+
+    scan_status = wait_for_scan(workspace, log_fn=log_to_panel)
+    scan_succeeded = scan_status == "success"
+    scan_info: Optional[Dict[str, Any]] = None
+
+    # Stale detection: re-scan if edits happened after scan started
+    if scan_succeeded:
+        scan_info = get_scan_completion_info(workspace)
+        last_edit_ts = state.get("last_edit_ts", "")
+        started_at = (
+            (scan_info.get("started_at") or scan_info.get("completed_at", "")) if scan_info else ""
+        )
+
+        if last_edit_ts and started_at and last_edit_ts > started_at:
+            log_to_panel("[SAI] Edits after scan started, re-scanning...")
+            clear_scan_state(workspace)
+            launch_background_scan(workspace)
+            scan_status = wait_for_scan(workspace, log_fn=log_to_panel)
+            scan_succeeded = scan_status == "success"
+            scan_info = None
+
+    if scan_succeeded:
+        scan_info = scan_info or get_scan_completion_info(workspace)
+        all_vulns = scan_info.get("vulnerabilities", []) if scan_info else []
+
+        results_by_file: Dict[str, List[Dict[str, Any]]] = {}
+        for v in all_vulns:
+            fp = v.get("file_path", "")
+            if fp:
+                results_by_file.setdefault(fp, []).append(v)
+
+        per_file_results = _evaluate_files(code_files, results_by_file)
+
+        new_vulns: List[Dict[str, Any]] = []
+        clean_file_paths: List[str] = []
+        dirty_file_paths: List[str] = []
+        for fp in code_files:
+            file_vulns = per_file_results.get(fp)
+            if file_vulns:
+                dirty_file_paths.append(fp)
+                new_vulns.extend(file_vulns)
+            else:
+                clean_file_paths.append(fp)
+
+        new_vulns.sort(
+            key=lambda v: (
+                _SEVERITY_ORDER.get(v.get("severity", "low"), 4),
+                v.get("file_path", ""),
+                v.get("start_line", 0),
+            )
+        )
+
+        log_to_panel(f"[SAI] {len(new_vulns)} new vuln(s), {len(clean_file_paths)} clean file(s)")
+        return SastResult(
+            new_vulns=new_vulns,
+            clean_file_paths=clean_file_paths,
+            dirty_file_paths=dirty_file_paths,
+            scan_info=scan_info,
+        )
+
+    scan_info = get_scan_completion_info(workspace)
+    error_detail = scan_info.get("error_detail", "") if scan_info else ""
+    file_list = ", ".join(Path(f).name for f in code_files)
+
+    if scan_status == "auth_required":
+        log_to_panel(
+            f"[SAI] Snyk CLI not authenticated: {error_detail}"
+            if error_detail
+            else "[SAI] Snyk CLI not authenticated"
+        )
+        fallback = (
+            "The Snyk CLI is not authenticated. Run snyk_auth to authenticate, "
+            "then run snyk_code_scan on the current directory to check for "
+            f"vulnerabilities in: {file_list}. Fix only NEWLY INTRODUCED issues."
+        )
+    elif scan_status == "snyk_not_found":
+        log_to_panel("[SAI] Snyk CLI not found, falling back to MCP")
+        fallback = (
+            "Security scan could not complete. "
+            "Run snyk_code_scan on the current directory to check for vulnerabilities "
+            f"in: {file_list}. Fix only NEWLY INTRODUCED issues."
+        )
+    else:
+        log_to_panel(f"[SAI] Scan failed (status: {scan_status}), falling back to MCP")
+        fallback = (
+            "Security scan could not complete. "
+            "Run snyk_code_scan on the current directory to check for vulnerabilities "
+            f"in: {file_list}. Fix only NEWLY INTRODUCED issues."
+        )
+
+    return SastResult(failed=True, fallback=fallback, scan_info=scan_info)
+
+
+def _evaluate_sca(
+    workspace: str,
+    code_files: Dict[str, Dict[str, Any]],
+    manifest_dirty: bool,
+    manifest_baseline: Dict[str, str],
+) -> ScaResult:
+    """Detect manifest changes against the session-start baseline, re-running
+    the SCA scan if manifests changed, and diff dependency vulns against the
+    prior scan result."""
+    if not (code_files or manifest_dirty):
+        return ScaResult()
+
+    baseline_keys = None
+    changed_manifests = detect_manifest_changes(
+        workspace, manifest_baseline, MANIFEST_FILES, MANIFEST_SUFFIXES
+    )
+    if changed_manifests:
+        log_to_panel("[SAI] Manifest changes detected — re-running SCA scan")
+        baseline_info = get_sca_completion_info(workspace)
+        if baseline_info and baseline_info.get("status") == "success":
+            baseline_vulns = baseline_info.get("vulnerabilities", [])
+            baseline_keys = frozenset(
+                (v.get("id", ""), v.get("package_name", ""), v.get("version", ""))
+                for v in baseline_vulns
+            )
+        clear_sca_scan_state(workspace)
+
+    sca_status = wait_for_sca_scan(workspace, log_fn=log_to_panel)
+    if sca_status == "success":
+        sca_info = get_sca_completion_info(workspace)
+        sca_duration = scan_duration_secs(sca_info) if sca_info else None
+        sca_vulns = sca_info.get("vulnerabilities", []) if sca_info else []
+        log_to_panel(f"[SAI] SCA: {len(sca_vulns)} dependency vuln(s)")
+        new_sca_vulns: List[Any]
+        if not changed_manifests:
+            new_sca_vulns = []
+        elif baseline_keys is None:
+            new_sca_vulns = sca_vulns
+        else:
+            new_sca_vulns = [
+                v
+                for v in sca_vulns
+                if (v.get("id", ""), v.get("package_name", ""), v.get("version", ""))
+                not in baseline_keys
+            ]
+        new_sca_vulns = [
+            v for v in new_sca_vulns if _should_block_on_sca_severity(v.get("severity", ""))
+        ]
+        return ScaResult(new_sca_vulns=new_sca_vulns, duration=sca_duration)
+
+    if changed_manifests:
+        manifest_list = ", ".join(Path(f).name for f in changed_manifests)
+        if sca_status == "auth_required":
+            log_to_panel("[SAI] SCA skipped: Snyk not authenticated (run `snyk auth`)")
+            fallback = (
+                "The Snyk CLI is not authenticated. Run snyk_auth to authenticate, "
+                "then run snyk_sca_scan on the current directory to check for "
+                f"dependency vulnerabilities in: {manifest_list}. Fix only NEWLY INTRODUCED issues."
+            )
+        else:
+            log_to_panel(f"[SAI] SCA scan did not complete (status: {sca_status})")
+            fallback = (
+                "Security scan could not complete. "
+                "Run snyk_sca_scan on the current directory to check for "
+                f"dependency vulnerabilities in: {manifest_list}. Fix only NEWLY INTRODUCED issues."
+            )
+        return ScaResult(fallback=fallback)
+
+    if sca_status == "auth_required":
+        log_to_panel("[SAI] SCA skipped: Snyk not authenticated (run `snyk auth`)")
+    elif sca_status == "snyk_not_found":
+        log_to_panel("[SAI] SCA skipped: Snyk CLI not found on PATH")
+    elif sca_status is None:
+        log_to_panel("[SAI] SCA scan timed out, continuing with SAST results only")
+    else:
+        log_to_panel(f"[SAI] SCA scan did not complete (status: {sca_status})")
+
+    return ScaResult()
+
+
+def handle_stop(data: Dict[str, Any], workspace: str) -> None:
+    """Evaluate scan results and block if new vulnerabilities were introduced."""
+    early_response, ctx = _check_stop_preconditions(workspace)
+    if early_response is not None:
+        output_response(early_response)
+        return
+
+    state = ctx.state
     code_files = state.get("code_files", {})
     manifest_dirty = bool(state.get("manifest_dirty", False))
 
-    new_vulns: List[Dict[str, Any]] = []
-    new_sca_vulns: List[Dict[str, Any]] = []
-    clean_file_paths: List[str] = []
-    dirty_file_paths: List[str] = []
-    sast_failed = False
-    sast_fallback = ""
-    sca_fallback = ""
-    changed_manifests: List[str] = []
-    scan_info: Optional[Dict[str, Any]] = None
-
-    # --- Wait for SAST scan and evaluate results ---
-    if code_files:
-        scan_status = wait_for_scan(workspace, log_fn=log_to_panel)
-        scan_succeeded = scan_status == "success"
-        scan_info = None
-
-        # Stale detection: re-scan if edits happened after scan started
-        if scan_succeeded:
-            scan_info = get_scan_completion_info(workspace)
-            last_edit_ts = state.get("last_edit_ts", "")
-            started_at = (
-                (scan_info.get("started_at") or scan_info.get("completed_at", ""))
-                if scan_info
-                else ""
-            )
-
-            if last_edit_ts and started_at and last_edit_ts > started_at:
-                log_to_panel("[SAI] Edits after scan started, re-scanning...")
-                clear_scan_state(workspace)
-                launch_background_scan(workspace)
-                scan_status = wait_for_scan(workspace, log_fn=log_to_panel)
-                scan_succeeded = scan_status == "success"
-                scan_info = None
-
-        if scan_succeeded:
-            scan_info = scan_info or get_scan_completion_info(workspace)
-            all_vulns = scan_info.get("vulnerabilities", []) if scan_info else []
-
-            results_by_file: Dict[str, List[Dict[str, Any]]] = {}
-            for v in all_vulns:
-                fp = v.get("file_path", "")
-                if fp:
-                    results_by_file.setdefault(fp, []).append(v)
-
-            per_file_results = _evaluate_files(code_files, results_by_file)
-
-            for fp in code_files:
-                file_vulns = per_file_results.get(fp)
-                if file_vulns:
-                    dirty_file_paths.append(fp)
-                    new_vulns.extend(file_vulns)
-                else:
-                    clean_file_paths.append(fp)
-
-            severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-            new_vulns.sort(
-                key=lambda v: (
-                    severity_order.get(v.get("severity", "low"), 4),
-                    v.get("file_path", ""),
-                    v.get("start_line", 0),
-                )
-            )
-
-            log_to_panel(
-                f"[SAI] {len(new_vulns)} new vuln(s), {len(clean_file_paths)} clean file(s)"
-            )
-        else:
-            sast_failed = True
-            scan_info = get_scan_completion_info(workspace)
-            error_detail = scan_info.get("error_detail", "") if scan_info else ""
-            file_list = ", ".join(Path(f).name for f in code_files)
-
-            if scan_status == "auth_required":
-                log_to_panel(
-                    f"[SAI] Snyk CLI not authenticated: {error_detail}"
-                    if error_detail
-                    else "[SAI] Snyk CLI not authenticated"
-                )
-                sast_fallback = (
-                    "The Snyk CLI is not authenticated. Run snyk_auth to authenticate, "
-                    "then run snyk_code_scan on the current directory to check for "
-                    f"vulnerabilities in: {file_list}. Fix only NEWLY INTRODUCED issues."
-                )
-            elif scan_status == "snyk_not_found":
-                log_to_panel("[SAI] Snyk CLI not found, falling back to MCP")
-                sast_fallback = (
-                    "Security scan could not complete. "
-                    "Run snyk_code_scan on the current directory to check for vulnerabilities "
-                    f"in: {file_list}. Fix only NEWLY INTRODUCED issues."
-                )
-            else:
-                log_to_panel(f"[SAI] Scan failed (status: {scan_status}), falling back to MCP")
-                sast_fallback = (
-                    "Security scan could not complete. "
-                    "Run snyk_code_scan on the current directory to check for vulnerabilities "
-                    f"in: {file_list}. Fix only NEWLY INTRODUCED issues."
-                )
-
-    # --- Detect manifest changes and conditionally clear stale SCA state ---
-    sca_duration: Optional[float] = None
-    baseline_keys = None
-    if code_files or manifest_dirty:
-        changed_manifests = detect_manifest_changes(
-            workspace, state.get("manifest_baseline", {}), MANIFEST_FILES, MANIFEST_SUFFIXES
-        )
-        if changed_manifests:
-            log_to_panel("[SAI] Manifest changes detected — re-running SCA scan")
-            baseline_info = get_sca_completion_info(workspace)
-            if baseline_info and baseline_info.get("status") == "success":
-                baseline_vulns = baseline_info.get("vulnerabilities", [])
-                baseline_keys = frozenset(
-                    (v.get("id", ""), v.get("package_name", ""), v.get("version", ""))
-                    for v in baseline_vulns
-                )
-            clear_sca_scan_state(workspace)
-
-        sca_status = wait_for_sca_scan(workspace, log_fn=log_to_panel)
-        if sca_status == "success":
-            sca_info = get_sca_completion_info(workspace)
-            sca_duration = scan_duration_secs(sca_info) if sca_info else None
-            sca_vulns = sca_info.get("vulnerabilities", []) if sca_info else []
-            log_to_panel(f"[SAI] SCA: {len(sca_vulns)} dependency vuln(s)")
-            if not changed_manifests:
-                new_sca_vulns = []
-            elif baseline_keys is None:
-                new_sca_vulns = sca_vulns
-            else:
-                new_sca_vulns = [
-                    v
-                    for v in sca_vulns
-                    if (v.get("id", ""), v.get("package_name", ""), v.get("version", ""))
-                    not in baseline_keys
-                ]
-            new_sca_vulns = [
-                v for v in new_sca_vulns if _should_block_on_sca_severity(v.get("severity", ""))
-            ]
-        elif changed_manifests:
-            manifest_list = ", ".join(Path(f).name for f in changed_manifests)
-            if sca_status == "auth_required":
-                log_to_panel("[SAI] SCA skipped: Snyk not authenticated (run `snyk auth`)")
-                sca_fallback = (
-                    "The Snyk CLI is not authenticated. Run snyk_auth to authenticate, "
-                    "then run snyk_sca_scan on the current directory to check for "
-                    f"dependency vulnerabilities in: {manifest_list}. Fix only NEWLY INTRODUCED issues."
-                )
-            else:
-                log_to_panel(f"[SAI] SCA scan did not complete (status: {sca_status})")
-                sca_fallback = (
-                    "Security scan could not complete. "
-                    "Run snyk_sca_scan on the current directory to check for "
-                    f"dependency vulnerabilities in: {manifest_list}. Fix only NEWLY INTRODUCED issues."
-                )
-        else:
-            if sca_status == "auth_required":
-                log_to_panel("[SAI] SCA skipped: Snyk not authenticated (run `snyk auth`)")
-            elif sca_status == "snyk_not_found":
-                log_to_panel("[SAI] SCA skipped: Snyk CLI not found on PATH")
-            elif sca_status is None:
-                log_to_panel("[SAI] SCA scan timed out, continuing with SAST results only")
-            else:
-                log_to_panel(f"[SAI] SCA scan did not complete (status: {sca_status})")
+    sast = _evaluate_sast(state, workspace, code_files)
+    sca = _evaluate_sca(workspace, code_files, manifest_dirty, state.get("manifest_baseline", {}))
 
     # --- Handle SAST scan failure early return ---
-    if sast_failed:
-        if new_sca_vulns:
-            sast_fallback += "\n\n## Newly Introduced Dependency Vulnerabilities\n\n"
-            sast_fallback += _format_sca_vuln_table(new_sca_vulns)
-        elif sca_fallback:
-            sast_fallback += f"\n\n## Dependency Scan Unavailable\n\n{sca_fallback}"
+    if sast.failed:
+        fallback = sast.fallback
+        if sca.new_sca_vulns:
+            fallback += "\n\n## Newly Introduced Dependency Vulnerabilities\n\n"
+            fallback += _format_sca_vuln_table(sca.new_sca_vulns)
+        elif sca.fallback:
+            fallback += f"\n\n## Dependency Scan Unavailable\n\n{sca.fallback}"
         clear_state(workspace)
-        output_response({"decision": "block", "reason": sast_fallback})
+        output_response({"decision": "block", "reason": fallback})
         return
 
     # --- Update state and decide ---
-    if not new_vulns and not new_sca_vulns and not sca_fallback:
+    if not sast.new_vulns and not sca.new_sca_vulns and not sca.fallback:
         log_to_panel("[SAI] No new security issues found.")
-        _allow_duration_parts = []
-        _sast_dur = scan_duration_secs(scan_info)
-        if _sast_dur is not None:
-            _allow_duration_parts.append(f"SAST {_sast_dur:.1f}s")
-        if sca_duration is not None:
-            _allow_duration_parts.append(f"SCA {sca_duration:.1f}s")
-        _allow_log = "Stop: ALLOW"
-        if _allow_duration_parts:
-            _allow_log += " — scans: " + " ".join(_allow_duration_parts)
-        log_to_panel(_allow_log)
+        _log_stop_allow(sast, sca)
         clear_state(workspace)
         output_response({})
         return
@@ -1101,16 +1170,26 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
     with _state_lock(workspace):
         state = read_state(workspace)
         code = state.get("code_files", {})
-        for fp in clean_file_paths:
+        for fp in sast.clean_file_paths:
             code.pop(fp, None)
         state["code_files"] = code
         write_state(workspace, state)
 
-    if not dirty_file_paths:
+    if not sast.dirty_file_paths:
         clear_scan_state(workspace)
     clear_sca_scan_state(workspace)
 
-    # --- Build block reason ---
+    reason = _build_block_reason(sast.new_vulns, sca.new_sca_vulns, sca.fallback, workspace)
+    _log_stop_block(sast, sca)
+    output_response({"decision": "block", "reason": reason})
+
+
+def _build_block_reason(
+    new_vulns: List[Dict[str, Any]],
+    new_sca_vulns: List[Dict[str, Any]],
+    sca_fallback: str,
+    workspace: str,
+) -> str:
     reason_parts = [
         "SECURITY ISSUES DETECTED in code you just wrote or modified. "
         "Fix the following newly introduced vulnerabilities before completing your task. "
@@ -1151,32 +1230,48 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
         )
     reason_parts.append("\nThe security scan will run again automatically after fixing.")
 
-    _threshold = os.environ.get("SAI_MIN_BLOCK_SEVERITY", "medium")
-    _sast_dur = scan_duration_secs(scan_info)
-    _block_parts: List[str] = []
-    if new_vulns:
-        _n = len(new_vulns)
-        _block_parts.append(
-            f"SAST {_n} {'vuln' if _n == 1 else 'vulns'} ({_severity_counts(new_vulns)})"
+    return "\n".join(reason_parts)
+
+
+def _log_stop_allow(sast: SastResult, sca: ScaResult) -> None:
+    duration_parts = []
+    sast_dur = scan_duration_secs(sast.scan_info)
+    if sast_dur is not None:
+        duration_parts.append(f"SAST {sast_dur:.1f}s")
+    if sca.duration is not None:
+        duration_parts.append(f"SCA {sca.duration:.1f}s")
+    log_line = "Stop: ALLOW"
+    if duration_parts:
+        log_line += " — scans: " + " ".join(duration_parts)
+    log_to_panel(log_line)
+
+
+def _log_stop_block(sast: SastResult, sca: ScaResult) -> None:
+    threshold = os.environ.get("SAI_MIN_BLOCK_SEVERITY", "medium")
+    sast_dur = scan_duration_secs(sast.scan_info)
+    block_parts: List[str] = []
+    if sast.new_vulns:
+        n = len(sast.new_vulns)
+        block_parts.append(
+            f"SAST {n} {'vuln' if n == 1 else 'vulns'} ({_severity_counts(sast.new_vulns)})"
         )
-    if new_sca_vulns:
-        _n = len(new_sca_vulns)
-        _block_parts.append(
-            f"SCA {_n} {'vuln' if _n == 1 else 'vulns'} ({_severity_counts(new_sca_vulns)})"
+    if sca.new_sca_vulns:
+        n = len(sca.new_sca_vulns)
+        block_parts.append(
+            f"SCA {n} {'vuln' if n == 1 else 'vulns'} ({_severity_counts(sca.new_sca_vulns)})"
         )
-    _block_parts.append(f"threshold: {_threshold}")
-    _dur_parts: List[str] = []
-    if _sast_dur is not None:
-        _dur_parts.append(f"SAST {_sast_dur:.1f}s")
-    if sca_duration is not None:
-        _dur_parts.append(f"SCA {sca_duration:.1f}s")
-    if _dur_parts:
-        _block_parts.append("scans: " + " ".join(_dur_parts))
-    _top_ids = _top_vuln_ids(list(new_vulns) + list(new_sca_vulns))
-    if _top_ids:
-        _block_parts.append(f"top vulns: {_top_ids}")
-    log_to_panel("Stop: BLOCK — " + " | ".join(_block_parts))
-    output_response({"decision": "block", "reason": "\n".join(reason_parts)})
+    block_parts.append(f"threshold: {threshold}")
+    dur_parts: List[str] = []
+    if sast_dur is not None:
+        dur_parts.append(f"SAST {sast_dur:.1f}s")
+    if sca.duration is not None:
+        dur_parts.append(f"SCA {sca.duration:.1f}s")
+    if dur_parts:
+        block_parts.append("scans: " + " ".join(dur_parts))
+    top_ids = _top_vuln_ids(list(sast.new_vulns) + list(sca.new_sca_vulns))
+    if top_ids:
+        block_parts.append(f"top vulns: {top_ids}")
+    log_to_panel("Stop: BLOCK — " + " | ".join(block_parts))
 
 
 # =============================================================================

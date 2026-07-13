@@ -66,6 +66,7 @@ Choose with `--profile <name>`.
 | Choose the repo for commit-time hooks (Secure at Commit) | `--workspace <path>` |
 | Skip confirmation prompts | `-y`, `--yes` |
 | Re-verify a previous install | `--verify` |
+| Verify without installing/upgrading prerequisites | `--verify --read-only` |
 | Remove what was installed | `--uninstall` |
 | List available recipes | `--list` |
 
@@ -87,6 +88,57 @@ bash ./snyk-studio-install.sh --profile experimental --workspace /path/to/repo -
 # Cleanly remove what was installed
 bash ./snyk-studio-install.sh --uninstall -y
 ```
+
+---
+
+## Diagnostics
+
+If something isn't working, share a diagnostic bundle with your Snyk account team. The bundle captures your environment, installed recipes, assistant versions, and recent SAI logs — no source files or credentials are included.
+
+**macOS / Linux**
+
+```bash
+snyk-studio diag dump
+```
+
+**Windows** — the installer does not add `snyk-studio` to PATH. Use the Go binary directly or the Python fallback:
+
+```powershell
+# Go binary (if you downloaded it)
+.\snyk-studio-windows-x86_64.exe diag dump
+
+# Python fallback (works after any install method)
+uv run snyk-studio-installer.py --diag-dump
+```
+
+**Python fallback (all platforms)** — if `snyk-studio` is not on PATH, you can always invoke the Python layer directly:
+
+```bash
+uv run snyk-studio-installer.py --diag-dump
+```
+
+The zip is created in the current directory and the path is printed on completion. Options:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--out-file <path>` | `snyk-studio-diag-<ts>.zip` in cwd | Write the zip to a specific path |
+| `--days N` | `1` | Collect logs from the last N days (minimum 1) |
+
+```bash
+snyk-studio diag dump --out-file ~/Desktop/snyk-studio-diag.zip --days 7
+```
+
+The zip contains:
+
+| File | Contents |
+|---|---|
+| `machine_id.txt` | Device ID from `~/.snyk-studio/device-id` |
+| `ade_versions.json` | Detected assistants and their versions |
+| `dependency_versions.json` | Versions of `node`, `uv`, `snyk`, `nvm` |
+| `logs/<ade>/<workspace>/` | SAI log files within the collection window |
+| `installed_recipes.json` | Snyk-named files found in each assistant's hook/command/rules dirs |
+| `env.json` | OS, Python, PATH, and key environment variables |
+| `verify.txt` | Output of a `--read-only --verify` run at collection time |
 
 ---
 

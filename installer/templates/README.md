@@ -43,7 +43,8 @@ Installs into paths under `$HOME` (for example `~/.cursor/`, `~/.claude/`, `~/.g
 | `--ade <cursor\|claude\|gemini\|kiro\|codex\|windsurf\|copilot-cli\|copilot-vscode>` | Install only for that ADE (otherwise auto-detect or prompt) |
 | `--dry-run` | Show what would happen without writing files |
 | `--uninstall` | Remove Snyk recipe artifacts installed by this installer |
-| `--verify` | Verify the install: files on disk and merged JSON match the manifest (read-only) |
+| `--verify` | Verify the install: files on disk and merged JSON match the manifest. Also checks Node.js/Snyk CLI versions and, like a normal install, may offer to upgrade them |
+| `--read-only` | With `--verify`, only report prerequisite versions instead of offering to install/upgrade them — guarantees no changes are made |
 | `--list` | List recipes and profiles bundled in the script |
 | `-y`, `--yes` | Skip confirmation prompts |
 | `-h`, `--help` | Show built-in help |
@@ -58,6 +59,8 @@ After a normal install (not `--dry-run`), the script **runs these checks automat
 - Confirms **merged configs** still contain the expected Snyk content: Cursor `hooks.json`, Claude `settings.json` hook entries, Gemini `settings.json` hook entries, and MCP server entries in `~/.cursor/.mcp.json`, `~/.claude/.mcp.json`, `~/.gemini/settings.json`, `~/.kiro/settings/mcp.json`, `~/.codeium/windsurf/mcp_config.json`, `~/.copilot/mcp-config.json`, and `<vscode-user>/mcp.json`, plus (for Codex) the `[features].hooks`, `[hooks.*]`, and `[mcp_servers.*]` blocks in `~/.codex/config.toml`.
 
 This does not launch the IDE or run `snyk` scans—it only validates paths and JSON. Exit code **1** means a mismatch or missing piece; run the installer again to fix.
+
+By default `--verify` also checks Node.js/Snyk CLI versions the same way a normal install does, and may prompt to upgrade them. Pass **`--read-only`** alongside `--verify` to only report those versions without ever installing or upgrading anything.
 
 ### Profiles (typical bundle)
 

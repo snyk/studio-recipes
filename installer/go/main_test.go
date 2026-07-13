@@ -22,6 +22,9 @@ func TestRunDispatch(t *testing.T) {
 		{"help short", []string{"-h"}, 0},
 		{"help word", []string{"help"}, 0},
 		{"unknown command", []string{"frobnicate"}, 2},
+		{"flare not a command", []string{"flare"}, 2},
+		{"diag no subcommand", []string{"diag"}, 2},
+		{"diag unknown subcommand", []string{"diag", "frobnicate"}, 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -5,7 +5,7 @@ JSON merge strategies (create .bak backup, write pretty-printed JSON, idempotent
   - merge_cursor_hooks:    ~/.cursor/hooks.json
   - merge_claude_settings: ~/.claude/settings.json
   - merge_gemini_settings: ~/.gemini/settings.json
-  - merge_mcp_servers:     ~/.mcp.json or ~/.cursor/.mcp.json
+  - merge_mcp_servers:     ~/.mcp.json or ~/.cursor/mcp.json
 
 TOML merge strategies (~/.codex/config.toml, single file used for all of
 [features], [[hooks.*]], and [mcp_servers.*]):

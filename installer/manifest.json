@@ -204,9 +204,10 @@
       "sources": {
         "cursor": {
           "config_merge": {
-            "target": ".cursor/.mcp.json",
+            "target": ".cursor/mcp.json",
             "source": "mcp/.mcp.json",
-            "strategy": "merge_mcp_servers"
+            "strategy": "merge_mcp_servers",
+            "legacy_targets": [".cursor/.mcp.json"]
           }
         },
         "claude": {

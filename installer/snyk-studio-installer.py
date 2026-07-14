@@ -288,10 +288,24 @@ class PayloadContext:
 # =============================================================================
 
 
+def jsonc_loads(text: str) -> Any:
+    """Parse JSONC (JSON-with-comments) as used by VS Code / Cursor settings files.
+
+    Strips ``/* ... */`` block comments and trailing commas before delegating to
+    :func:`json.loads`. Used consistently on both the conflict-detection (read)
+    and conflict-resolution (write) paths so a JSONC settings file that is
+    flagged as conflicting can also be updated.
+    """
+    # Strip block comments
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    # Strip trailing commas before closing braces/brackets
+    text = re.sub(r",\s*([\]}])", r"\1", text)
+    return json.loads(text)
+
+
 class Manifest:
     """Parsed manifest.json with profile resolution."""
 
-    AUTO_CONFIGURE = "snyk.securityAtInception.autoConfigureSnykMcpServer"
     EXECUTION_FREQUENCY = "snyk.securityAtInception.executionFrequency"
 
     def __init__(self, path: Path):
@@ -394,14 +408,20 @@ class Manifest:
             label = "all recipes" if "*" in recipes else f"{len(recipes)} recipes"
             print(f"  * {pid:<15} {label}")
 
-    def are_rules_conflicting(self, ade: str) -> bool:
-        """Determine if there are existing rules that would conflict when adding the SAI hooks"""
+    def conflicting_rule_scopes(self, ade: str) -> List[str]:
+        """Return the scopes (``global``/``workspace``) that actually contain
+        conflicting Snyk rule directives for ``ade``.
+
+        Only locations whose file exists AND contains the Snyk rule tags count —
+        so an ADE with both global and workspace rule paths reports only the
+        scope(s) where a conflict is really present, not every configured path.
+        """
 
         rule_start_tag = "<!--# BEGIN SNYK GLOBAL RULE -->"
         rule_end_tag = "<!--# END SNYK GLOBAL RULE -->"
-        rules_locations = self.conflicting_resources.get(ade, {}).get("rules", [])
+        scopes: List[str] = []
 
-        for rule in rules_locations:
+        for rule in self.conflicting_resources.get(ade, {}).get("rules", []):
             rule_location = _safe_conflict_path(ade, rule)
             if rule_location is None or not rule_location.exists():
                 continue
@@ -409,30 +429,49 @@ class Manifest:
             try:
                 # check for existence of start/end tags in the rules file
                 content = rule_location.read_text(encoding="utf-8")
-                if rule_start_tag in content and rule_end_tag in content:
-                    return True
             except Exception:
-                pass
+                continue
 
-        return False
+            if rule_start_tag in content and rule_end_tag in content:
+                scope = GLOBAL if rule.get(GLOBAL) else WORKSPACE
+                if scope not in scopes:
+                    scopes.append(scope)
+
+        return scopes
+
+    def conflicting_skill_scopes(self, ade: str) -> List[str]:
+        """Return the scopes (``global``/``workspace``) that actually contain
+        conflicting Snyk skills for ``ade`` (only locations whose file exists)."""
+
+        scopes: List[str] = []
+
+        for skill in self.conflicting_resources.get(ade, {}).get("skills", []):
+            skill_location = _safe_conflict_path(ade, skill)
+            if skill_location is None or not skill_location.exists():
+                continue
+            scope = GLOBAL if skill.get(GLOBAL) else WORKSPACE
+            if scope not in scopes:
+                scopes.append(scope)
+
+        return scopes
+
+    def are_rules_conflicting(self, ade: str) -> bool:
+        """Whether any existing rules would conflict when adding the SAI hooks."""
+        return bool(self.conflicting_rule_scopes(ade))
 
     def are_skills_conflicting(self, ade: str) -> bool:
-        """Determine if there are existing skills that would conflict when adding the SAI hooks"""
-
-        skills_locations = self.conflicting_resources.get(ade, {}).get("skills", [])
-
-        for skill in skills_locations:
-            skill_location = _safe_conflict_path(ade, skill)
-            if skill_location is None:
-                continue
-            if skill_location.exists():
-                return True
-        return False
+        """Whether any existing skills would conflict when adding the SAI hooks."""
+        return bool(self.conflicting_skill_scopes(ade))
 
     def get_conflicting_resource_scope(self, ade: str, resource_type: str) -> List[str]:
-        """Determine if the given ADE's rule/skill exists at the global or workspace level"""
-        resource_locations = self.conflicting_resources.get(ade, {}).get(resource_type, [])
-        return list(map(lambda x: GLOBAL if x.get(GLOBAL) else WORKSPACE, resource_locations))
+        """Return the scopes where ``resource_type`` (``rules``/``skills``) actually
+        conflicts for ``ade`` — only scopes with a real conflict, so callers never
+        act on a scope that has none."""
+        if resource_type == "rules":
+            return self.conflicting_rule_scopes(ade)
+        if resource_type == "skills":
+            return self.conflicting_skill_scopes(ade)
+        return []
 
     def get_extension_settings_path(self, ade: str) -> List[Path]:
         """Get the paths to the extension settings files for the given ADE based on OS"""
@@ -457,16 +496,23 @@ class Manifest:
         return settings_paths
 
     def are_extension_settings_conflicting(self, ade: str) -> List[str]:
-        """Determine if the Snyk extension setting has conflicting values that would
-        override hooks installation and return the list of paths
+        """Return every settings file (across all scopes) whose Snyk extension SAI
+        configuration conflicts with installing the hooks.
+
+        Each scope (global user settings, workspace ``.vscode/settings.json``) is
+        evaluated independently instead of being merged hierarchically: a
+        ``Manual`` override in one scope must not mask a live conflict in another,
+        and every conflicting file must be reported so it can be resolved.
+
+        A file conflicts when its ``executionFrequency`` is set to anything other
+        than ``"Manual"``. ``autoConfigureSnykMcpServer`` is intentionally ignored
+        — the extension runs SAI whenever the frequency is non-Manual regardless
+        of that flag.
         """
 
         home = Path.home()
         conflicting_paths = []
         settings_paths = self.get_extension_settings_path(ade)
-
-        # Merge settings hierarchically, workspace settings will overwrite global
-        resolved_settings: Dict[str, Any] = {}
 
         for path in settings_paths:
             try:
@@ -508,40 +554,82 @@ class Manifest:
                 content = re.sub(r",\s*([\]}])", r"\1", content)
                 settings_data = json.loads(content)
 
-                resolved_settings.update(settings_data)
-                conflicting_paths.append(safe_path_abs)
+                # Evaluate each scope independently — do not merge across scopes.
+                if settings_data.get(self.EXECUTION_FREQUENCY, "Manual") != "Manual":
+                    conflicting_paths.append(safe_path_abs)
             except Exception:
                 continue
 
-        # Check the final resolved state
-        if (
-            resolved_settings.get(self.AUTO_CONFIGURE, False)
-            and resolved_settings.get(self.EXECUTION_FREQUENCY, "Manual") != "Manual"
-        ):
-            return conflicting_paths
+        return conflicting_paths
 
-        return []
+    def resolve_extension_conflicts(self, settings_paths: List[str]) -> List[str]:
+        """Resolve conflicting extension settings in each of the given paths and
+        return the list of paths that were successfully updated.
 
-    def resolve_extension_conflicts(self, settings_paths: List[str]) -> None:
-        """Resolve conflicting extension settings in the given paths.
-        Based on its caller (are_extension_settings_conflicting), files given are guaranteed
-        to exist and some combination of their settings are guaranteed to be conflicting.
+        Every path returned by ``are_extension_settings_conflicting`` is a scope
+        that individually conflicts, so each is fixed in place. The conflict is
+        the extension running SAI on its own schedule, so we pin
+        ``executionFrequency`` back to ``Manual``. Settings are parsed as JSONC so
+        VS Code / Cursor files with comments still update.
         """
 
-        for path in settings_paths:
-            try:
-                with open(path, "r+", encoding="utf-8") as f:
-                    settings_data = json.load(f)
+        home = Path.home()
+        updated_paths: List[str] = []
 
-                    settings_data[self.AUTO_CONFIGURE] = False
+        for raw_path in settings_paths:
+            try:
+                # Re-validate inline at the sink: these paths originate from
+                # environment variables, so the sanitizing checks must be
+                # adjacent to the open() sink rather than trusting the caller.
+                path = Path(raw_path)
+                # 1. Must exist and contain no traversal segments.
+                if not path.exists() or ".." in str(path):
+                    print(
+                        f"  {C.red('ERROR')} Skipping unsafe or missing settings path: {raw_path}"
+                    )
+                    continue
+
+                # 2. Resolve symlinks to the real location on disk.
+                safe_path = path.resolve()
+
+                # 3. Must be a regular file strictly named settings.json.
+                if not safe_path.is_file() or safe_path.name != "settings.json":
+                    print(
+                        f"  {C.red('ERROR')} Skipping unsafe or missing settings path: {raw_path}"
+                    )
+                    continue
+
+                # 4. Confine to the home directory or the current workspace.
+                safe_path_abs = os.path.abspath(safe_path)
+                allowed_bases = [os.path.abspath(home), os.path.abspath(os.getcwd())]
+                is_safe = False
+                for base in allowed_bases:
+                    try:
+                        if os.path.commonpath([base, safe_path_abs]) == base:
+                            is_safe = True
+                            break
+                    except (ValueError, Exception):
+                        continue
+                if not is_safe:
+                    print(
+                        f"  {C.red('ERROR')} Skipping unsafe or missing settings path: {raw_path}"
+                    )
+                    continue
+
+                # 5. Open the validated absolute path for writing. Parse as JSONC
+                # so files with comments/trailing commas still update.
+                with open(safe_path_abs, "r+", encoding="utf-8") as f:
+                    settings_data = jsonc_loads(f.read())
+
                     settings_data[self.EXECUTION_FREQUENCY] = "Manual"
                     f.seek(0)
                     json.dump(settings_data, f, indent=4)
                     f.truncate()
+                updated_paths.append(safe_path_abs)
             except Exception as e:
-                print(f"  {C.red('ERROR')} Failed to update settings file {path}: {e}")
+                print(f"  {C.red('ERROR')} Failed to update settings file {raw_path}: {e}")
 
-        return None
+        return updated_paths
 
 
 # =============================================================================
@@ -2545,48 +2633,56 @@ def main() -> None:
             print("  Cancelled.")
             return
 
-    # ADE conflict detection after user has confirmed installation
-    for ade in ades:
-        # check if any of the ADEs have snyk extension settings and if there are conflicts
-        conflicting_paths = manifest.are_extension_settings_conflicting(ade)
+    # ADE conflict detection after user has confirmed installation.
+    #
+    # Policy: only *workspace*-scoped rule/skill conflicts prompt for consent —
+    # those live in the user's project and may be deliberate. Global rules/skills
+    # and Snyk extension settings are auto-resolved with a warning, since they
+    # are the shared defaults the installer manages.
+    def resolve_directive_conflicts(ade: str, resource_type: str, label: str) -> None:
+        # get_conflicting_resource_scope returns only the scopes where a conflict
+        # was actually found, so we never prompt for a workspace cleanup on a
+        # global-only conflict, or auto-run a global cleanup for a workspace-only
+        # one.
+        for scope in manifest.get_conflicting_resource_scope(ade, resource_type):
+            if args.dry_run:
+                print(f"    {C.dim(f'[dry-run] would remove conflicting {scope} {label}')}")
+                continue
+            if scope == WORKSPACE and not args.yes:
+                reply = (
+                    input(
+                        f"  Run 'snyk mcp configure' to remove the conflicting workspace {label} for {ade}? (y/n) "
+                    )
+                    .strip()
+                    .lower()
+                )
+                if reply not in ("y", "yes"):
+                    continue
+            remove_legacy_SAI_directives(ade, scope)
 
-        if conflicting_paths and not args.dry_run:
-            manifest.resolve_extension_conflicts(conflicting_paths)
-            print(
-                f"  {C.yellow('WARNING')} Detected and resolved conflicting Snyk extension settings for: {ade}\n"
-            )
+    for ade in ades:
+        # Snyk extension settings: auto-resolve with a warning (no prompt).
+        conflicting_paths = manifest.are_extension_settings_conflicting(ade)
+        if conflicting_paths:
+            print(f"  {C.yellow('WARNING')} Conflicting Snyk extension setting(s) found for: {ade}")
+            if args.dry_run:
+                print(f"    {C.dim('[dry-run] would set executionFrequency to Manual in:')}")
+                for path in conflicting_paths:
+                    print(f"    {C.dim('- ' + path)}")
+            else:
+                updated = manifest.resolve_extension_conflicts(conflicting_paths)
+                if updated:
+                    print(f"    Set executionFrequency to Manual for {ade}")
+
+        # Global rules auto-resolve with a warning; workspace rules prompt.
         if manifest.are_rules_conflicting(ade):
             print(f"  {C.yellow('WARNING')} Conflicting rule(s) found for: {ade}")
-            if args.yes:
-                accept = True
-            else:
-                reply = (
-                    input(
-                        f"  Run 'snyk mcp configure' to remove the conflicting rules for {ade}? (y/n) "
-                    )
-                    .strip()
-                    .lower()
-                )
-                accept = reply in ("y", "yes")
-            if accept:
-                for scope in manifest.get_conflicting_resource_scope(ade, "rules"):
-                    remove_legacy_SAI_directives(ade, scope)
+            resolve_directive_conflicts(ade, "rules", "rule(s)")
+
+        # Same policy for skills.
         if manifest.are_skills_conflicting(ade):
             print(f"  {C.yellow('WARNING')} Conflicting skill(s) found for: {ade}")
-            if args.yes:
-                accept = True
-            else:
-                reply = (
-                    input(
-                        f"  Run 'snyk mcp configure' to remove the conflicting skills for {ade}? (y/n) "
-                    )
-                    .strip()
-                    .lower()
-                )
-                accept = reply in ("y", "yes")
-            if accept:
-                for scope in manifest.get_conflicting_resource_scope(ade, "skills"):
-                    remove_legacy_SAI_directives(ade, scope)
+            resolve_directive_conflicts(ade, "skills", "skill(s)")
 
     # Install
     for ade in ades:

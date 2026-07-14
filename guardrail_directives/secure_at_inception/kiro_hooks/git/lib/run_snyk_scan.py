@@ -19,6 +19,7 @@ Usage:
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -34,6 +35,49 @@ _IS_WINDOWS = sys.platform == "win32"
 _CREATE_NO_WINDOW = 0
 if sys.platform == "win32":
     _CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW
+
+
+# =============================================================================
+# PREREQUISITE CHECKS (fail-closed gate)
+# =============================================================================
+
+
+def _snyk_config_path() -> str:
+    """Path to Snyk's configstore JSON.
+
+    Uses the hardcoded well-known path (``~/.config/configstore/snyk.json``)
+    rather than trusting ``XDG_CONFIG_HOME`` to avoid path-traversal via a
+    manipulated environment variable flowing into ``open()``.
+    """
+    return os.path.join(os.path.expanduser("~"), ".config", "configstore", "snyk.json")
+
+
+def check_snyk_auth() -> Optional[str]:
+    """Return the API token (or an oauth sentinel) when authenticated, else None.
+
+    Checks SNYK_TOKEN first, then the Snyk CLI config file for a stored API
+    key or OAuth token. A None return means the CLI cannot scan and the
+    pre-commit hook must fail-closed.
+    """
+    token = os.environ.get("SNYK_TOKEN")
+    if token:
+        return token
+    try:
+        with open(_snyk_config_path()) as f:
+            config = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    api_key = config.get("api")
+    if api_key and isinstance(api_key, str):
+        return api_key
+    if config.get("INTERNAL_OAUTH_TOKEN_STORAGE"):
+        return "__oauth__"
+    return None
+
+
+def check_snyk_cli() -> Optional[str]:
+    """Return the path to the snyk binary if discoverable on PATH, else None."""
+    return shutil.which("snyk")
 
 
 @dataclass
@@ -331,6 +375,13 @@ def run_sast_scan(target_path: str = ".") -> SastScanResult:
 
     # Exit code 0 = no vulns, 1 = vulns found, 2+ = error
     if exit_code < 0 or exit_code > 1:
+        # Surface a missing-auth failure distinctly so the hook can tell the
+        # user to run `snyk auth` rather than reporting a generic error.
+        if "not authenticated" in stderr.lower():
+            return SastScanResult(
+                success=False,
+                error_message="Snyk not authenticated. Run: snyk auth to authenticate",
+            )
         return SastScanResult(success=False, error_message=stderr or "Snyk code scan failed")
 
     vulnerabilities = parse_sast_json(stdout)
@@ -357,7 +408,8 @@ def run_sca_scan(target_path: str = ".") -> ScaScanResult:
         # Check for common errors
         if "not authenticated" in stderr.lower():
             return ScaScanResult(
-                success=False, error_message="Snyk not authenticated. Run: snyk auth"
+                success=False,
+                error_message="Snyk not authenticated. Run: snyk auth to authenticate",
             )
         return ScaScanResult(success=False, error_message=stderr or "Snyk test failed")
 

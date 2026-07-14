@@ -1436,12 +1436,55 @@ class TestManifest:
     def test_are_skills_conflicting_unknown_ade(self, manifest):
         assert manifest.are_skills_conflicting("nonexistent") is False
 
-    def test_get_conflicting_resource_scope(self, manifest):
-        # cursor has 1 rule (workspace) and 1 skill (global) in manifest.json
-        # "cursor" :{ "rules": [{"global": false, ...}], "skills": [{"global": true, ...}] }
-        assert manifest.get_conflicting_resource_scope("cursor", "rules") == ["workspace"]
-        assert manifest.get_conflicting_resource_scope("cursor", "skills") == ["global"]
-        assert manifest.get_conflicting_resource_scope("nonexistent", "rules") == []
+    _RULE_TAGS = "<!--# BEGIN SNYK GLOBAL RULE -->\nx\n<!--# END SNYK GLOBAL RULE -->"
+
+    def test_conflicting_rule_scopes_none(self, manifest, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.chdir(tmp_path)
+        assert manifest.conflicting_rule_scopes("windsurf") == []
+
+    def test_conflicting_rule_scopes_workspace_only(self, manifest, tmp_path, monkeypatch):
+        # windsurf: global .codeium/windsurf/memories/global_rules.md + workspace
+        # .windsurf/rules/snyk_rules.md. Only the workspace file has tags.
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.chdir(tmp_path)
+        ws = tmp_path / ".windsurf/rules/snyk_rules.md"
+        ws.parent.mkdir(parents=True)
+        ws.write_text(self._RULE_TAGS)
+        assert manifest.conflicting_rule_scopes("windsurf") == ["workspace"]
+
+    def test_conflicting_rule_scopes_global_only(self, manifest, tmp_path, monkeypatch):
+        # Only the global file has tags -> must not report workspace.
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.chdir(tmp_path)
+        gl = tmp_path / ".codeium/windsurf/memories/global_rules.md"
+        gl.parent.mkdir(parents=True)
+        gl.write_text(self._RULE_TAGS)
+        assert manifest.conflicting_rule_scopes("windsurf") == ["global"]
+
+    def test_conflicting_rule_scopes_file_without_tags_ignored(
+        self, manifest, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.chdir(tmp_path)
+        ws = tmp_path / ".windsurf/rules/snyk_rules.md"
+        ws.parent.mkdir(parents=True)
+        ws.write_text("no tags here")
+        assert manifest.conflicting_rule_scopes("windsurf") == []
+
+    def test_conflicting_skill_scopes(self, manifest, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.chdir(tmp_path)
+        assert manifest.conflicting_skill_scopes("cursor") == []
+        # cursor has a global skill: .cursor/skills/snyk-rules/SKILL.md
+        skill = tmp_path / ".cursor/skills/snyk-rules/SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.touch()
+        assert manifest.conflicting_skill_scopes("cursor") == ["global"]
+
+    def test_conflicting_scopes_unknown_ade(self, manifest):
+        assert manifest.conflicting_rule_scopes("nonexistent") == []
+        assert manifest.conflicting_skill_scopes("nonexistent") == []
 
 
 # ===========================================================================
@@ -2047,33 +2090,69 @@ class TestVSCodeSettingsConflict:
         )
         assert manifest.are_extension_settings_conflicting("cursor")
 
-    def test_workspace_no_conflict_global_conflict(self, manifest, vscode_env):
-        # Global has it enabled
+    def test_global_conflict_not_masked_by_manual_workspace(self, manifest, vscode_env):
+        # Global has SAI running on code generation.
         global_dir = vscode_env["global_dir"]
         global_dir.mkdir(parents=True)
-        (global_dir / "settings.json").write_text(
+        global_settings = global_dir / "settings.json"
+        global_settings.write_text(
             json.dumps(
                 {
-                    "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
                     "snyk.securityAtInception.executionFrequency": "On Code Generation",
                 }
             )
         )
 
-        # Workspace has it explicitly disabled - this SHOULD NOT conflict as it overrides global.
-        # Note: Both keys must be present for the installer to update its resolved settings.
+        # Workspace pins it to Manual. Scopes are evaluated independently, so the
+        # workspace override must NOT hide the live global conflict.
         ws_dir = vscode_env["workspace_dir"]
         ws_dir.mkdir(parents=True)
         (ws_dir / "settings.json").write_text(
             json.dumps(
                 {
-                    "snyk.securityAtInception.autoConfigureSnykMcpServer": False,
-                    "snyk.securityAtInception.executionFrequency": "On Code Generation",
+                    "snyk.securityAtInception.executionFrequency": "Manual",
                 }
             )
         )
 
-        assert not manifest.are_extension_settings_conflicting("cursor")
+        conflicts = manifest.are_extension_settings_conflicting("cursor")
+        assert conflicts == [str(global_settings.resolve())]
+
+    def test_all_conflicting_scopes_reported(self, manifest, vscode_env):
+        # Both global and workspace have SAI running non-Manual -> both reported.
+        global_dir = vscode_env["global_dir"]
+        global_dir.mkdir(parents=True)
+        global_settings = global_dir / "settings.json"
+        global_settings.write_text(
+            json.dumps({"snyk.securityAtInception.executionFrequency": "On Code Generation"})
+        )
+
+        ws_dir = vscode_env["workspace_dir"]
+        ws_dir.mkdir(parents=True)
+        ws_settings = ws_dir / "settings.json"
+        ws_settings.write_text(
+            json.dumps({"snyk.securityAtInception.executionFrequency": "On Save"})
+        )
+
+        conflicts = manifest.are_extension_settings_conflicting("cursor")
+        assert set(conflicts) == {
+            str(global_settings.resolve()),
+            str(ws_settings.resolve()),
+        }
+
+    def test_conflict_detected_without_auto_configure_flag(self, manifest, vscode_env):
+        # autoConfigureSnykMcpServer is intentionally ignored: a non-Manual
+        # executionFrequency alone is a conflict.
+        ws_dir = vscode_env["workspace_dir"]
+        ws_dir.mkdir(parents=True)
+        (ws_dir / "settings.json").write_text(
+            json.dumps(
+                {
+                    "snyk.securityAtInception.executionFrequency": "On Code Generation",
+                }
+            )
+        )
+        assert manifest.are_extension_settings_conflicting("cursor")
 
     def test_workspace_manual_frequency_is_no_conflict(self, manifest, vscode_env):
         ws_dir = vscode_env["workspace_dir"]
@@ -2081,7 +2160,6 @@ class TestVSCodeSettingsConflict:
         (ws_dir / "settings.json").write_text(
             json.dumps(
                 {
-                    "snyk.securityAtInception.autoConfigureSnykMcpServer": True,
                     "snyk.securityAtInception.executionFrequency": "Manual",
                 }
             )
@@ -2151,13 +2229,40 @@ class TestVSCodeSettingsConflict:
         }
         settings_file.write_text(json.dumps(original_data))
 
-        manifest.resolve_extension_conflicts([str(settings_file)])
+        updated = manifest.resolve_extension_conflicts([str(settings_file)])
 
-        # Check that settings were updated
+        # executionFrequency is pinned to Manual; unrelated settings (including
+        # autoConfigureSnykMcpServer, which we no longer touch) are preserved.
         updated_data = json.loads(settings_file.read_text())
-        assert updated_data["snyk.securityAtInception.autoConfigureSnykMcpServer"] is False
+        assert updated_data["snyk.securityAtInception.executionFrequency"] == "Manual"
+        assert updated_data["snyk.securityAtInception.autoConfigureSnykMcpServer"] is True
+        assert updated_data["other.setting"] == "value"
+        assert updated == [str(settings_file.resolve())]
+
+    def test_resolve_extension_conflicts_jsonc(self, manifest, vscode_env):
+        # A JSONC settings file (block comment + trailing comma) that was flagged
+        # as conflicting must also update — not silently fail on strict json.load.
+        ws_dir = vscode_env["workspace_dir"]
+        ws_dir.mkdir(parents=True)
+        settings_file = ws_dir / "settings.json"
+        settings_file.write_text(
+            """{
+            /* Snyk config */
+            "snyk.securityAtInception.executionFrequency": "On Code Generation",
+            "other.setting": "value",
+        }"""
+        )
+
+        # Confirm it is detected, then resolved.
+        assert manifest.are_extension_settings_conflicting("cursor")
+        updated = manifest.resolve_extension_conflicts([str(settings_file)])
+
+        assert updated == [str(settings_file.resolve())]
+        updated_data = json.loads(settings_file.read_text())
         assert updated_data["snyk.securityAtInception.executionFrequency"] == "Manual"
         assert updated_data["other.setting"] == "value"
+        # And it is no longer flagged as conflicting.
+        assert not manifest.are_extension_settings_conflicting("cursor")
 
     def test_json_with_comments_and_trailing_commas(self, manifest, vscode_env):
         ws_dir = vscode_env["workspace_dir"]
@@ -2225,8 +2330,30 @@ class TestConflictResolution:
         expected_global = tmp_path / ".config/Cursor/User/settings.json"
         assert expected_global in paths
 
-    def test_resolve_extension_conflicts_write_error(self, manifest, tmp_path, capsys):
-        # Setup a file that exists but we can't write to (mocking open failure)
+    def test_get_extension_settings_path_windsurf(self, manifest, monkeypatch, tmp_path):
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        paths = manifest.get_extension_settings_path("windsurf")
+        expected_global = tmp_path / "Library/Application Support/Windsurf/User/settings.json"
+        expected_workspace = Path(".vscode/settings.json")
+        assert expected_global in paths
+        assert expected_workspace in paths
+
+    def test_get_extension_settings_path_copilot_vscode(self, manifest, monkeypatch, tmp_path):
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        paths = manifest.get_extension_settings_path("copilot-vscode")
+        expected_global = tmp_path / "Library/Application Support/Code/User/settings.json"
+        expected_workspace = Path(".vscode/settings.json")
+        assert expected_global in paths
+        assert expected_workspace in paths
+
+    def test_resolve_extension_conflicts_write_error(self, manifest, tmp_path, capsys, monkeypatch):
+        # File must live under an allowed base (home) to pass sink validation,
+        # then the mocked open() failure exercises the write-error branch.
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
         settings_file = tmp_path / "settings.json"
         settings_file.write_text("{}")
 
@@ -2286,6 +2413,7 @@ class TestConflictPromptAutoYes:
         m.are_extension_settings_conflicting.return_value = []
         m.are_rules_conflicting.return_value = False
         m.are_skills_conflicting.return_value = False
+        m.get_conflicting_resource_scope.return_value = []
         m.is_workspace_scoped.return_value = False
         return m
 
@@ -2304,7 +2432,6 @@ class TestConflictPromptAutoYes:
 
         installer.main()
 
-        manifest.get_conflicting_resource_scope.assert_any_call("cursor", "rules")
         assert any(isinstance(c, list) and c[:3] == ["snyk", "mcp", "configure"] for c in cmds), (
             f"expected snyk mcp configure invocation, got {cmds}"
         )
@@ -2324,10 +2451,150 @@ class TestConflictPromptAutoYes:
 
         installer.main()
 
-        manifest.get_conflicting_resource_scope.assert_any_call("cursor", "skills")
         assert any(isinstance(c, list) and c[:3] == ["snyk", "mcp", "configure"] for c in cmds), (
             f"expected snyk mcp configure invocation, got {cmds}"
         )
+
+    def test_extension_settings_conflict_auto_resolves_under_yes(self, monkeypatch, capsys):
+        manifest = self._base_manifest()
+        manifest.are_extension_settings_conflicting.return_value = ["/tmp/settings.json"]
+        self._stub_main(monkeypatch, manifest)
+
+        installer.main()
+
+        manifest.resolve_extension_conflicts.assert_called_once_with(["/tmp/settings.json"])
+
+
+class TestConflictResolutionPolicy:
+    """Only workspace-scoped rule/skill conflicts prompt; global rules/skills and
+    extension settings are auto-resolved with a warning."""
+
+    @staticmethod
+    def _args(yes=False):
+        return MagicMock(
+            list_mode=False,
+            yes=yes,
+            dry_run=False,
+            control_identifier=None,
+            uninstall=False,
+            verify=False,
+            diag_dump=False,
+            ade=None,
+            profile="default",
+            workspace=None,
+            no_latest_deps=False,
+        )
+
+    @staticmethod
+    def _base_manifest():
+        m = MagicMock()
+        m.resolve_recipes.return_value = []
+        m.detect_stale_conflicts.return_value = []
+        m.are_extension_settings_conflicting.return_value = []
+        m.are_rules_conflicting.return_value = False
+        m.are_skills_conflicting.return_value = False
+        m.get_conflicting_resource_scope.return_value = []
+        m.is_workspace_scoped.return_value = False
+        return m
+
+    def _stub_main(self, monkeypatch, manifest, prompt_answers, ade="cursor"):
+        monkeypatch.setattr(installer, "PayloadContext", lambda: MagicMock())
+        monkeypatch.setattr(installer, "Manifest", lambda *a, **kw: manifest)
+        monkeypatch.setattr(installer, "check_prerequisites", lambda *a, **kw: None)
+        monkeypatch.setattr(installer, "get_target_ades", lambda *a, **kw: [ade])
+        monkeypatch.setattr(installer, "resolve_workspace", lambda *a, **kw: None)
+        monkeypatch.setattr(installer, "show_plan", lambda *a, **kw: None)
+        monkeypatch.setattr(installer, "install_recipe", lambda *a, **kw: None)
+        monkeypatch.setattr(installer, "install_workspace_recipe", lambda *a, **kw: None)
+        monkeypatch.setattr(installer, "verify_recipe", lambda *a, **kw: True)
+        monkeypatch.setattr(installer, "print_banner", lambda: None)
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+
+        self.prompts: list = []
+
+        def fake_input(prompt=""):
+            self.prompts.append(prompt)
+            if "Proceed with installation" in prompt:
+                return "y"
+            return prompt_answers.pop(0) if prompt_answers else "n"
+
+        monkeypatch.setattr("builtins.input", fake_input)
+
+    def test_global_rule_conflict_auto_resolves_without_prompt(self, monkeypatch):
+        manifest = self._base_manifest()
+        manifest.are_rules_conflicting.return_value = True
+        manifest.get_conflicting_resource_scope.return_value = ["global"]
+        monkeypatch.setattr(installer, "parse_args", lambda: self._args(yes=False))
+        self._stub_main(monkeypatch, manifest, prompt_answers=[])
+
+        cmds: list = []
+        monkeypatch.setattr(
+            installer, "run", lambda cmd, **kw: cmds.append(cmd) or MagicMock(returncode=0)
+        )
+
+        installer.main()
+
+        # No resolve prompt was shown for the global rule (only the install prompt).
+        assert not any("remove the conflicting" in p for p in self.prompts)
+        # It was auto-resolved.
+        assert any(isinstance(c, list) and c[:3] == ["snyk", "mcp", "configure"] for c in cmds)
+
+    def test_workspace_rule_conflict_prompts_and_resolves_on_accept(self, monkeypatch):
+        manifest = self._base_manifest()
+        manifest.are_rules_conflicting.return_value = True
+        manifest.get_conflicting_resource_scope.return_value = ["workspace"]
+        monkeypatch.setattr(installer, "parse_args", lambda: self._args(yes=False))
+        self._stub_main(monkeypatch, manifest, prompt_answers=["y"])
+
+        cmds: list = []
+        monkeypatch.setattr(
+            installer, "run", lambda cmd, **kw: cmds.append(cmd) or MagicMock(returncode=0)
+        )
+
+        installer.main()
+
+        assert any("remove the conflicting workspace" in p for p in self.prompts)
+        assert any(isinstance(c, list) and c[:3] == ["snyk", "mcp", "configure"] for c in cmds)
+
+    def test_workspace_rule_conflict_declined_is_not_resolved(self, monkeypatch):
+        manifest = self._base_manifest()
+        manifest.are_rules_conflicting.return_value = True
+        manifest.get_conflicting_resource_scope.return_value = ["workspace"]
+        monkeypatch.setattr(installer, "parse_args", lambda: self._args(yes=False))
+        self._stub_main(monkeypatch, manifest, prompt_answers=["n"])
+
+        cmds: list = []
+        monkeypatch.setattr(
+            installer, "run", lambda cmd, **kw: cmds.append(cmd) or MagicMock(returncode=0)
+        )
+
+        installer.main()
+
+        assert any("remove the conflicting workspace" in p for p in self.prompts)
+        assert not cmds
+
+    def test_extension_settings_auto_resolves_without_prompt(self, monkeypatch):
+        manifest = self._base_manifest()
+        manifest.are_extension_settings_conflicting.return_value = ["/tmp/settings.json"]
+        monkeypatch.setattr(installer, "parse_args", lambda: self._args(yes=False))
+        self._stub_main(monkeypatch, manifest, prompt_answers=[])
+
+        installer.main()
+
+        manifest.resolve_extension_conflicts.assert_called_once_with(["/tmp/settings.json"])
+        assert not any("executionFrequency" in p for p in self.prompts)
+
+    def test_extension_settings_no_success_message_when_update_fails(self, monkeypatch, capsys):
+        manifest = self._base_manifest()
+        manifest.are_extension_settings_conflicting.return_value = ["/tmp/settings.json"]
+        # Resolution failed to update any file (e.g. write error) -> empty list.
+        manifest.resolve_extension_conflicts.return_value = []
+        monkeypatch.setattr(installer, "parse_args", lambda: self._args(yes=False))
+        self._stub_main(monkeypatch, manifest, prompt_answers=[])
+
+        installer.main()
+
+        assert "Set executionFrequency to Manual" not in capsys.readouterr().out
 
 
 # ===========================================================================

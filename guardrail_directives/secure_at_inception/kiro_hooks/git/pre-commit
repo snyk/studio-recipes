@@ -47,7 +47,7 @@ if not LIB_DIR.exists():
     sys.exit(1)
 
 from analyze_diff import get_staged_changes, StagedChanges
-from run_snyk_scan import SastScanResult, ScaScanResult
+from run_snyk_scan import SastScanResult, ScaScanResult, check_snyk_auth, check_snyk_cli
 from filter_new_vulns import analyze_staged_changes, FilterResult
 from cache import SnykCache, get_cache_dir
 from scanner import get_sast_with_cache, get_sca_with_cache
@@ -106,7 +106,21 @@ def run_hook() -> int:
     if not staged.files and not staged.packages:
         print_success("No significant changes to scan")
         return 0
-    
+
+    # Fail-closed prerequisite gate: a security hook must not allow a commit it
+    # cannot actually scan. Missing CLI or missing auth blocks the commit, the
+    # same way `secure_at_commit` does. Bypass with `git commit --no-verify`.
+    if check_snyk_cli() is None:
+        print_header("COMMIT BLOCKED")
+        print_error("Snyk CLI not found on PATH — install with `npm install -g snyk`.")
+        print_warning("Security scanning is required. Bypass with: git commit --no-verify")
+        return 1
+    if check_snyk_auth() is None:
+        print_header("COMMIT BLOCKED")
+        print_error("Snyk CLI is not authenticated — run `snyk auth`.")
+        print_warning("Security scanning is required. Bypass with: git commit --no-verify")
+        return 1
+
     if DEBUG:
         print(f"  Code files: {len(staged.changed_code_files)}")
         print(f"  Packages: {len(staged.packages)}")
@@ -142,6 +156,19 @@ def run_hook() -> int:
         hit_rate = total_cache_hits / (total_cache_hits + total_cache_misses) * 100
         print_info(f"Cache: {total_cache_hits} hits, {total_cache_misses} misses ({hit_rate:.0f}% hit rate)")
     
+    # Fail-closed: if a fresh scan could not complete (auth lapsed or the CLI
+    # errored after the pre-flight check), block rather than treating the empty
+    # result set as "no new vulnerabilities".
+    for label, scan_result in (("SAST", sast_result), ("SCA", sca_result)):
+        if scan_result is not None and not scan_result.success:
+            print_header("COMMIT BLOCKED")
+            print_error(
+                f"{label} scan could not complete: "
+                f"{scan_result.error_message or 'unknown error'}"
+            )
+            print_warning("Security scanning is required. Bypass with: git commit --no-verify")
+            return 1
+
     # Step 3: Filter to NEW vulnerabilities only
     print_info("Filtering to vulnerabilities introduced by this commit...")
     result = analyze_staged_changes(
@@ -205,6 +232,7 @@ if __name__ == "__main__":
         if DEBUG:
             import traceback
             traceback.print_exc()
-        # Don't block commits on hook errors
-        print_warning("Allowing commit due to hook error")
-        sys.exit(0)
+        # Fail-closed: a security gate that crashes must not silently let the
+        # commit through. Block, and let the developer bypass deliberately.
+        print_warning("Blocking commit due to hook error. Bypass with: git commit --no-verify")
+        sys.exit(1)

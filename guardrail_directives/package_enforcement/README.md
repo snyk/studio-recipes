@@ -35,8 +35,9 @@ When an AI agent adds new dependencies to a project, these guardrails ensure:
                               │
                               ▼
 ┌────────────────────────────────────────────────────────────┐
-│  AI Agent: Calls snyk_sca_scan                            │
-│  beforeMCPExecution Hook: Clears pending scan state       │
+│  AI Agent: Calls snyk_package_health_check                │
+│  afterMCPExecution Hook: Clears pending scan state ONLY   │
+│  if the scan completed (authenticated, no error)          │
 └─────────────────────────────┬──────────────────────────────┘
                               │
                               ▼

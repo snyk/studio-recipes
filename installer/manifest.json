@@ -358,6 +358,10 @@
       "rules": [
         {"global": true, "src": ".codeium/windsurf/memories/global_rules.md"},
         {"global": false, "src": ".windsurf/rules/snyk_rules.md"}
+      ],
+      "extension-settings": [
+        {"global": true, "src": "Windsurf/User/settings.json"},
+        {"global": false, "src": ".vscode/settings.json"}
       ]
     },
     "gemini": {
@@ -374,6 +378,10 @@
       "rules": [
         {"global": true, "src": "prompts/snyk_rules.instructions.md"},
         {"global": false, "src": ".github/instructions/snyk_rules.instructions.md"}
+      ],
+      "extension-settings": [
+        {"global": true, "src": "Code/User/settings.json"},
+        {"global": false, "src": ".vscode/settings.json"}
       ]
     }
   },

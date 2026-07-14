@@ -112,6 +112,13 @@ def get_sast_with_cache(
     if uncached_files:
         fresh_result = run_sast_scan(".")
 
+        # Fail-closed: a fresh scan that could not complete (missing auth,
+        # CLI error) must NOT be reported as a clean success. Propagate the
+        # failure so the pre-commit hook blocks instead of allowing the
+        # commit on an empty result set.
+        if not fresh_result.success:
+            return fresh_result, cache_hits, cache_misses
+
         if fresh_result.success:
             for v in fresh_result.vulnerabilities:
                 for uncached in uncached_files:
@@ -195,6 +202,11 @@ def get_sca_with_cache(
 
     if need_fresh_scan:
         fresh_result = run_sca_scan(".")
+
+        # Fail-closed: propagate a failed fresh scan (missing auth, CLI error)
+        # rather than masking it as a clean success.
+        if not fresh_result.success:
+            return fresh_result, cache_hits, cache_misses
 
         if fresh_result.success:
             cached_ids = {v.id for v in all_vulns}

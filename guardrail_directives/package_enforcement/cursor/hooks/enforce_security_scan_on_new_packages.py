@@ -10,14 +10,22 @@ WORKFLOW:
 ---------
 1. AI edits package.json → afterFileEdit records the change
 2. AI attempts npm/yarn/pnpm install → beforeShellExecution BLOCKS it
-3. AI runs snyk_package_health_check → beforeMCPExecution clears the block
+3. AI runs snyk_package_health_check → afterMCPExecution clears the block,
+   but ONLY if the scan actually completed (authenticated, no error)
 4. AI can now run install commands
+
+Fail-closed on auth: the block is cleared from afterMCPExecution after
+inspecting the scan's `result_json`. An unauthenticated (failed) scan leaves
+the gate in place, so installs stay blocked until a real scan runs. This
+fixes the prior behavior where invoking the scan tool cleared the gate even
+when the scan never authenticated.
 
 SUPPORTED HOOK EVENTS:
 ----------------------
 - afterFileEdit: Records package.json modifications to state file
 - beforeShellExecution: Blocks install commands until scan is complete
-- beforeMCPExecution: Clears block when security scan is initiated
+- beforeMCPExecution: Logs that a scan started (does NOT clear the gate)
+- afterMCPExecution: Clears the gate only on a successful, authenticated scan
 - stop: Final reminder if session ends without scanning
 
 INSTALLATION:
@@ -38,6 +46,9 @@ HOOKS.JSON EXAMPLE:
       {"command": "python3 hooks/enforce_security_scan_on_new_packages.py"}
     ],
     "beforeMCPExecution": [
+      {"command": "python3 hooks/enforce_security_scan_on_new_packages.py"}
+    ],
+    "afterMCPExecution": [
       {"command": "python3 hooks/enforce_security_scan_on_new_packages.py"}
     ],
     "stop": [
@@ -100,6 +111,23 @@ INSTALL_COMMANDS = [
 # MCP tool that satisfy the security scan requirement
 SCAN_TOOL = "snyk_package_health_check"
 
+# Markers in an MCP tool result indicating the scan did NOT complete
+# successfully — most importantly, that Snyk is not authenticated. Their
+# presence keeps the install gate closed (fail-closed).
+#
+# These are matched against the entire result payload (see _scan_result_ok),
+# which on a successful scan includes vulnerability titles and descriptions.
+# Only machine-readable Snyk error identifiers are used here: generic English
+# phrases like "unauthorized", "not authenticated", or "authentication
+# required" appear in legitimate findings (e.g. CWE-862 "Missing
+# Authorization") and would false-positive a successful scan into a failure.
+# A genuine auth failure emits both these tokens and isError=true, so real
+# auth detection stays fail-closed.
+_SCAN_FAILURE_MARKERS = (
+    "missingapitokenerror",
+    "snyk-0005",
+)
+
 
 # =============================================================================
 # UTILITY FUNCTIONS
@@ -156,6 +184,31 @@ def is_install_command(command: str) -> bool:
 def is_scan_tool(tool_name: str) -> bool:
     """Check if the MCP tool is a security scan tool."""
     return SCAN_TOOL in tool_name.lower()
+
+
+def _scan_result_ok(result_json: str) -> bool:
+    """Best-effort check that a snyk_package_health_check scan actually completed.
+
+    Cursor's afterMCPExecution delivers the tool's full response as a JSON
+    string in ``result_json``. The scan is treated as successful only when that
+    payload parses and shows no error / auth-failure markers. Anything that
+    can't be confirmed successful — empty, unparseable, ``isError`` true, or an
+    auth-failure marker — is treated as a failure so the install gate stays
+    closed (fail-closed).
+
+    CAVEAT: this matches on the result text/markers; the exact wording of the
+    Snyk MCP tool's error payloads may evolve, so detection is heuristic.
+    """
+    if not result_json or not result_json.strip():
+        return False
+    try:
+        result = json.loads(result_json)
+    except (json.JSONDecodeError, ValueError):
+        # Non-JSON text result — scan the raw string for failure markers.
+        return not any(m in result_json.lower() for m in _SCAN_FAILURE_MARKERS)
+    if isinstance(result, dict) and result.get("isError") is True:
+        return False
+    return not any(m in json.dumps(result).lower() for m in _SCAN_FAILURE_MARKERS)
 
 
 def state_file_exists(workspace: str) -> bool:
@@ -303,30 +356,86 @@ def handle_before_mcp_execution(data: Dict[str, Any], workspace: str) -> None:
     """
     Handler for beforeMCPExecution hook event.
 
-    Clears the security gate when a scan tool is invoked, allowing
-    subsequent install commands to proceed.
-
-    Also provides warnings if non-scan MCP tools are called while
-    manifest changes are pending.
+    Intentionally does NOT clear the security gate. beforeMCPExecution fires
+    *before* the tool runs, so it cannot know whether the scan actually
+    authenticated and completed — clearing here is what let an unauthenticated
+    (failed) scan unblock installs. The gate is now cleared by
+    handle_after_mcp_execution, which inspects the scan result. Here we only
+    log that a scan was initiated.
     """
     tool_name = data.get("tool_name", "unknown")
 
-    # If calling a scan tool, clear the pending state
-    if is_scan_tool(tool_name):
-        if state_file_exists(workspace):
-            changes = read_state_file(workspace)
-            clear_state_file(workspace)
-
-            log_to_panel("=" * 60)
-            log_to_panel("SECURITY SCAN INITIATED")
-            log_to_panel("=" * 60)
-            log_to_panel(f"Tool: {tool_name}")
-            log_to_panel(f"Scanned changes: {changes}")
-            log_to_panel("")
-            log_to_panel("Install commands are now allowed.")
-            log_to_panel("=" * 60)
+    if is_scan_tool(tool_name) and state_file_exists(workspace):
+        log_to_panel("=" * 60)
+        log_to_panel("SECURITY SCAN INITIATED")
+        log_to_panel(f"Tool: {tool_name}")
+        log_to_panel("Awaiting scan result before clearing the install gate...")
+        log_to_panel("=" * 60)
 
     output_response({"exit_code": 0})
+
+
+def handle_after_mcp_execution(data: Dict[str, Any], workspace: str) -> None:
+    """
+    Handler for afterMCPExecution hook event.
+
+    Clears the install gate ONLY when the snyk_package_health_check scan
+    actually completed (authenticated, no error). Cursor delivers the tool's
+    full response in ``result_json``; if it indicates an auth failure or error —
+    or cannot be confirmed successful — the gate stays in place so the next
+    install command is still blocked.
+
+    This is the fail-closed fix for an unauthenticated scan silently unblocking
+    installs.
+    """
+    tool_name = data.get("tool_name", "unknown")
+
+    if not is_scan_tool(tool_name) or not state_file_exists(workspace):
+        output_response({"exit_code": 0})
+        return
+
+    result_json = data.get("result_json", "")
+
+    if _scan_result_ok(result_json):
+        changes = read_state_file(workspace)
+        clear_state_file(workspace)
+
+        log_to_panel("=" * 60)
+        log_to_panel("SECURITY SCAN COMPLETED - INSTALL GATE CLEARED")
+        log_to_panel("=" * 60)
+        log_to_panel(f"Tool: {tool_name}")
+        log_to_panel(f"Scanned changes: {changes}")
+        log_to_panel("")
+        log_to_panel("Install commands are now allowed.")
+        log_to_panel("=" * 60)
+        output_response({"exit_code": 0})
+        return
+
+    # Scan did not complete successfully (e.g. Snyk not authenticated). Keep the
+    # gate closed and tell the agent/user how to recover.
+    log_to_panel("=" * 60)
+    log_to_panel("SECURITY SCAN DID NOT COMPLETE - INSTALL GATE KEPT")
+    log_to_panel("=" * 60)
+    log_to_panel(f"Tool: {tool_name}")
+    log_to_panel("Install commands remain blocked.")
+    log_to_panel("If Snyk is not authenticated, run `snyk auth` and re-scan.")
+    log_to_panel("=" * 60)
+
+    response = {
+        "exit_code": 0,
+        "user_message": (
+            "Security scan did not complete (Snyk may not be authenticated). "
+            "Install commands remain blocked. Run `snyk auth`, then re-run "
+            "snyk_package_health_check."
+        ),
+        "agent_message": (
+            "The snyk_package_health_check scan did not complete successfully — "
+            "Snyk may not be authenticated. Install commands remain BLOCKED. Ask "
+            "the user to run `snyk auth` in a terminal, then re-run "
+            "snyk_package_health_check before retrying the install."
+        ),
+    }
+    output_response(response)
 
 
 def handle_stop(data: Dict[str, Any], workspace: str) -> None:
@@ -399,6 +508,7 @@ def main() -> None:
         "afterFileEdit": handle_after_file_edit,
         "beforeShellExecution": handle_before_shell_execution,
         "beforeMCPExecution": handle_before_mcp_execution,
+        "afterMCPExecution": handle_after_mcp_execution,
         "stop": handle_stop,
     }
 

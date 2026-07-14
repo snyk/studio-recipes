@@ -16,8 +16,10 @@ The hook operates in the background and requires no developer intervention.
 
 1. AI edits a package manifest → `afterFileEdit` records the change
 2. AI attempts `npm install` / `yarn add` / `pnpm install` → `beforeShellExecution` **blocks** it
-3. AI runs `snyk_package_health_check` → `beforeMCPExecution` **clears** the block
+3. AI runs `snyk_package_health_check` → `afterMCPExecution` **clears** the block, but only if the scan actually completed (authenticated, no error)
 4. AI can now run install commands
+
+> **Fail-closed on auth:** the block is cleared from `afterMCPExecution`, which inspects the scan's `result_json`. If the scan did not authenticate (or otherwise failed), the gate stays in place and installs remain blocked until a real scan runs. Detection of an auth failure is heuristic (it matches markers in the tool result), and the Snyk MCP server may authenticate independently of the CLI — so treat it as best-effort.
 
 ## File
 
@@ -52,6 +54,9 @@ Create or update `.cursor/hooks.json` in your project:
       {"command": "python3 hooks/enforce_security_scan_on_new_packages.py"}
     ],
     "beforeMCPExecution": [
+      {"command": "python3 hooks/enforce_security_scan_on_new_packages.py"}
+    ],
+    "afterMCPExecution": [
       {"command": "python3 hooks/enforce_security_scan_on_new_packages.py"}
     ],
     "stop": [
@@ -105,7 +110,7 @@ The hook uses a state file to track pending scans:
 This file is:
 - **Created** when a manifest is edited (`afterFileEdit`)
 - **Checked** before install commands (`beforeShellExecution`)
-- **Cleared** when `snyk_package_health_check` runs (`beforeMCPExecution`)
+- **Cleared** when `snyk_package_health_check` completes successfully (`afterMCPExecution`); a failed/unauthenticated scan leaves it in place
 
 ## Debugging
 

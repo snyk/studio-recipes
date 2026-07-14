@@ -63,7 +63,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, cast
+from typing import Any, Dict, List, Optional, cast
 
 # =============================================================================
 # CONFIGURATION
@@ -164,6 +164,37 @@ def debug_log(message: str) -> None:
     """Print debug message to stderr if DEBUG is enabled."""
     if DEBUG:
         print(f"[DEBUG] {message}", file=sys.stderr)
+
+
+def check_snyk_auth() -> Optional[str]:
+    """Return the Snyk API token (or an oauth sentinel) when authenticated, else None.
+
+    Best-effort probe of the Snyk CLI credentials: SNYK_TOKEN first, then the
+    configstore file. Used to fail-closed — when auth can't be confirmed, the
+    snyk_code_scan / snyk_sca_scan MCP tools cannot run, so the hook surfaces
+    that instead of treating modified files as scanned.
+
+    The configstore path is hardcoded to ``~/.config/configstore/snyk.json``
+    (the CLI default) rather than read from ``$XDG_CONFIG_HOME``.
+
+    CAVEAT: the Snyk MCP server may authenticate independently of the CLI
+    configstore, so a None result can be a false negative.
+    """
+    token = os.environ.get("SNYK_TOKEN")
+    if token:
+        return token
+    config_path = os.path.join(os.path.expanduser("~"), ".config", "configstore", "snyk.json")
+    try:
+        with open(config_path) as f:
+            config = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    api_key = config.get("api")
+    if api_key and isinstance(api_key, str):
+        return api_key
+    if config.get("INTERNAL_OAUTH_TOKEN_STORAGE"):
+        return "__oauth__"
+    return None
 
 
 def get_state_file_path(workspace: str) -> str:
@@ -305,8 +336,23 @@ def handle_before_mcp_execution(data: Dict[str, Any], workspace: str) -> None:
 
     This ensures the stop hook won't re-prompt for scans that have
     already been run, and naturally prevents infinite loops.
+
+    Fail-closed on auth: if Snyk is not authenticated the scan cannot actually
+    run, so we do NOT clear the tracked files — they stay pending and the stop
+    hook surfaces the auth problem. (beforeMCPExecution fires before the tool
+    runs, so we can only pre-empt on auth, not on the scan's outcome.)
     """
     tool_name = data.get("tool_name", "")
+
+    if check_snyk_auth() is None and (
+        CODE_SCAN_TOOL in tool_name.lower() or SCA_SCAN_TOOL in tool_name.lower()
+    ):
+        log_to_panel(
+            "[SAI] Snyk scan tool invoked but Snyk is not authenticated — "
+            "run `snyk auth` to authenticate."
+        )
+        output_response({"exit_code": 0})
+        return
 
     if CODE_SCAN_TOOL in tool_name.lower():
         state = read_state(workspace)
@@ -371,6 +417,29 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
 
     code_files = state.get("code_files", [])
     manifest_files = state.get("manifest_files", [])
+
+    # Fail-closed on auth: there are unscanned changes, but if Snyk is not
+    # authenticated the scan tools cannot run. Surface that instead of prompting
+    # for a scan that will fail, and leave state pending so the gate persists.
+    if check_snyk_auth() is None:
+        log_to_panel("=" * 60)
+        log_to_panel("[SAI] UNSCANNED CHANGES — SNYK NOT AUTHENTICATED")
+        log_to_panel("=" * 60)
+        log_to_panel("  Security scanning cannot run until `snyk auth` is completed.")
+        log_to_panel("=" * 60)
+        pending = ", ".join(Path(f).name for f in (code_files + manifest_files))
+        output_response(
+            {
+                "followup_message": (
+                    "Security scanning could not run: the Snyk CLI is not authenticated. "
+                    "Ask the user to run `snyk auth` in a terminal to authenticate, then "
+                    f"re-run the Snyk scan before completing. Files pending scan: {pending}. "
+                    "If you have already confirmed Snyk is authenticated (for example via "
+                    "the MCP server), you may proceed."
+                )
+            }
+        )
+        return
 
     # Build the followup message based on what needs scanning
     message_parts: List[str] = []

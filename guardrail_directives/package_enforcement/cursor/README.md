@@ -17,7 +17,8 @@ Cursor hooks allow scripts to run at specific lifecycle events during AI agent o
 |-------|--------|---------|
 | `afterFileEdit` | After AI edits a file | Detect manifest changes |
 | `beforeShellExecution` | Before AI runs shell command | Block install commands |
-| `beforeMCPExecution` | Before AI calls MCP tool | Clear block on scan |
+| `beforeMCPExecution` | Before AI calls MCP tool | Log scan start (does not clear) |
+| `afterMCPExecution` | After AI's MCP tool returns | Clear block only on a successful, authenticated scan |
 | `stop` | When agent task ends | Final reminder |
 
 ## Workflow Diagram

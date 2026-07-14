@@ -398,6 +398,8 @@ def _do_launch(
         env["SAI_CACHE_DIR"] = get_cache_dir(workspace)
         env["SAI_LOG_FILE"] = resolve_log_file(workspace)
         env["SAI_LIB_DIR"] = str(Path(__file__).parent.resolve())
+        env["SAI_PID_FILE"] = pid_file
+        env["SAI_DONE_FILE"] = done
         try:
             proc = subprocess.Popen(
                 [sys.executable, worker],
@@ -603,6 +605,74 @@ def clear_sca_scan_state(workspace: str) -> None:
     _sca.clear_state(workspace)
 
 
+def cancel_sca_scan(workspace: str) -> None:
+    """SIGTERM any running SCA worker, then clear PID + done files."""
+    import signal
+
+    pid_file = get_sca_pid_file(workspace)
+    try:
+        with open(pid_file) as f:
+            pid = int(f.read().strip())
+        os.kill(pid, signal.SIGTERM)
+    except (FileNotFoundError, ValueError, ProcessLookupError, OSError):
+        pass
+    clear_sca_scan_state(workspace)
+
+
+def trigger_sca_scan(workspace: str) -> bool:
+    """Launch SCA scan, cancelling any in-flight scan."""
+    cancel_sca_scan(workspace)
+    return launch_background_sca_scan(workspace)
+
+
+# =============================================================================
+# SCAN STATE MANAGEMENT — public API (baselines)
+# =============================================================================
+
+_sca_baseline = _ScanChannel(
+    "sca_baseline.pid", "sca_baseline.done", "sca_scan_worker.py", "SCA baseline"
+)
+
+
+def launch_background_sca_baseline_scan(workspace: str) -> bool:
+    """Launch a background SCA scan to capture the session-start dependency baseline."""
+    return _do_launch(
+        workspace,
+        _sca_baseline.is_running,
+        _sca_baseline.done_file,
+        _sca_baseline.pid_file,
+        "sca_scan_worker.py",
+    )
+
+
+def get_sca_baseline_completion_info(workspace: str) -> Optional[Dict[str, Any]]:
+    """Read the full sca_baseline.done record (status, started_at, vulnerabilities)."""
+    return _sca_baseline.get_completion_info(workspace)
+
+
+def wait_for_sca_baseline_scan(
+    workspace: str,
+    timeout: float = SCAN_WAIT_TIMEOUT,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> Optional[str]:
+    """Wait for the baseline SCA scan to complete. Returns status string or None on timeout."""
+    return _do_wait(
+        workspace,
+        _sca_baseline.is_complete,
+        _sca_baseline.is_running,
+        launch_background_sca_baseline_scan,
+        lambda ws: _sca_baseline._read_status(ws),
+        "SCA baseline scan",
+        timeout,
+        log_fn,
+    )
+
+
+def clear_sca_baseline_state(workspace: str) -> None:
+    """Clear SCA baseline scan state files (PID, done marker)."""
+    _sca_baseline.clear_state(workspace)
+
+
 # =============================================================================
 # MANIFEST HASH UTILITIES
 # =============================================================================
@@ -648,19 +718,11 @@ def snapshot_manifest_hashes(
     return hashes
 
 
-def detect_manifest_changes(
-    workspace: str,
+def diff_manifest_hashes(
+    current: Dict[str, str],
     baseline: Dict[str, str],
-    manifest_files: Set[str],
-    manifest_suffixes: Set[str],
 ) -> List[str]:
-    """Return paths of manifest files that changed, were added, or were deleted since baseline.
-
-    Returns an empty list when baseline is empty (safe default — no comparison possible).
-    """
-    if not baseline:
-        return []
-    current = snapshot_manifest_hashes(workspace, manifest_files, manifest_suffixes)
+    """Compare two hash snapshots; return paths that changed, were added, or were deleted."""
     changed: List[str] = []
     for path, old_hash in baseline.items():
         if path not in current or current[path] != old_hash:
@@ -669,3 +731,64 @@ def detect_manifest_changes(
         if path not in baseline:
             changed.append(path)
     return changed
+
+
+def detect_manifest_changes(
+    workspace: str,
+    baseline: Dict[str, str],
+    manifest_files: Set[str],
+    manifest_suffixes: Set[str],
+) -> List[str]:
+    """Walk workspace and return paths changed since baseline."""
+    return diff_manifest_hashes(
+        snapshot_manifest_hashes(workspace, manifest_files, manifest_suffixes),
+        baseline,
+    )
+
+
+def manifest_hashes_path(workspace: str) -> str:
+    return os.path.join(get_cache_dir(workspace), "manifest_hashes.json")
+
+
+def load_manifest_hashes(workspace: str) -> Optional[Dict[str, Any]]:
+    try:
+        with open(manifest_hashes_path(workspace)) as f:
+            return cast(Optional[Dict[str, Any]], json.load(f))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def save_manifest_hash_baseline(
+    workspace: str,
+    manifest_files: Set[str],
+    manifest_suffixes: Set[str],
+) -> None:
+    hashes = snapshot_manifest_hashes(workspace, manifest_files, manifest_suffixes)
+    ensure_cache_dirs(workspace)
+    data = load_manifest_hashes(workspace) or {}
+    data["baseline"] = hashes
+    with open(manifest_hashes_path(workspace), "w") as f:
+        json.dump(data, f)
+
+
+def save_manifest_hash_last_scan(
+    workspace: str,
+    manifest_files: Set[str],
+    manifest_suffixes: Set[str],
+    hashes: Optional[Dict[str, str]] = None,
+) -> None:
+    if hashes is None:
+        hashes = snapshot_manifest_hashes(workspace, manifest_files, manifest_suffixes)
+    ensure_cache_dirs(workspace)
+    data = load_manifest_hashes(workspace) or {}
+    data["last_scan"] = hashes
+    data["last_scan_triggered_at"] = datetime.now().isoformat()
+    with open(manifest_hashes_path(workspace), "w") as f:
+        json.dump(data, f)
+
+
+def clear_manifest_hashes(workspace: str) -> None:
+    try:
+        os.remove(manifest_hashes_path(workspace))
+    except OSError:
+        pass

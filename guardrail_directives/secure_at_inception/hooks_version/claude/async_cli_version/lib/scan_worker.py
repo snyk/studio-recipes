@@ -101,8 +101,8 @@ def main() -> None:
 
     LIB_DIR = os.environ.get("SAI_LIB_DIR", str(Path(__file__).parent.resolve()))
 
-    PID_FILE = os.path.join(CACHE_DIR, "scan.pid")
-    DONE_FILE = os.path.join(CACHE_DIR, "scan.done")
+    PID_FILE = os.environ.get("SAI_PID_FILE") or os.path.join(CACHE_DIR, "scan.pid")
+    DONE_FILE = os.environ.get("SAI_DONE_FILE") or os.path.join(CACHE_DIR, "scan.done")
     LOG_FILE = os.environ.get("SAI_LOG_FILE", None)
 
     sys.path.insert(0, LIB_DIR)

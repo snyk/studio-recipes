@@ -18,10 +18,15 @@ Options:
     --dry-run                                  Show what would be installed without making changes
     --uninstall                                Remove Snyk recipes from detected ADEs
     --verify                                   Verify installed files and merged configs match manifest
+    --read-only                                With --verify, only report prerequisite versions instead
+                                               of offering to install/upgrade them
     --list                                     List available recipes and profiles
     --no-latest-deps                           Install pinned manifest dependency versions,
                                                upgrading only if missing or older than the pin
     --control-identifier <id>                  Machine/control identifier to record
+    --diag-dump                                Create a diagnostic zip for Snyk support and print its path.
+    --out-file <path>                          Output path for the diagnostic zip (default: timestamped zip in cwd).
+    --days N                                   Include logs from workspaces active in the last N days (default: 1, minimum: 1).
     -y, --yes                                  Skip confirmation prompts
     -h, --help                                 Show this help message
 """
@@ -165,6 +170,16 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Verify installed files and merged configs match manifest",
     )
     parser.add_argument(
+        "--read-only",
+        action="store_true",
+        dest="read_only",
+        help=(
+            "With --verify, only report prerequisite versions instead of "
+            "offering to install/upgrade them. Guarantees --verify never "
+            "makes changes."
+        ),
+    )
+    parser.add_argument(
         "--list", action="store_true", dest="list_mode", help="List available recipes and profiles"
     )
     parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompts")
@@ -191,6 +206,26 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=None,
         dest="control_identifier",
         help=("Machine/control identifier to record."),
+    )
+    parser.add_argument(
+        "--diag-dump",
+        action="store_true",
+        dest="diag_dump",
+        help="Create a diagnostic zip for Snyk support and print its path.",
+    )
+    parser.add_argument(
+        "--out-file",
+        default=None,
+        dest="out_file",
+        metavar="PATH",
+        help="Output path for the diagnostic zip (default: timestamped zip in cwd).",
+    )
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Include logs from workspaces active in the last N days (default: 1, minimum: 1).",
     )
     return parser.parse_args(argv)
 
@@ -1110,6 +1145,60 @@ def check_prerequisites(
             sys.exit(1)
 
 
+def print_prerequisite_versions(
+    snyk_version: Optional[str] = None, node_version: Optional[str] = None
+) -> None:
+    """Print Python/Node/Snyk CLI versions, flagging any older than the manifest pins.
+
+    Read-only: never installs, upgrades, or prompts — unlike
+    ``check_prerequisites``. Used by ``--verify``, which must stay
+    side-effect-free.
+    """
+
+    def parse_version(x: str) -> tuple[int, ...]:
+        return tuple(map(int, x.split(".")))
+
+    py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
+    print(f"  {C.green('OK')} Python {py_ver}")
+
+    node_ver = _get_node_version()
+    if node_ver is None:
+        print(f"  {C.yellow('WARNING')} Node.js not found")
+    elif node_version and node_ver < parse_version(node_version):
+        print(
+            f"  {C.yellow('WARNING')} Node.js {'.'.join(map(str, node_ver))} "
+            f"is outdated (min: {node_version})"
+        )
+    else:
+        print(f"  {C.green('OK')} Node.js {'.'.join(map(str, node_ver))}")
+
+    snyk_path = shutil.which("snyk") or _find_win_npm_executable("snyk")
+    snyk_ver_str: Optional[str] = None
+    if snyk_path:
+        try:
+            r = run(
+                ["snyk", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                shell=_IS_WINDOWS,
+                creationflags=_CREATE_NO_WINDOW,
+            )
+            snyk_ver_str = r.stdout.strip().splitlines()[0] if r.stdout else None
+        except Exception:
+            snyk_ver_str = None
+
+    if not snyk_ver_str:
+        print(f"  {C.yellow('WARNING')} Snyk CLI not found")
+        return
+
+    match = re.match(r"(\d+\.\d+\.\d+)", snyk_ver_str)
+    if snyk_version and match and parse_version(match.group(1)) < parse_version(snyk_version):
+        print(f"  {C.yellow('WARNING')} Snyk CLI {snyk_ver_str} is outdated (min: {snyk_version})")
+    else:
+        print(f"  {C.green('OK')} Snyk CLI {snyk_ver_str}")
+
+
 # =============================================================================
 # ADE DETECTION
 # =============================================================================
@@ -1396,6 +1485,13 @@ def get_target_ades(
     detected = detect_ades()
     if detected:
         return detected
+
+    if auto_yes or not hasattr(sys.stdin, "isatty") or not sys.stdin.isatty():
+        print(
+            "  Error: no ADE detected; pass --ade to run non-interactively.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     print(f"  {C.yellow('WARNING')} No supported ADE detected")
     print()
@@ -2256,6 +2352,22 @@ def write_control_identifier(identifier: str, dry_run: bool) -> None:
 
 def main() -> None:
     args = parse_args()
+
+    if args.diag_dump:
+        lib_dir = str(Path(__file__).resolve().parent / "lib")
+        if lib_dir not in sys.path:
+            sys.path.insert(0, lib_dir)
+        import diag
+
+        output_path = Path(args.out_file) if args.out_file else None
+        diag.run(
+            output_path=output_path,
+            log_days=max(1, args.days),
+            installer_path=Path(__file__).resolve(),
+            ade_homes={ade: get_ade_home(ade) for ade in ADE_HOMES},
+        )
+        return
+
     payload = PayloadContext()
     payload.setup()
     manifest = Manifest(payload.manifest_path)
@@ -2268,7 +2380,15 @@ def main() -> None:
     # Everything below can prompt for confirmation (prerequisites, ADE
     # selection, install/uninstall). On a non-interactive stdin those reads
     # would block forever, so fail fast unless -y was given (which skips them).
-    if not args.yes and (not hasattr(sys.stdin, "isatty") or not sys.stdin.isatty()):
+    # --verify is only exempt when --read-only is also set: that combination
+    # (used internally by diag_dump) never prompts, but plain --verify still
+    # falls through to check_prerequisites()'s prompts below.
+    if (
+        not args.yes
+        and not (args.verify and args.read_only)
+        and not args.list_mode
+        and (not hasattr(sys.stdin, "isatty") or not sys.stdin.isatty())
+    ):
         print(
             "  Error: interactive input required; re-run with -y (and flags such as "
             "--ade/--profile) to run non-interactively.",
@@ -2280,10 +2400,60 @@ def main() -> None:
 
     # Record the control identifier (the ADS installer passes
     # --control-identifier) before anything that can fail, so the device-id is
-    # provisioned even if a later step (prerequisites, ADE selection) does not
-    # complete.
+    # provisioned even if a later step (verify, prerequisites, ADE selection)
+    # does not complete.
     if args.control_identifier:
         write_control_identifier(args.control_identifier, args.dry_run)
+
+    # Verify mode runs before the ADE-selection preamble below, but its
+    # prerequisites step branches on --read-only: by default a user gets the
+    # original check_prerequisites() experience (prompts, offers to
+    # upgrade), while --read-only (passed by ``diag_dump``'s internal
+    # ``--verify`` call) gets the side-effect-free print_prerequisite_versions()
+    # so it never installs/upgrades/prompts as part of a diagnostic dump.
+    if args.verify:
+        print(f"  {C.bold('Prerequisites')}")
+        if args.read_only:
+            print_prerequisite_versions(
+                snyk_version=manifest.prerequisite_version("snyk"),
+                node_version=manifest.prerequisite_version("node"),
+            )
+        else:
+            check_prerequisites(
+                args.yes,
+                snyk_version=manifest.prerequisite_version("snyk"),
+                node_version=manifest.prerequisite_version("node"),
+                no_latest_deps=args.no_latest_deps,
+                nvm_version=manifest.prerequisite_version("nvm"),
+            )
+        print()
+        ades = get_target_ades(args.ade, args.yes)
+        workspace = resolve_workspace(args.workspace)
+        recipes = manifest.resolve_recipes(args.profile)
+        all_ok = True
+        for ade in ades:
+            for recipe_id in recipes:
+                if manifest.is_workspace_scoped(recipe_id):
+                    continue
+                if not verify_recipe(recipe_id, ade, manifest, payload):
+                    all_ok = False
+        for recipe_id in recipes:
+            if not manifest.is_workspace_scoped(recipe_id):
+                continue
+            if workspace is None:
+                print(
+                    f"  {C.yellow('NOTE')} skipping workspace-scoped {recipe_id}: "
+                    "no workspace (pass --workspace or run inside a git repo)"
+                )
+                continue
+            if not verify_workspace_recipe(recipe_id, manifest, payload, workspace):
+                all_ok = False
+        if all_ok:
+            print(f"\n  {C.green('All checks passed.')}")
+        else:
+            print(f"\n  {C.red('Some checks failed.')}")
+            sys.exit(1)
+        return
 
     # Prerequisites
     print(f"  {C.bold('Prerequisites')}")
@@ -2336,34 +2506,6 @@ def main() -> None:
             shell=_IS_WINDOWS,
             creationflags=_CREATE_NO_WINDOW,
         )
-
-    # Verify mode
-    if args.verify:
-        recipes = manifest.resolve_recipes(args.profile)
-        all_ok = True
-        for ade in ades:
-            for recipe_id in recipes:
-                if manifest.is_workspace_scoped(recipe_id):
-                    continue
-                if not verify_recipe(recipe_id, ade, manifest, payload):
-                    all_ok = False
-        for recipe_id in recipes:
-            if not manifest.is_workspace_scoped(recipe_id):
-                continue
-            if workspace is None:
-                print(
-                    f"  {C.yellow('NOTE')} skipping workspace-scoped {recipe_id}: "
-                    "no workspace (pass --workspace or run inside a git repo)"
-                )
-                continue
-            if not verify_workspace_recipe(recipe_id, manifest, payload, workspace):
-                all_ok = False
-        if all_ok:
-            print(f"\n  {C.green('All checks passed.')}")
-        else:
-            print(f"\n  {C.red('Some checks failed.')}")
-            sys.exit(1)
-        return
 
     # Normal installation
     recipes = manifest.resolve_recipes(args.profile)

@@ -263,6 +263,42 @@ class TestCheckPrerequisites:
 
 
 # ===========================================================================
+# TestPrintPrerequisiteVersions
+# ===========================================================================
+
+
+class TestPrintPrerequisiteVersions:
+    def test_prints_versions_without_prompting(self, monkeypatch, capsys):
+        monkeypatch.setattr(installer, "_get_node_version", lambda: (24, 12, 0))
+        monkeypatch.setattr(
+            "shutil.which", lambda cmd: "/usr/local/bin/snyk" if cmd == "snyk" else None
+        )
+
+        def mock_run(cmd, **kwargs):
+            m = MagicMock()
+            if cmd[0] == "snyk" and cmd[1] == "--version":
+                m.stdout = "1.1302.0\n"
+                m.returncode = 0
+            return m
+
+        monkeypatch.setattr(installer, "run", mock_run)
+
+        def _no_input(*_a, **_kw):
+            raise AssertionError("print_prerequisite_versions must not prompt")
+
+        monkeypatch.setattr("builtins.input", _no_input)
+
+        # Must not raise (and must not call input()).
+        installer.print_prerequisite_versions()
+
+        captured = capsys.readouterr()
+        py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
+        assert f"OK Python {py_ver}" in captured.out
+        assert "OK Node.js 24.12.0" in captured.out
+        assert "OK Snyk CLI 1.1302.0" in captured.out
+
+
+# ===========================================================================
 # TestParseArgs
 # ===========================================================================
 
@@ -275,6 +311,7 @@ class TestParseArgs:
         assert args.dry_run is False
         assert args.uninstall is False
         assert args.verify is False
+        assert args.read_only is False
         assert args.list_mode is False
         assert args.yes is False
         assert args.no_latest_deps is False
@@ -289,6 +326,7 @@ class TestParseArgs:
                 "cursor",
                 "--dry-run",
                 "--verify",
+                "--read-only",
                 "--list",
                 "-y",
                 "--no-latest-deps",
@@ -300,6 +338,7 @@ class TestParseArgs:
         assert args.ade == "cursor"
         assert args.dry_run is True
         assert args.verify is True
+        assert args.read_only is True
         assert args.list_mode is True
         assert args.yes is True
         assert args.no_latest_deps is True
@@ -417,7 +456,11 @@ class TestNonInteractiveGuard:
     def test_install_fails_fast_without_tty(self, monkeypatch, capsys):
         # Non-interactive stdin + no -y: main() must fail fast, not block on a prompt.
         monkeypatch.setattr(sys.stdin, "isatty", lambda: False, raising=False)
-        monkeypatch.setattr(installer, "parse_args", lambda: MagicMock(list_mode=False, yes=False))
+        monkeypatch.setattr(
+            installer,
+            "parse_args",
+            lambda: MagicMock(list_mode=False, yes=False, diag_dump=False, verify=False),
+        )
         monkeypatch.setattr(installer, "PayloadContext", lambda: MagicMock())
         monkeypatch.setattr(installer, "Manifest", lambda *a, **k: MagicMock())
         with pytest.raises(SystemExit):
@@ -427,7 +470,9 @@ class TestNonInteractiveGuard:
     def test_list_mode_allowed_without_tty(self, monkeypatch):
         # --list never prompts, so it must work on a non-interactive stdin.
         monkeypatch.setattr(sys.stdin, "isatty", lambda: False, raising=False)
-        monkeypatch.setattr(installer, "parse_args", lambda: MagicMock(list_mode=True, yes=False))
+        monkeypatch.setattr(
+            installer, "parse_args", lambda: MagicMock(list_mode=True, yes=False, diag_dump=False)
+        )
         monkeypatch.setattr(installer, "PayloadContext", lambda: MagicMock())
         listed = MagicMock()
         monkeypatch.setattr(installer, "Manifest", lambda *a, **k: listed)
@@ -1183,6 +1228,41 @@ class TestDetectAdes:
         result = installer.detect_ades()
         assert "codex" in result
         assert len(result) > 1
+
+
+# ===========================================================================
+# TestGetTargetAdes
+# ===========================================================================
+
+
+class TestGetTargetAdes:
+    def test_auto_yes_exits_when_no_ade_detected(self, monkeypatch, capsys):
+        monkeypatch.setattr(installer, "detect_ades", lambda: [])
+
+        def _no_input(*_a, **_kw):
+            raise AssertionError("get_target_ades must not prompt when auto_yes is True")
+
+        monkeypatch.setattr("builtins.input", _no_input)
+
+        with pytest.raises(SystemExit):
+            installer.get_target_ades(None, auto_yes=True)
+        assert "no ADE detected" in capsys.readouterr().err
+
+    def test_non_tty_stdin_exits_even_without_auto_yes(self, monkeypatch, capsys):
+        # Non-interactive stdin + no ADE detected/specified: must fail fast,
+        # not block on input(), even when auto_yes is False (e.g. --verify
+        # invoked with a piped/closed stdin).
+        monkeypatch.setattr(installer, "detect_ades", lambda: [])
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False, raising=False)
+
+        def _no_input(*_a, **_kw):
+            raise AssertionError("get_target_ades must not prompt on non-tty stdin")
+
+        monkeypatch.setattr("builtins.input", _no_input)
+
+        with pytest.raises(SystemExit):
+            installer.get_target_ades(None, auto_yes=False)
+        assert "no ADE detected" in capsys.readouterr().err
 
 
 # ===========================================================================
@@ -2173,6 +2253,7 @@ class TestConflictPromptAutoYes:
             control_identifier=None,
             uninstall=False,
             verify=False,
+            diag_dump=False,
             ade=None,
             profile="default",
             workspace=None,

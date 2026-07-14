@@ -8,7 +8,7 @@ Build from source to **tailor the bundle for your organization**, **audit the in
 
 - Python 3.8+
 - A clone of [`snyk/studio-recipes`](https://github.com/snyk/studio-recipes)
-- Go 1.18+ (optional — only needed to compile the Go installer binaries; install from [go.dev/dl](https://go.dev/dl/). The build skips them if `go` is not on `PATH`)
+- Go 1.21+ (optional — only needed to compile the Go installer binaries; install from [go.dev/dl](https://go.dev/dl/). The build skips them if `go` is not on `PATH`)
 
 ---
 

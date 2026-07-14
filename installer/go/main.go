@@ -19,8 +19,10 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -55,6 +57,8 @@ func run(argv []string) int {
 	switch command {
 	case "install":
 		return runInstall(rest)
+	case "diag":
+		return runDiag(rest)
 	case "-h", "--help", "help":
 		usage(os.Stdout)
 		return 0
@@ -72,10 +76,15 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "Usage: snyk-studio <command> [options]")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Commands:")
-	fmt.Fprintln(w, "  install   Install Snyk Studio recipes (pass installer options after the command)")
+	fmt.Fprintln(w, "  install      Install Snyk Studio recipes (pass installer options after the command)")
+	fmt.Fprintln(w, "  diag dump    Create a diagnostic zip for Snyk support and print its path")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Install options:")
 	fmt.Fprintln(w, "  --no-latest-deps  Install versions from the manifest instead of the latest")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Diag dump options:")
+	fmt.Fprintln(w, "  --out-file <path>  Output path for the diagnostic zip (default: timestamped zip in cwd)")
+	fmt.Fprintln(w, "  --days N           Include logs from the last N days (default: 1)")
 }
 
 // runInstall extracts the embedded bundle and hands off to the Python installer.
@@ -96,14 +105,55 @@ func runInstall(installArgs []string) int {
 		return 1
 	}
 
+	return runInstallerFromBundle(installArgs)
+}
+
+// runDiag dispatches `snyk-studio diag <subcommand>`. Currently only `dump` is supported.
+func runDiag(diagArgs []string) int {
+	if len(diagArgs) == 0 {
+		fmt.Fprintln(os.Stderr, "Error: diag requires a subcommand (e.g. `snyk-studio diag dump`)")
+		fmt.Fprintln(os.Stderr, "")
+		usage(os.Stderr)
+		return 2
+	}
+	sub, rest := diagArgs[0], diagArgs[1:]
+	switch sub {
+	case "dump":
+		return runDiagDump(rest)
+	default:
+		fmt.Fprintf(os.Stderr, "Error: unknown diag subcommand %q\n\n", sub)
+		usage(os.Stderr)
+		return 2
+	}
+}
+
+// runDiagDump extracts the embedded bundle and calls snyk-studio-installer.py --diag-dump.
+// dumpArgs are forwarded verbatim after the --diag-dump flag.
+func runDiagDump(dumpArgs []string) int {
+	ensureUvOnPath()
+	if err := ensureUv([]string{}, false, ""); err != nil {
+		fmt.Fprintf(os.Stderr, "  Error: %s\n", err)
+		return 1
+	}
+
+	args := append([]string{"--diag-dump"}, dumpArgs...)
+	return runInstallerFromBundle(args, "lib/diag.py")
+}
+
+// runInstallerFromBundle extracts the embedded bundle to a fresh temp dir and
+// runs `uv run <installer> <args>...`, forwarding stdio, returning the process
+// exit code (or 1 on setup failure). requiredExtra lists additional
+// bundle-relative paths, beyond installerScript, that must exist in the
+// extracted bundle (e.g. "lib/diag.py" for diag dump) so a stale or
+// mismatched bundle is caught before invoking uv.
+func runInstallerFromBundle(args []string, requiredExtra ...string) int {
 	workdir, err := os.MkdirTemp("", "snyk-studio-install.")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: cannot create temp dir: %s\n", err)
 		return 1
 	}
 	cleanup := func() { _ = os.RemoveAll(workdir) }
-	defer cleanup()
-	installSignalCleanup(cleanup)
+	defer installSignalCleanup(cleanup)()
 
 	// Env key mirrors the other installers; the Python installer reads it.
 	_ = os.Setenv(bundleEnv, workdir)
@@ -118,6 +168,13 @@ func runInstall(installArgs []string) int {
 		fmt.Fprintf(os.Stderr, "Error: missing %s in bundle.\n", installerScript)
 		return 1
 	}
+	for _, rel := range requiredExtra {
+		p := filepath.Join(workdir, filepath.FromSlash(rel))
+		if fi, err := os.Stat(p); err != nil || fi.IsDir() {
+			fmt.Fprintf(os.Stderr, "Error: missing %s in bundle.\n", rel)
+			return 1
+		}
+	}
 	// embed.FS does not carry file modes, so extracted files are 0o644. `uv run`
 	// does not require the +x bit, but set it on the entry point for parity with
 	// the script installers and in case it is ever invoked directly.
@@ -131,8 +188,7 @@ func runInstall(installArgs []string) int {
 		return 1
 	}
 
-	args := append([]string{"run", installer}, installArgs...)
-	cmd := exec.Command(uvExe, args...)
+	cmd := exec.Command(uvExe, append([]string{"run", installer}, args...)...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -247,10 +303,8 @@ func ensureUv(argv []string, pinDeps bool, pinnedUv string) error {
 // hasFlag reports whether any of names appears verbatim in argv.
 func hasFlag(argv []string, names ...string) bool {
 	for _, a := range argv {
-		for _, n := range names {
-			if a == n {
-				return true
-			}
+		if slices.Contains(names, a) {
+			return true
 		}
 	}
 	return false
@@ -337,10 +391,7 @@ func versionOlder(a, b string) (older bool, ok bool) {
 	if !aok || !bok {
 		return false, false
 	}
-	n := len(av)
-	if len(bv) > n {
-		n = len(bv)
-	}
+	n := max(len(av), len(bv))
 	for i := 0; i < n; i++ {
 		var x, y int
 		if i < len(av) {
@@ -377,9 +428,16 @@ func uvVersionLine() string {
 	return "present"
 }
 
-// bootstrapUvInstall runs the official uv installer. A non-empty version pins to
-// that exact release; otherwise the latest is installed.
+// bootstrapUvInstall runs the official uv installer; version pins to that exact
+// release if set, otherwise installs latest.
 func bootstrapUvInstall(version string) error {
+	// Reject non-dotted-numeric versions before shell interpolation.
+	if version != "" {
+		if _, ok := parseVersion(version); !ok {
+			return fmt.Errorf("invalid uv version string %q: must be a dotted numeric version (e.g. 0.11.19)", version)
+		}
+	}
+
 	if runtime.GOOS == "windows" {
 		ps, err := exec.LookPath("powershell")
 		if err != nil {
@@ -451,12 +509,19 @@ func writeEmbedded(name, dest string) error {
 	return out.Close()
 }
 
-func installSignalCleanup(cleanup func()) {
+// installSignalCleanup registers a signal handler that calls cleanup on
+// SIGINT/SIGTERM and then exits 130. It returns a once-guarded wrapper so the
+// caller can use it for defer; both paths share the sync.Once and the cleanup
+// therefore runs at most once regardless of which fires first.
+func installSignalCleanup(cleanup func()) func() {
+	var once sync.Once
+	safeCleanup := func() { once.Do(cleanup) }
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-ch
-		cleanup()
+		safeCleanup()
 		os.Exit(130)
 	}()
+	return safeCleanup
 }

@@ -631,10 +631,19 @@ def cancel_sca_scan(workspace: str) -> None:
 
     pid_file = get_sca_pid_file(workspace)
     try:
-        with open(pid_file) as f:
-            pid = int(f.read().strip())
-        os.kill(pid, signal.SIGTERM)
-    except (FileNotFoundError, ValueError, ProcessLookupError, OSError):
+        with file_lock(pid_file + ".lock"):
+            try:
+                mtime = os.path.getmtime(pid_file)
+                if time.time() - mtime > PID_STALENESS_TIMEOUT:
+                    raise OSError("stale pid file")
+                with open(pid_file) as f:
+                    pid = int(f.read().strip())
+                if not is_pid_alive(pid):
+                    raise ProcessLookupError(pid)
+                os.kill(pid, signal.SIGTERM)
+            except (FileNotFoundError, ValueError, ProcessLookupError, OSError):
+                pass
+    except OSError:
         pass
     clear_sca_scan_state(workspace)
 
@@ -778,6 +787,14 @@ def load_manifest_hashes(workspace: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _write_manifest_hashes(workspace: str, data: Dict[str, Any]) -> None:
+    path = manifest_hashes_path(workspace)
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(data, f)
+    os.replace(tmp_path, path)
+
+
 def save_manifest_hash_baseline(
     workspace: str,
     manifest_files: Set[str],
@@ -785,10 +802,11 @@ def save_manifest_hash_baseline(
 ) -> None:
     hashes = snapshot_manifest_hashes(workspace, manifest_files, manifest_suffixes)
     ensure_cache_dirs(workspace)
-    data = load_manifest_hashes(workspace) or {}
-    data["baseline"] = hashes
-    with open(manifest_hashes_path(workspace), "w") as f:
-        json.dump(data, f)
+    lock_path = manifest_hashes_path(workspace) + ".lock"
+    with file_lock(lock_path):
+        data = load_manifest_hashes(workspace) or {}
+        data["baseline"] = hashes
+        _write_manifest_hashes(workspace, data)
 
 
 def save_manifest_hash_last_scan(
@@ -800,11 +818,12 @@ def save_manifest_hash_last_scan(
     if hashes is None:
         hashes = snapshot_manifest_hashes(workspace, manifest_files, manifest_suffixes)
     ensure_cache_dirs(workspace)
-    data = load_manifest_hashes(workspace) or {}
-    data["last_scan"] = hashes
-    data["last_scan_triggered_at"] = datetime.now().isoformat()
-    with open(manifest_hashes_path(workspace), "w") as f:
-        json.dump(data, f)
+    lock_path = manifest_hashes_path(workspace) + ".lock"
+    with file_lock(lock_path):
+        data = load_manifest_hashes(workspace) or {}
+        data["last_scan"] = hashes
+        data["last_scan_triggered_at"] = datetime.now().isoformat()
+        _write_manifest_hashes(workspace, data)
 
 
 def clear_manifest_hashes(workspace: str) -> None:

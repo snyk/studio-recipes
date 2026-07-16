@@ -54,7 +54,7 @@ command = 'uv run "$HOME/.codex/hooks/snyk_secure_at_inception.py"'
 statusMessage = "Initializing Snyk security scanning..."
 
 [[hooks.PostToolUse]]
-matcher = "^(apply_patch|Edit|Write)$"
+matcher = "^(apply_patch|Edit|Write|Bash)$"
 
 [[hooks.PostToolUse.hooks]]
 type = "command"
@@ -84,6 +84,10 @@ Codex emits apply_patch (or Edit / Write)
   → Peeks at scan.done for cached errors (auth_required, snyk_not_found)
   → Error found? → block immediately with actionable fix instructions
   → No error?   → launch background scan, Codex keeps working (non-blocking)
+
+Codex runs a Bash command (npm install, pip install, etc.)
+  → PostToolUse hook hash-diffs manifest files against the last known snapshot
+  → Manifest changed? → trigger a background SCA scan and record the new snapshot
 
 Codex finishes responding
   → Stop hook waits for scan results
@@ -175,7 +179,7 @@ command = 'uv run "%USERPROFILE%\.codex\hooks\snyk_secure_at_inception.py"'
 statusMessage = "Initializing Snyk security scanning..."
 
 [[hooks.PostToolUse]]
-matcher = "^(apply_patch|Edit|Write)$"
+matcher = "^(apply_patch|Edit|Write|Bash)$"
 
 [[hooks.PostToolUse.hooks]]
 type = "command"

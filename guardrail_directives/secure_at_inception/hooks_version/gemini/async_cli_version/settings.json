@@ -15,7 +15,7 @@
     ],
     "AfterTool": [
       {
-        "matcher": "write_file|replace",
+        "matcher": "write_file|replace|run_shell_command",
         "hooks": [
           {
             "name": "snyk_secure_at_inception_after_tool_edit",

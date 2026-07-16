@@ -225,6 +225,19 @@ def _ensure_snyk_token(env: Dict[str, str]) -> None:
 # =============================================================================
 
 
+def _worker_python() -> str:
+    """Interpreter for the detached worker.
+
+    Under `uvw run --gui-script` on Windows, sys.executable is a venv-launcher
+    pythonw stub that fails to locate pyvenv.cfg when re-spawned as a detached
+    process — the worker then dies before writing scan.log. The worker is
+    pure-stdlib, so prefer the self-contained base interpreter, which needs no
+    pyvenv.cfg.
+    """
+    base = getattr(sys, "_base_executable", None)
+    return base if base and os.path.exists(base) else sys.executable
+
+
 def launch_background_scan(workspace: str) -> bool:
     """Launch a background Snyk code scan as a detached subprocess.
     PID file is written by the launcher to close the race window."""
@@ -245,13 +258,20 @@ def launch_background_scan(workspace: str) -> bool:
     env["SAI_CACHE_DIR"] = get_cache_dir(workspace)
     env["SAI_LIB_DIR"] = str(Path(__file__).parent.resolve())
 
+    # On Windows, network paths (UNC \\server\share or mapped drives such as
+    # Y:\) cannot be used as cwd for detached processes — CreateProcess raises
+    # [WinError 267]. SAI_WORKSPACE is passed via env, so the scan_worker
+    # scans the right directory regardless of where the process starts.
+    cwd = workspace if sys.platform != "win32" else tempfile.gettempdir()
+    worker_python = _worker_python()
     try:
         proc = subprocess.Popen(
-            [sys.executable, worker_script],
+            [worker_python, worker_script],
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
-            cwd=workspace,
+            cwd=cwd,
             env=env,
         )
         pid_file = get_scan_pid_file(workspace)

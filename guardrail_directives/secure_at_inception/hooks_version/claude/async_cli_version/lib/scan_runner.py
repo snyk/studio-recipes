@@ -349,6 +349,19 @@ _sca = _ScanChannel("sca_scan.pid", "sca_scan.done", "sca_scan_worker.py", "SCA 
 # =============================================================================
 
 
+def _worker_python() -> str:
+    """Interpreter for the detached worker.
+
+    Under `uvw run --gui-script` on Windows, sys.executable is a venv-launcher
+    pythonw stub that fails to locate pyvenv.cfg when re-spawned as a detached
+    process — the worker then dies before writing scan.log. The worker is
+    pure-stdlib, so prefer the self-contained base interpreter, which needs no
+    pyvenv.cfg.
+    """
+    base = getattr(sys, "_base_executable", None)
+    return base if base and os.path.exists(base) else sys.executable
+
+
 def _write_launch_failed_status(done_file: str, error: str) -> None:
     """Persist a launch_failed marker so wait_for_scan can report a real status."""
     try:
@@ -400,12 +413,19 @@ def _do_launch(
         env["SAI_LIB_DIR"] = str(Path(__file__).parent.resolve())
         env["SAI_PID_FILE"] = pid_file
         env["SAI_DONE_FILE"] = done
+        # On Windows, network paths (UNC \\server\share or mapped drives such as
+        # Y:\) cannot be used as cwd for detached processes — CreateProcess raises
+        # [WinError 267]. SAI_WORKSPACE is passed via env, so the scan_worker
+        # scans the right directory regardless of where the process starts.
+        cwd = workspace if sys.platform != "win32" else tempfile.gettempdir()
+        worker_python = _worker_python()
         try:
             proc = subprocess.Popen(
-                [sys.executable, worker],
+                [worker_python, worker],
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                cwd=workspace,
+                cwd=cwd,
                 env=env,
                 **get_detached_popen_kwargs(),
             )

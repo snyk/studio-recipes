@@ -243,6 +243,9 @@ def log_to_panel(message: str) -> None:
 
 def output_response(response: Dict[str, Any]) -> None:
     print(json.dumps(response))
+    # Flush explicitly: under `uvw run --gui-script` (pythonw) on Windows stdout is
+    # a fully-buffered pipe, so the findings JSON must be flushed to reach the ADE.
+    sys.stdout.flush()
 
 
 def get_state_file_path(workspace: str) -> str:
@@ -252,7 +255,17 @@ def get_state_file_path(workspace: str) -> str:
 def get_workspace(data: Dict[str, Any]) -> str:
     workspace_roots = data.get("workspace_roots", [])
     if workspace_roots:
-        return str(workspace_roots[0])
+        ws = str(workspace_roots[0])
+        # Cursor on Windows delivers paths as /C:/... (POSIX-style drive letter).
+        if (
+            sys.platform == "win32"
+            and len(ws) >= 3
+            and ws[0] == "/"
+            and ws[1].isalpha()
+            and ws[2] == ":"
+        ):
+            ws = ws[1:]
+        return ws
 
     file_path = data.get("file_path", "")
     if file_path:
@@ -1062,7 +1075,8 @@ def _log_stop_block(sast: SastResult, sca: ScaResult) -> None:
 
 def main() -> None:
     try:
-        input_data = sys.stdin.read()
+        # utf-8-sig strips the UTF-8 BOM that Cursor on Windows prepends to hook input.
+        input_data = sys.stdin.buffer.read().decode("utf-8-sig")
         data = json.loads(input_data) if input_data.strip() else {}
         debug_log(f"Hook data: {json.dumps(data, indent=2)[:500]}...")
     except json.JSONDecodeError as e:

@@ -235,6 +235,9 @@ def log_to_panel(message: str) -> None:
 
 def output_response(response: Dict[str, Any]) -> None:
     print(json.dumps(response), file=sys.stdout)
+    # Flush explicitly: under `uvw run --gui-script` (pythonw) on Windows stdout is
+    # a fully-buffered pipe, so the findings JSON must be flushed to reach the ADE.
+    sys.stdout.flush()
 
 
 def get_state_file_path(workspace: str) -> str:
@@ -873,8 +876,8 @@ def handle_after_agent(data: Dict[str, Any], workspace: str) -> None:
         elif sca.fallback:
             fallback += f"\n\n## Dependency Scan Unavailable\n\n{sca.fallback}"
         clear_state(workspace)
-        log_to_panel(json.dumps({"decision": "deny", "reason": fallback, "continue": True}))
-        sys.exit(2)
+        output_response({"decision": "deny", "reason": fallback})
+        return
 
     # --- Update state and decide ---
     if not sast.new_vulns and not sca.new_sca_vulns and not sca.fallback:
@@ -899,11 +902,7 @@ def handle_after_agent(data: Dict[str, Any], workspace: str) -> None:
     reason = _build_block_reason(sast.new_vulns, sca.new_sca_vulns, sca.fallback, workspace)
     _log_stop_block(sast, sca)
 
-    # blocking response should be sent to stderr
-    log_to_panel(json.dumps({"decision": "deny", "reason": reason, "continue": True}))
-
-    # gemini only retries with feedback prompt on exit code 2
-    sys.exit(2)
+    output_response({"decision": "deny", "reason": reason})
 
 
 def _build_block_reason(

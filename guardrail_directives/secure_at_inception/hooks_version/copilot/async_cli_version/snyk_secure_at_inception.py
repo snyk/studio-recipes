@@ -234,6 +234,9 @@ def log_to_panel(message: str) -> None:
 
 def output_response(response: Dict[str, Any]) -> None:
     print(json.dumps(response))
+    # Flush explicitly: under `uvw run --gui-script` (pythonw) on Windows stdout is
+    # a fully-buffered pipe, so the findings JSON must be flushed to reach the ADE.
+    sys.stdout.flush()
 
 
 def output_block(reason: str, data: Dict[str, Any]) -> None:

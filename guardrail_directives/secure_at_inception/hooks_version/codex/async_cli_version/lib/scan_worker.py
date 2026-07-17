@@ -100,18 +100,27 @@ def main() -> None:
 
     LIB_DIR = os.environ.get("SAI_LIB_DIR", str(Path(__file__).parent.resolve()))
 
-    PID_FILE = os.path.join(CACHE_DIR, "scan.pid")
-    DONE_FILE = os.path.join(CACHE_DIR, "scan.done")
+    PID_FILE = os.environ.get("SAI_PID_FILE") or os.path.join(CACHE_DIR, "scan.pid")
+    DONE_FILE = os.environ.get("SAI_DONE_FILE") or os.path.join(CACHE_DIR, "scan.done")
     LOG_FILE = os.environ.get("SAI_LOG_FILE", None)
 
     sys.path.insert(0, LIB_DIR)
-    from scan_runner import parse_sarif_results
+    from scan_runner import _force_disable_snyk_auth, _force_disable_snyk_cli, parse_sarif_results
 
     started_at = datetime.now().isoformat()
     log("Scan worker started")
 
     if os.path.exists(DONE_FILE):
         os.remove(DONE_FILE)
+
+    if _force_disable_snyk_auth():
+        log("Snyk auth disabled by environment override")
+        finish(
+            "auth_required",
+            started_at=started_at,
+            error_detail="Snyk CLI auth disabled by test environment override.",
+        )
+        return
 
     if not os.environ.get("SNYK_TOKEN"):
         config_dir = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
@@ -134,6 +143,11 @@ def main() -> None:
                 error_detail="Snyk CLI is not authenticated. Run 'snyk auth' in a terminal.",
             )
             return
+
+    if _force_disable_snyk_cli():
+        log("Snyk CLI disabled by environment override")
+        finish("snyk_not_found", started_at=started_at)
+        return
 
     snyk_bin = shutil.which("snyk")
     if snyk_bin is None:

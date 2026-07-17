@@ -18,9 +18,10 @@ statusMessage = "Initializing Snyk security scanning..."
 
 # --- After every file mutation: track modified lines, launch background scan ---
 # apply_patch is Codex's primary file-mutation tool. Edit/Write are matched
-# defensively in case they are exposed by the runtime.
+# defensively in case they are exposed by the runtime. Bash is matched to catch
+# manifest-mutating shell commands (npm install, pip install, etc.).
 [[hooks.PostToolUse]]
-matcher = "^(apply_patch|Edit|Write)$"
+matcher = "^(apply_patch|Edit|Write|Bash)$"
 
 [[hooks.PostToolUse.hooks]]
 type = "command"

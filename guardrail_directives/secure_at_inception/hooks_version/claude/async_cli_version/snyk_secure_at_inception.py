@@ -43,6 +43,7 @@ from platform_utils import (  # noqa: E402 — imports follow sys.path setup
     STUDIO_VERSION,
     file_lock,
     normalize_path,
+    parse_iso_timestamp,
     resolve_log_file,
     scan_duration_secs,
 )
@@ -252,6 +253,9 @@ def log_to_panel(message: str) -> None:
 
 def output_response(response: Dict[str, Any]) -> None:
     print(json.dumps(response))
+    # Flush explicitly: under `uvw run --gui-script` (pythonw) on Windows stdout is
+    # a fully-buffered pipe, so the findings JSON must be flushed to reach the ADE.
+    sys.stdout.flush()
 
 
 def get_state_file_path(workspace: str) -> str:
@@ -896,13 +900,30 @@ def _evaluate_sca(
 
     sca_status = wait_for_sca_scan(workspace, log_fn=log_to_panel)
 
+    # A manifest-triggered scan can occasionally vanish without leaving a done file
+    # (worker launch/termination race). Re-trigger once so a clean follow-up edit
+    # does not spuriously fail the whole Stop cycle.
+    if manifests_changed and sca_status in (None, "launch_failed"):
+        log_to_panel("[SAI] SCA scan missing or terminated unexpectedly, retrying once...")
+        if trigger_sca_scan(workspace):
+            save_manifest_hash_last_scan(
+                workspace, MANIFEST_FILES, MANIFEST_SUFFIXES, hashes=current_hashes
+            )
+            sca_status = wait_for_sca_scan(workspace, log_fn=log_to_panel)
+
     # Stale detection: re-scan if the result predates our last trigger.
     # Guards against scans that completed before npm install updated the lockfile.
     if sca_status == "success":
         sca_check = get_sca_completion_info(workspace)
         sca_started_at = (sca_check or {}).get("started_at", "")
         last_triggered_at = hashes.get("last_scan_triggered_at", "")
-        if sca_started_at and last_triggered_at and sca_started_at < last_triggered_at:
+        sca_started_dt = parse_iso_timestamp(sca_started_at)
+        last_triggered_dt = parse_iso_timestamp(last_triggered_at)
+        if (
+            sca_started_dt is not None
+            and last_triggered_dt is not None
+            and sca_started_dt < last_triggered_dt
+        ):
             log_to_panel("[SAI] SCA result predates last manifest trigger, re-scanning...")
             if trigger_sca_scan(workspace):
                 save_manifest_hash_last_scan(workspace, MANIFEST_FILES, MANIFEST_SUFFIXES)

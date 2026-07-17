@@ -146,17 +146,42 @@ def _augment_path_for_snyk(env: Dict[str, str]) -> None:
 # AUTH TOKEN RESOLUTION
 # =============================================================================
 
-_SNYK_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".config", "configstore", "snyk.json")
-
 
 def _get_snyk_config_path() -> str:
     """Return the path to the Snyk CLI config file.
 
     Uses the hardcoded well-known path (~/.config/configstore/snyk.json)
     rather than trusting XDG_CONFIG_HOME to avoid path-traversal via
-    a manipulated environment variable.
+    a manipulated environment variable. This must follow the real user home,
+    not CODEX_HOME: project-scoped installs live under ``<workspace>/.codex``
+    but Snyk CLI credentials remain in the invoking user's home directory.
     """
-    return _SNYK_CONFIG_PATH
+    home = os.environ.get("HOME") or os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    return os.path.join(home, ".config", "configstore", "snyk.json")
+
+
+def _force_disable_snyk_auth() -> bool:
+    """Test-harness escape hatch for deterministic unauthenticated-path E2E runs."""
+    if os.environ.get("SAI_DISABLE_SNYK_AUTH") == "1":
+        return True
+    file_codex_home = Path(__file__).resolve().parents[2]
+    if file_codex_home.name == ".codex":
+        return (file_codex_home / "force-no-snyk-auth").exists()
+    codex_home = os.environ.get("CODEX_HOME")
+    if codex_home:
+        return os.path.exists(os.path.join(codex_home, "force-no-snyk-auth"))
+    return False
+
+
+def _force_disable_snyk_cli() -> bool:
+    """Test-harness escape hatch for deterministic missing-CLI E2E runs."""
+    codex_home = os.environ.get("CODEX_HOME")
+    if codex_home and os.path.exists(os.path.join(codex_home, "force-no-snyk-cli")):
+        return True
+    file_codex_home = Path(__file__).resolve().parents[2]
+    if file_codex_home.name == ".codex":
+        return (file_codex_home / "force-no-snyk-cli").exists()
+    return False
 
 
 def check_snyk_auth() -> Optional[str]:
@@ -166,6 +191,9 @@ def check_snyk_auth() -> Optional[str]:
     Checks SNYK_TOKEN env var first, then the Snyk CLI config file
     for API key or OAuth token storage.
     """
+    if _force_disable_snyk_auth():
+        return None
+
     token = os.environ.get("SNYK_TOKEN")
     if token:
         return token
@@ -192,6 +220,9 @@ def check_snyk_cli() -> Optional[str]:
 
     Returns the path to the binary if found, None otherwise.
     """
+    if _force_disable_snyk_cli():
+        return None
+
     env = os.environ.copy()
     _augment_path_for_snyk(env)
 
@@ -349,6 +380,19 @@ _sca = _ScanChannel("sca_scan.pid", "sca_scan.done", "sca_scan_worker.py", "SCA 
 # =============================================================================
 
 
+def _worker_python() -> str:
+    """Interpreter for the detached worker.
+
+    Under `uvw run --gui-script` on Windows, sys.executable is a venv-launcher
+    pythonw stub that fails to locate pyvenv.cfg when re-spawned as a detached
+    process — the worker then dies before writing scan.log. The worker is
+    pure-stdlib, so prefer the self-contained base interpreter, which needs no
+    pyvenv.cfg.
+    """
+    base = getattr(sys, "_base_executable", None)
+    return base if base and os.path.exists(base) else sys.executable
+
+
 def _write_launch_failed_status(done_file: str, error: str) -> None:
     """Persist a launch_failed marker so wait_for_scan can report a real status."""
     try:
@@ -366,6 +410,20 @@ def _write_launch_failed_status(done_file: str, error: str) -> None:
             )
     except OSError:
         pass
+
+
+def _configure_snyk_cache_env(env: Dict[str, str], cache_dir: str) -> None:
+    """Point Snyk at an isolated writable cache directory.
+
+    The CLI otherwise falls back to user-global cache locations. In GUI E2E and
+    other restricted environments that can surface as permission failures on the
+    host cache lock file before any real scan work begins.
+    """
+    xdg_cache_home = os.path.join(cache_dir, "xdg-cache")
+    snyk_cache_path = os.path.join(xdg_cache_home, "snyk")
+    os.makedirs(snyk_cache_path, exist_ok=True)
+    env["XDG_CACHE_HOME"] = xdg_cache_home
+    env["SNYK_CFG_CACHE_PATH"] = snyk_cache_path
 
 
 def _do_launch(
@@ -398,12 +456,22 @@ def _do_launch(
         env["SAI_CACHE_DIR"] = get_cache_dir(workspace)
         env["SAI_LIB_DIR"] = str(Path(__file__).parent.resolve())
         env["SAI_LOG_FILE"] = resolve_log_file(workspace)
+        env["SAI_PID_FILE"] = pid_file
+        env["SAI_DONE_FILE"] = done
+        _configure_snyk_cache_env(env, env["SAI_CACHE_DIR"])
+        # On Windows, network paths (UNC \\server\share or mapped drives such as
+        # Y:\) cannot be used as cwd for detached processes — CreateProcess raises
+        # [WinError 267]. SAI_WORKSPACE is passed via env, so the scan_worker
+        # scans the right directory regardless of where the process starts.
+        cwd = workspace if sys.platform != "win32" else tempfile.gettempdir()
+        worker_python = _worker_python()
         try:
             proc = subprocess.Popen(
-                [sys.executable, worker],
+                [worker_python, worker],
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                cwd=workspace,
+                cwd=cwd,
                 env=env,
                 **get_detached_popen_kwargs(),
             )
@@ -603,6 +671,78 @@ def clear_sca_scan_state(workspace: str) -> None:
     _sca.clear_state(workspace)
 
 
+def cancel_sca_scan(workspace: str) -> None:
+    """SIGTERM any running SCA worker, then clear PID + done files."""
+    import signal
+
+    pid_file = get_sca_pid_file(workspace)
+    try:
+        if time.time() - os.path.getmtime(pid_file) > PID_STALENESS_TIMEOUT:
+            clear_sca_scan_state(workspace)
+            return
+        with open(pid_file) as f:
+            pid = int(f.read().strip())
+        if is_pid_alive(pid):
+            os.kill(pid, signal.SIGTERM)
+    except (FileNotFoundError, ValueError, ProcessLookupError, OSError):
+        pass
+    clear_sca_scan_state(workspace)
+
+
+def trigger_sca_scan(workspace: str) -> bool:
+    """Launch SCA scan, cancelling any in-flight scan."""
+    cancel_sca_scan(workspace)
+    return launch_background_sca_scan(workspace)
+
+
+# =============================================================================
+# SCAN STATE MANAGEMENT — public API (baselines)
+# =============================================================================
+
+_sca_baseline = _ScanChannel(
+    "sca_baseline.pid", "sca_baseline.done", "sca_scan_worker.py", "SCA baseline"
+)
+
+
+def launch_background_sca_baseline_scan(workspace: str) -> bool:
+    """Launch a background SCA scan to capture the session-start dependency baseline."""
+    return _do_launch(
+        workspace,
+        _sca_baseline.is_running,
+        _sca_baseline.done_file,
+        _sca_baseline.pid_file,
+        "sca_scan_worker.py",
+    )
+
+
+def get_sca_baseline_completion_info(workspace: str) -> Optional[Dict[str, Any]]:
+    """Read the full sca_baseline.done record (status, started_at, vulnerabilities)."""
+    return _sca_baseline.get_completion_info(workspace)
+
+
+def wait_for_sca_baseline_scan(
+    workspace: str,
+    timeout: float = SCAN_WAIT_TIMEOUT,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> Optional[str]:
+    """Wait for the baseline SCA scan to complete. Returns status string or None on timeout."""
+    return _do_wait(
+        workspace,
+        _sca_baseline.is_complete,
+        _sca_baseline.is_running,
+        launch_background_sca_baseline_scan,
+        lambda ws: _sca_baseline._read_status(ws),
+        "SCA baseline scan",
+        timeout,
+        log_fn,
+    )
+
+
+def clear_sca_baseline_state(workspace: str) -> None:
+    """Clear SCA baseline scan state files (PID, done marker)."""
+    _sca_baseline.clear_state(workspace)
+
+
 # =============================================================================
 # MANIFEST HASH UTILITIES
 # =============================================================================
@@ -648,19 +788,11 @@ def snapshot_manifest_hashes(
     return hashes
 
 
-def detect_manifest_changes(
-    workspace: str,
+def diff_manifest_hashes(
+    current: Dict[str, str],
     baseline: Dict[str, str],
-    manifest_files: Set[str],
-    manifest_suffixes: Set[str],
 ) -> List[str]:
-    """Return paths of manifest files that changed, were added, or were deleted since baseline.
-
-    Returns an empty list when baseline is empty (safe default — no comparison possible).
-    """
-    if not baseline:
-        return []
-    current = snapshot_manifest_hashes(workspace, manifest_files, manifest_suffixes)
+    """Compare two hash snapshots; return paths that changed, were added, or were deleted."""
     changed: List[str] = []
     for path, old_hash in baseline.items():
         if path not in current or current[path] != old_hash:
@@ -669,3 +801,70 @@ def detect_manifest_changes(
         if path not in baseline:
             changed.append(path)
     return changed
+
+
+def detect_manifest_changes(
+    workspace: str,
+    baseline: Dict[str, str],
+    manifest_files: Set[str],
+    manifest_suffixes: Set[str],
+) -> List[str]:
+    """Walk workspace and return paths changed since baseline."""
+    return diff_manifest_hashes(
+        snapshot_manifest_hashes(workspace, manifest_files, manifest_suffixes),
+        baseline,
+    )
+
+
+def manifest_hashes_path(workspace: str) -> str:
+    return os.path.join(get_cache_dir(workspace), "manifest_hashes.json")
+
+
+def _manifest_hashes_lock_path(workspace: str) -> str:
+    return manifest_hashes_path(workspace) + ".lock"
+
+
+def load_manifest_hashes(workspace: str) -> Optional[Dict[str, Any]]:
+    try:
+        with open(manifest_hashes_path(workspace)) as f:
+            return cast(Optional[Dict[str, Any]], json.load(f))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def save_manifest_hash_baseline(
+    workspace: str,
+    manifest_files: Set[str],
+    manifest_suffixes: Set[str],
+) -> None:
+    hashes = snapshot_manifest_hashes(workspace, manifest_files, manifest_suffixes)
+    ensure_cache_dirs(workspace)
+    with file_lock(_manifest_hashes_lock_path(workspace)):
+        data = load_manifest_hashes(workspace) or {}
+        data["baseline"] = hashes
+        with open(manifest_hashes_path(workspace), "w") as f:
+            json.dump(data, f)
+
+
+def save_manifest_hash_last_scan(
+    workspace: str,
+    manifest_files: Set[str],
+    manifest_suffixes: Set[str],
+    hashes: Optional[Dict[str, str]] = None,
+) -> None:
+    if hashes is None:
+        hashes = snapshot_manifest_hashes(workspace, manifest_files, manifest_suffixes)
+    ensure_cache_dirs(workspace)
+    with file_lock(_manifest_hashes_lock_path(workspace)):
+        data = load_manifest_hashes(workspace) or {}
+        data["last_scan"] = hashes
+        data["last_scan_triggered_at"] = datetime.now().isoformat()
+        with open(manifest_hashes_path(workspace), "w") as f:
+            json.dump(data, f)
+
+
+def clear_manifest_hashes(workspace: str) -> None:
+    try:
+        os.remove(manifest_hashes_path(workspace))
+    except OSError:
+        pass

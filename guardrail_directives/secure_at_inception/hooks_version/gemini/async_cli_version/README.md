@@ -9,6 +9,8 @@ via `additionalContext` so Gemini can inform the user immediately
 internal analysis cache, making subsequent scans faster
 - **Background SAST scanning**: Launches `snyk code test` in the background on every file edit/write
 -- non-blocking, Gemini keeps working
+- **Shell manifest detection**: `run_shell_command` can trigger SCA when commands such as
+`npm install` or `pip install` mutate tracked manifests
 - **New-only filtering**: Tracks which lines the agent modified and filters scan results to only
 report vulnerabilities on those lines
 - **Automatic fix loop**: When new vulnerabilities are found, Gemini is blocked from stopping and
@@ -54,7 +56,7 @@ chmod +x .gemini/hooks/snyk_secure_at_inception.py
     ],
     "AfterTool": [
       {
-        "matcher": "write_file|replace",
+        "matcher": "write_file|replace|run_shell_command",
         "hooks": [
           {
             "name": "snyk_secure_at_inception_after_tool_edit",
@@ -91,15 +93,15 @@ Session starts
   → Issues found?   → inject additionalContext warning for Gemini
   → All checks pass → launch cache-warming background scan
 
-Gemini edits a file
-  → PostToolUse hook records which lines changed
-  → Peeks at scan.done for cached errors (auth_required, snyk_not_found)
-  → Error found? → block immediately with actionable fix instructions
-  → No error?   → launch background scan, Gemini keeps working (non-blocking)
+Gemini edits a file or runs a package-management shell command
+  → AfterTool hook records which lines changed and snapshots manifest hashes
+  → Code edits launch background SAST scans
+  → Manifest changes trigger background SCA scans
 
 Gemini finishes responding
-  → Stop hook waits for scan results
+  → AfterAgent waits for scan results
   → Filters to only vulns on lines Gemini modified (ignores pre-existing issues)
+  → Compares dependency findings against the session-start SCA baseline
   → New vulns found?  → block with fix instructions (repeats up to 3 cycles)
   → No new vulns?     → pass silently
   → Scan failed?      → fall back to MCP snyk_code_scan prompt
@@ -107,7 +109,7 @@ Gemini finishes responding
 
 The cache-warming scan launched at session start primes Snyk's internal analysis cache. When the first file edit triggers a PostToolUse scan, Snyk can reuse cached analysis results for unchanged files, making the scan faster.
 
-Changes to dependency manifests (package.json, requirements.txt, etc.) trigger a prompt to run `snyk_sca_scan`.
+Changes to dependency manifests (package.json, requirements.txt, etc.) trigger a background SCA scan and are compared against the session-start dependency baseline.
 
 ## Configuration
 
@@ -170,4 +172,3 @@ The Snyk CLI can be installed via any of these methods:
 - **Standalone**: Download from [snyk.io/download](https://snyk.io/download)
 
 After installing, authenticate with `snyk auth`.
-

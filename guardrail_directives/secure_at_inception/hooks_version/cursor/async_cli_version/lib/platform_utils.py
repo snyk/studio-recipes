@@ -255,6 +255,31 @@ def resolve_log_file(workspace: str) -> str:
     )
 
 
+def parse_iso_timestamp(value: Optional[str]) -> Optional[datetime]:
+    """Parse common ISO-8601 timestamp variants used by the hook and workers."""
+    if not value:
+        return None
+
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        pass
+
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(normalized, fmt)
+        except ValueError:
+            continue
+
+    return None
+
+
 def scan_duration_secs(scan_info: Optional[Dict[str, Any]]) -> Optional[float]:
     """Return elapsed scan time in seconds from scan_info timestamps, or None."""
     try:
@@ -264,18 +289,11 @@ def scan_duration_secs(scan_info: Optional[Dict[str, Any]]) -> Optional[float]:
         completed = scan_info.get("completed_at")
         if not started or not completed:
             return None
-        from datetime import datetime as _dt
-
-        fmt = "%Y-%m-%dT%H:%M:%S.%f"
-        fmt_short = "%Y-%m-%dT%H:%M:%S"
-
-        def _parse(s: str) -> _dt:
-            try:
-                return _dt.strptime(s, fmt)
-            except ValueError:
-                return _dt.strptime(s, fmt_short)
-
-        return (_parse(completed) - _parse(started)).total_seconds()
+        started_at = parse_iso_timestamp(started)
+        completed_at = parse_iso_timestamp(completed)
+        if started_at is None or completed_at is None:
+            return None
+        return (completed_at - started_at).total_seconds()
     except Exception:
         return None
 

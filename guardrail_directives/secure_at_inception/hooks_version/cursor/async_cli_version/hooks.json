@@ -13,6 +13,12 @@
         "timeout": 600
       }
     ],
+    "afterShellExecution": [
+      {
+        "command": "uv run \"$HOME/.cursor/hooks/snyk_secure_at_inception.py\"",
+        "timeout": 600
+      }
+    ],
     "stop": [
       {
         "command": "uv run \"$HOME/.cursor/hooks/snyk_secure_at_inception.py\"",

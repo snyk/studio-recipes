@@ -51,6 +51,11 @@ chmod +x .cursor/hooks/snyk_secure_at_inception.py
         "command": "uv run \"$HOME/.cursor/hooks/snyk_secure_at_inception.py\""
       }
     ],
+    "afterShellExecution": [
+      {
+        "command": "uv run \"$HOME/.cursor/hooks/snyk_secure_at_inception.py\""
+      }
+    ],
     "stop": [
       {
         "command": "uv run \"$HOME/.cursor/hooks/snyk_secure_at_inception.py\""
@@ -73,6 +78,12 @@ Agent edits a file
   → Peeks at scan.done for cached errors (auth_required, snyk_not_found)
   → Error found? → block immediately with actionable fix instructions
   → No error?   → launch background scan, agent keeps working (non-blocking)
+
+Agent runs a shell command
+  → afterShellExecution hook hash-diffs manifest files (catches npm/pip
+    install, etc. that bypass afterFileEdit)
+  → Manifest changed? → trigger an SCA scan
+  → No change?        → no-op
 
 Agent finishes responding
   → stop hook waits for scan results
@@ -151,6 +162,11 @@ Cursor invokes shell-style hook commands through the system default shell -- on 
       }
     ],
     "afterFileEdit": [
+      {
+        "command": "uv run \"%USERPROFILE%\\.cursor\\hooks\\snyk_secure_at_inception.py\""
+      }
+    ],
+    "afterShellExecution": [
       {
         "command": "uv run \"%USERPROFILE%\\.cursor\\hooks\\snyk_secure_at_inception.py\""
       }

@@ -165,11 +165,11 @@ If SCA vulnerabilities are found:
 ## Batch Remediation Summary
 
 ### Code Vulnerabilities Fixed
-| # | Severity | Title | File | Line | Status |
-|---|----------|-------|------|------|--------|
-| 1 | high | Path Traversal | src/api/files.ts | 45 | Fixed |
-| 2 | high | Path Traversal | src/api/files.ts | 112 | Fixed |
-| 3 | medium | XSS | src/views/render.ts | 33 | Fixed |
+| # | Severity | ID | Title | File | Line | Status |
+|---|----------|----|-------|------|------|--------|
+| 1 | high | javascript/PT | Path Traversal | src/api/files.ts | 45 | Fixed |
+| 2 | high | javascript/PT | Path Traversal | src/api/files.ts | 112 | Fixed |
+| 3 | medium | javascript/XSS | XSS | src/views/render.ts | 33 | Fixed |
 
 **Total fixed**: [count] / [total]
 
@@ -190,13 +190,24 @@ If SCA vulnerabilities are found:
 ```
 
 ### Step 5.2: Send Feedback to Snyk
-After successful fixes, report the remediation:
+After successful fixes, report the remediation using the data already gathered in Step 5.1's summary:
 ```
 snyk_send_feedback with:
 - fixedExistingIssuesCount: [total code + SCA issues fixed]
+- fixedIssueIds: [prefixed ID of every fixed vulnerability — "sast:<ID>" for each row in the
+  Code Vulnerabilities Fixed table with Status "Fixed", plus "sca:<ID>" for the SCA fix (if
+  applicable); array length matches fixedExistingIssuesCount]
+- fixedIssuesBySeverity: {critical: [count], high: [count], medium: [count], low: [count]}
+  (tally of fixedIssueIds by severity)
+- fixedIssuesByScanType: {sast: [count], sca: [count]}
+- outcome: "applied"
+- testsPassed: [true | false] (from Step 3.2)
 - preventedIssuesCount: 0
 - path: [absolute project path]
 ```
+Note: this command has no `snyk_breakability_check` gate and determines no A/B/C strategy
+(Phase 4 applies the lowest fixing version directly) — omit `breakabilityRisk`,
+`breakabilityRiskSource`, and `strategy` since this file never computes them.
 
 ### Step 5.3: End Cleanly
 

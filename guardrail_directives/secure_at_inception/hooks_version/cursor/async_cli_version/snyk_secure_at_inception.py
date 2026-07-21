@@ -201,12 +201,18 @@ class ScaResult:
     changed_manifests: List[str] = field(default_factory=list)
 
 
-def _severity_counts(vulns: List[Dict[str, Any]]) -> str:
+def _severity_counts_dict(vulns: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Tally vulns into a critical/high/medium/low dict, e.g. for preventedIssuesBySeverity."""
     counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
     for vuln in vulns:
         sev = vuln.get("severity", "").lower()
         if sev in counts:
             counts[sev] += 1
+    return counts
+
+
+def _severity_counts(vulns: List[Dict[str, Any]]) -> str:
+    counts = _severity_counts_dict(vulns)
     return f"critical:{counts['critical']} high:{counts['high']} medium:{counts['medium']} low:{counts['low']}"
 
 
@@ -1094,6 +1100,7 @@ def _build_followup_message(
     if total_prevented > 0:
         prevented_ids = _prevented_issue_ids(new_vulns, new_sca_vulns)
         prevented_ids_json = json.dumps(prevented_ids)
+        prevented_by_severity_json = json.dumps(_severity_counts_dict(new_vulns + new_sca_vulns))
         message_parts.append("")
         message_parts.append(
             "Remediation order: fix the files above first. Do not search for MCP "
@@ -1105,9 +1112,11 @@ def _build_followup_message(
             f"After the file edits are complete, call snyk_send_feedback with "
             f"preventedIssuesCount={total_prevented}, "
             f"preventedIssueIds={prevented_ids_json}, "
+            f"preventedIssuesBySeverity={prevented_by_severity_json}, "
             f"path={workspace}. "
-            f"If your installed Snyk MCP rejects preventedIssueIds (older "
-            f"version), retry the call without that argument. If the feedback "
+            f"If your installed Snyk MCP rejects preventedIssueIds or "
+            f"preventedIssuesBySeverity (older version), retry the call "
+            f"without those arguments. If the feedback "
             f"tool is unavailable or stalls, skip it rather than delaying "
             f"remediation."
         )

@@ -196,12 +196,18 @@ class ScaResult:
     duration: Optional[float] = None
 
 
-def _severity_counts(vulns: List[Dict[str, Any]]) -> str:
+def _severity_counts_dict(vulns: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Tally vulns into a critical/high/medium/low dict, e.g. for preventedIssuesBySeverity."""
     counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
     for vuln in vulns:
         sev = vuln.get("severity", "").lower()
         if sev in counts:
             counts[sev] += 1
+    return counts
+
+
+def _severity_counts(vulns: List[Dict[str, Any]]) -> str:
+    counts = _severity_counts_dict(vulns)
     return f"critical:{counts['critical']} high:{counts['high']} medium:{counts['medium']} low:{counts['low']}"
 
 
@@ -1110,13 +1116,16 @@ def _build_block_reason(
     if total_prevented > 0:
         prevented_ids = _prevented_issue_ids(new_vulns, new_sca_vulns)
         prevented_ids_json = json.dumps(prevented_ids)
+        prevented_by_severity_json = json.dumps(_severity_counts_dict(new_vulns + new_sca_vulns))
         reason_parts.append(
             f"\nAfter fixing all issues above, call snyk_send_feedback with "
             f"preventedIssuesCount={total_prevented}, "
             f"preventedIssueIds={prevented_ids_json}, "
+            f"preventedIssuesBySeverity={prevented_by_severity_json}, "
             f"path={workspace}. "
-            f"If your installed Snyk MCP rejects preventedIssueIds (older version), "
-            f"retry the call without that argument."
+            f"If your installed Snyk MCP rejects preventedIssueIds or "
+            f"preventedIssuesBySeverity (older version), retry the call "
+            f"without those arguments."
         )
     reason_parts.append("\nThe security scan will run again automatically after fixing.")
 

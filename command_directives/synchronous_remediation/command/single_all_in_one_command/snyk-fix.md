@@ -242,11 +242,13 @@ If the application directly imports or uses the transitive dependency (not just 
 Document the chosen strategy:
 ```
 ## Remediation Strategy
-- **Strategy**: [A: Direct Upgrade | B: Parent Upgrade | C: Transitive Fix]
+- **Strategy**: [Direct Upgrade | Parent Upgrade | Transitive Fix]
 - **Target package to change**: [package@current → package@target]
-- **Parent dependency** (if B/C): [parent@current]
+- **Parent dependency** (if Parent Upgrade or Transitive Fix): [parent@current]
 - **Manifest file**: [path to manifest]
 ```
+
+Use this exact string in the `strategy` field of the Step 6.2 `snyk_send_feedback` call.
 
 ### Step 4.2: Breaking Change Assessment
 
@@ -274,7 +276,7 @@ The breakability result (LOW / MEDIUM / HIGH) is a general likelihood assessment
 | **MEDIUM** | Auto-apply the upgrade. Document the breaking change summary and reasoning in the remediation summary. |
 | **HIGH** | **Interactive**: present the full trade-off (vulnerability details, breaking change summary, exact proposed changes) and ask the user whether to proceed. **Autonomous**: evaluate the full trade-off, decide whether to apply or produce a Full Advisory (Phase 4a), and document the reasoning. |
 
-**Strategy B → fallback to C:** If Strategy B gets a HIGH breakability result and the decision (user or agent) is to not proceed, fall back to Strategy C. Re-run `snyk_breakability_check` on the transitive version jump and follow the Strategy C decision tree below.
+**Strategy B → fallback to C:** If Strategy B gets a HIGH breakability result and the decision (user or agent) is to not proceed, fall back to Strategy C. Re-run `snyk_breakability_check` on the transitive version jump and follow the Strategy C decision tree below. **When this fallback happens, re-record the "Document the chosen strategy" template from Step 4.1 with `Transitive Fix`** before reaching Step 6.2.
 
 **Strategy C (Transitive Fix):**
 
@@ -551,10 +553,23 @@ and describe the usage pattern that informed the risk level.]
 - Use visual separator (━) around PR prompt to make it stand out
 
 ### Step 6.2: Send Feedback to Snyk
-After successful fix, report the remediation:
+After successful fix, report the remediation using the data already gathered in Step 6.1's summary:
 ```
 snyk_send_feedback with:
 - fixedExistingIssuesCount: [total issues fixed]
+- fixedIssueIds: [array of prefixed issue IDs fixed — e.g. "sast:javascript/PT" once per
+  instance fixed for Code, or "sca:SNYK-JS-LODASH-1018905" for the SCA vulnerability plus
+  "sca:<ID>" for each entry in the Additional Issues Fixed table (Step 5.1a)]
+- fixedIssuesBySeverity: {critical: [count], high: [count], medium: [count], low: [count]}
+  (tally of fixedIssueIds by severity)
+- fixedIssuesByScanType: {sast: [count], sca: [count]} (Code fixes report sast only; SCA
+  fixes report sca only)
+- outcome: "applied"
+- breakabilityRisk: [LOW | MEDIUM | HIGH | unknown] (SCA only, from Step 4.2/4.2a — omit for Code)
+- breakabilityRiskSource: [api | heuristic] (SCA only — "api" if from snyk_breakability_check,
+  "heuristic" if derived via Step 4.2a's semver+usage fallback — omit for Code)
+- strategy: [Direct Upgrade | Parent Upgrade | Transitive Fix] (SCA only, from Step 4.1 — omit for Code)
+- testsPassed: [true | false] (from Step 5.2)
 - preventedIssuesCount: 0
 - path: [absolute project path]
 ```

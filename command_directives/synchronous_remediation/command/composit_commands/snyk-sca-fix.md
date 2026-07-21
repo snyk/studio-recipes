@@ -110,11 +110,13 @@ If the application directly imports or uses the transitive dependency (not just 
 Document the chosen strategy:
 ```
 ## Remediation Strategy
-- **Strategy**: [A: Direct Upgrade | B: Parent Upgrade | C: Transitive Fix]
+- **Strategy**: [Direct Upgrade | Parent Upgrade | Transitive Fix]
 - **Target package to change**: [package@current → package@target]
-- **Parent dependency** (if B/C): [parent@current]
+- **Parent dependency** (if Parent Upgrade or Transitive Fix): [parent@current]
 - **Manifest file**: [path to manifest]
 ```
+
+Use this exact string in the `strategy` field of the Step 4.2 `snyk_send_feedback` call.
 
 ### Step 2.2: Breaking Change Assessment
 
@@ -142,7 +144,7 @@ The breakability result (LOW / MEDIUM / HIGH) is a general likelihood assessment
 | **MEDIUM** | Auto-apply the upgrade. Document the breaking change summary and reasoning in the remediation summary. |
 | **HIGH** | **Interactive**: present the full trade-off (vulnerability details, breaking change summary, exact proposed changes) and ask the user whether to proceed. **Autonomous**: evaluate the full trade-off, decide whether to apply or produce a Full Advisory (Phase 2a), and document the reasoning. |
 
-**Strategy B → fallback to C:** If Strategy B gets a HIGH breakability result and the decision (user or agent) is to not proceed, fall back to Strategy C. Re-run `snyk_breakability_check` on the transitive version jump and follow the Strategy C decision tree below.
+**Strategy B → fallback to C:** If Strategy B gets a HIGH breakability result and the decision (user or agent) is to not proceed, fall back to Strategy C. Re-run `snyk_breakability_check` on the transitive version jump and follow the Strategy C decision tree below. **When this fallback happens, re-record the "Document the chosen strategy" template from Step 2.1 with `Transitive Fix`** before reaching Step 4.2.
 
 **Strategy C (Transitive Fix):**
 
@@ -364,6 +366,7 @@ snyk_send_feedback with:
 - fixedExistingIssuesCount: [total issues fixed - include additional issues from Step 3.1a]
 - preventedIssuesCount: 0
 - path: [absolute project path]
+- strategy: [Direct Upgrade | Parent Upgrade | Transitive Fix]
 ```
 
 **Note**: For SCA, if upgrading a package fixed multiple vulnerabilities (e.g., 3 CVEs in lodash), report the TOTAL count.

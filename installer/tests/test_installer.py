@@ -2385,6 +2385,7 @@ class TestConflictPromptAutoYes:
             profile="default",
             workspace=None,
             no_latest_deps=False,
+            cli_path=None,
         )
 
     def _stub_main(self, monkeypatch, manifest, ade="cursor"):
@@ -2392,6 +2393,7 @@ class TestConflictPromptAutoYes:
         monkeypatch.setattr(installer, "PayloadContext", lambda: MagicMock())
         monkeypatch.setattr(installer, "Manifest", lambda *a, **kw: manifest)
         monkeypatch.setattr(installer, "check_prerequisites", lambda *a, **kw: None)
+        monkeypatch.setattr(installer, "_sync_cli_path_sidecar", lambda *a, **kw: None)
         monkeypatch.setattr(installer, "get_target_ades", lambda *a, **kw: [ade])
         monkeypatch.setattr(installer, "resolve_workspace", lambda *a, **kw: None)
         monkeypatch.setattr(installer, "show_plan", lambda *a, **kw: None)
@@ -2483,6 +2485,7 @@ class TestConflictResolutionPolicy:
             profile="default",
             workspace=None,
             no_latest_deps=False,
+            cli_path=None,
         )
 
     @staticmethod
@@ -2501,6 +2504,7 @@ class TestConflictResolutionPolicy:
         monkeypatch.setattr(installer, "PayloadContext", lambda: MagicMock())
         monkeypatch.setattr(installer, "Manifest", lambda *a, **kw: manifest)
         monkeypatch.setattr(installer, "check_prerequisites", lambda *a, **kw: None)
+        monkeypatch.setattr(installer, "_sync_cli_path_sidecar", lambda *a, **kw: None)
         monkeypatch.setattr(installer, "get_target_ades", lambda *a, **kw: [ade])
         monkeypatch.setattr(installer, "resolve_workspace", lambda *a, **kw: None)
         monkeypatch.setattr(installer, "show_plan", lambda *a, **kw: None)

@@ -32,6 +32,7 @@ from platform_utils import (
     get_snyk_search_paths,
     is_pid_alive,
     resolve_log_file,
+    snyk_cli_from_sidecar,
     workspace_hash,
 )
 
@@ -126,9 +127,18 @@ def parse_sarif_results(json_output: str) -> List[Dict[str, Any]]:
 def _augment_path_for_snyk(env: Dict[str, str]) -> None:
     """Ensure the snyk binary is discoverable on PATH.
 
-    IDE-spawned subprocesses often lack shell profile additions (nvm, volta).
-    Probes common install locations and appends the matching bin directory.
+    Consults the installer sidecar first (set by ``--cli-path``); if pinned,
+    prepends the containing directory to ``env["PATH"]`` and returns. Falls
+    back to the original probe: current ``PATH``, then common install
+    locations (nvm, Volta, Homebrew, Scoop, etc.) via platform_utils helpers.
     """
+    pinned: Optional[str] = snyk_cli_from_sidecar()
+    if pinned:
+        bin_dir = os.path.dirname(pinned)
+        if bin_dir and bin_dir not in env.get("PATH", "").split(os.pathsep):
+            env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+        return
+
     if shutil.which("snyk", path=env.get("PATH", "")):
         return
 
@@ -185,13 +195,18 @@ def check_snyk_auth() -> Optional[str]:
 
 
 def check_snyk_cli() -> Optional[str]:
-    """Check if the Snyk CLI binary is discoverable on PATH.
+    """Check if the Snyk CLI binary is discoverable, sidecar or PATH.
 
-    Probes the current PATH and common install locations (nvm, Volta,
-    Homebrew, Scoop, etc.) via platform_utils helpers.
+    Returns the sidecar-pinned path first (set by the installer's
+    ``--cli-path``); otherwise probes the current PATH and common install
+    locations (nvm, Volta, Homebrew, Scoop, etc.) via platform_utils helpers.
 
     Returns the path to the binary if found, None otherwise.
     """
+    pinned: Optional[str] = snyk_cli_from_sidecar()
+    if pinned:
+        return pinned
+
     env = os.environ.copy()
     _augment_path_for_snyk(env)
 

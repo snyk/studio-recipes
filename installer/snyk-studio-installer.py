@@ -23,6 +23,9 @@ Options:
     --list                                     List available recipes and profiles
     --no-latest-deps                           Install pinned manifest dependency versions,
                                                upgrading only if missing or older than the pin
+    --cli-path <path>                          Use the standalone Snyk CLI at <path>. Skips all
+                                               Node.js/npm/nvm checks. If omitted, falls back to
+                                               npx (the default).
     --control-identifier <id>                  Machine/control identifier to record
     --diag-dump                                Create a diagnostic zip for Snyk support and print its path.
     --out-file <path>                          Output path for the diagnostic zip (default: timestamped zip in cwd).
@@ -189,6 +192,18 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help=(
             "Install the dependency versions from the manifest prerequisites, "
             "upgrading only dependencies that are missing or older."
+        ),
+    )
+    parser.add_argument(
+        "--cli-path",
+        default=None,
+        dest="cli_path",
+        metavar="PATH",
+        help=(
+            "Path to a standalone Snyk CLI binary. When provided, skips all "
+            "Node.js/npm/nvm checks and points MCP configs at this absolute "
+            "path instead of `npx snyk`. When omitted, the installer uses "
+            "npx (the default behavior)."
         ),
     )
     parser.add_argument(
@@ -1129,12 +1144,87 @@ def run_command(cmd: list[str], warn: str) -> int:
         return 1
 
 
+def _cli_path_sidecar() -> Path:
+    """Return the ``~/.snyk-studio/cli-path`` path.
+
+    Wrapped in a function (rather than a module-level constant) so tests can
+    monkeypatch it without evaluating ``Path.home()`` at import time.
+    """
+    return Path.home() / ".snyk-studio" / "cli-path"
+
+
+def _sync_cli_path_sidecar(cli_path: Optional[str], dry_run: bool) -> None:
+    """Write or clear ``~/.snyk-studio/cli-path`` to reflect ``--cli-path``.
+
+    Installed SAI hooks read this file via ``platform_utils.snyk_cli_from_sidecar``
+    to locate the pinned CLI without relying on ``PATH``. Called only from
+    install/uninstall runs so ``--verify``/``--diag-dump``/``--list`` don't
+    mutate installer state.
+    """
+    sidecar = _cli_path_sidecar()
+    if dry_run:
+        action = "write" if cli_path else "clear"
+        print(f"    {C.dim(f'[dry-run] {action} sidecar: {sidecar}')}")
+        return
+    if cli_path:
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text(cli_path, encoding="utf-8")
+    else:
+        with contextlib.suppress(FileNotFoundError):
+            sidecar.unlink()
+
+
+def _check_native_snyk(cli_path: str, snyk_version: Optional[str]) -> None:
+    """Verify the standalone Snyk CLI exists at ``cli_path`` and print its version.
+
+    Exits non-zero if the binary is missing or not executable. Version below
+    the pinned minimum is a warning only — the installer cannot upgrade a
+    standalone binary itself.
+    """
+    if not (os.path.isfile(cli_path) and os.access(cli_path, os.X_OK)):
+        print(
+            f"  {C.red('ERROR')} --cli-path {cli_path} is not an executable file. "
+            f"Point --cli-path at a standalone Snyk CLI binary, or omit the flag "
+            f"to use npx."
+        )
+        sys.exit(1)
+
+    try:
+        r = run(
+            [cli_path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        snyk_ver_str = r.stdout.strip().splitlines()[0] if r.stdout else None
+    except Exception:
+        snyk_ver_str = None
+
+    if not snyk_ver_str:
+        print(f"  {C.yellow('WARNING')} Snyk CLI at {cli_path} did not report a version")
+        return
+
+    match = re.match(r"(\d+\.\d+\.\d+)", snyk_ver_str)
+    if snyk_version and match:
+        current = tuple(map(int, match.group(1).split(".")))
+        minimum = tuple(map(int, snyk_version.split(".")))
+        if current < minimum:
+            print(
+                f"  {C.yellow('WARNING')} Snyk CLI {snyk_ver_str} at {cli_path} "
+                f"is older than the pinned minimum {snyk_version}. Upgrade the "
+                f"standalone binary manually."
+            )
+            return
+    print(f"  {C.green('OK')} Snyk CLI {snyk_ver_str} ({cli_path})")
+
+
 def check_prerequisites(
     auto_yes: bool,
     snyk_version: Optional[str] = None,
     node_version: Optional[str] = None,
     no_latest_deps: bool = False,
     nvm_version: Optional[str] = None,
+    cli_path: Optional[str] = None,
 ) -> None:
     """Check that the required prerequisites are installed and configured. If not, attempt to install them.
 
@@ -1142,7 +1232,17 @@ def check_prerequisites(
     prerequisites; it doubles as the minimum-acceptable version. In
     ``no_latest_deps`` the installer does not upgrade to the latest dependency version when the dependency is
     missing or older.
+
+    When ``cli_path`` is set, skip all Node.js/npm/nvm checks and instead
+    verify the standalone Snyk CLI exists at that path. Errors out if missing.
     """
+
+    py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
+    print(f"  {C.green('OK')} Python {py_ver}")
+
+    if cli_path:
+        _check_native_snyk(cli_path, snyk_version)
+        return
 
     warnings = 0
 
@@ -1155,9 +1255,6 @@ def check_prerequisites(
         if no_latest_deps and snyk_version:
             return f"snyk@{snyk_version}"
         return latest_label
-
-    py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
-    print(f"  {C.green('OK')} Python {py_ver}")
 
     def get_snyk_path():
         return shutil.which("snyk") or _find_win_npm_executable("snyk")
@@ -1234,13 +1331,18 @@ def check_prerequisites(
 
 
 def print_prerequisite_versions(
-    snyk_version: Optional[str] = None, node_version: Optional[str] = None
+    snyk_version: Optional[str] = None,
+    node_version: Optional[str] = None,
+    cli_path: Optional[str] = None,
 ) -> None:
     """Print Python/Node/Snyk CLI versions, flagging any older than the manifest pins.
 
     Read-only: never installs, upgrades, or prompts — unlike
     ``check_prerequisites``. Used by ``--verify``, which must stay
     side-effect-free.
+
+    When ``cli_path`` is set, Node.js is not checked and the Snyk CLI is
+    probed at that path instead of via PATH.
     """
 
     def parse_version(x: str) -> tuple[int, ...]:
@@ -1248,6 +1350,32 @@ def print_prerequisite_versions(
 
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
     print(f"  {C.green('OK')} Python {py_ver}")
+
+    if cli_path:
+        if not (os.path.isfile(cli_path) and os.access(cli_path, os.X_OK)):
+            print(f"  {C.yellow('WARNING')} Snyk CLI not found at {cli_path}")
+            return
+        try:
+            r = run(
+                [cli_path, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            snyk_ver_str = r.stdout.strip().splitlines()[0] if r.stdout else None
+        except Exception:
+            snyk_ver_str = None
+        if not snyk_ver_str:
+            print(f"  {C.yellow('WARNING')} Snyk CLI at {cli_path} did not report a version")
+            return
+        match = re.match(r"(\d+\.\d+\.\d+)", snyk_ver_str)
+        if snyk_version and match and parse_version(match.group(1)) < parse_version(snyk_version):
+            print(
+                f"  {C.yellow('WARNING')} Snyk CLI {snyk_ver_str} is outdated (min: {snyk_version})"
+            )
+        else:
+            print(f"  {C.green('OK')} Snyk CLI {snyk_ver_str} ({cli_path})")
+        return
 
     node_ver = _get_node_version()
     if node_ver is None:
@@ -1261,7 +1389,7 @@ def print_prerequisite_versions(
         print(f"  {C.green('OK')} Node.js {'.'.join(map(str, node_ver))}")
 
     snyk_path = shutil.which("snyk") or _find_win_npm_executable("snyk")
-    snyk_ver_str: Optional[str] = None
+    snyk_ver_str = None
     if snyk_path:
         try:
             r = run(
@@ -2131,8 +2259,66 @@ def uninstall_workspace_recipe(
     remove_legacy_workspace_files(sources, workspace, dry_run)
 
 
+@contextlib.contextmanager
+def _native_mcp_source(cli_path: str) -> Iterator[Path]:
+    """Yield a temp .mcp.json-shaped source with the Snyk server pointing at ``cli_path``.
+
+    Used when ``--cli-path`` is set: the merge layer still expects an on-disk
+    file, so we materialize one with the user-supplied command substituted for
+    the default ``npx -y snyk@latest`` invocation. The filename ends in
+    ``.mcp.json`` so downstream ``source.name == ".mcp.json"`` checks (e.g. in
+    the merge strategies) still match.
+    """
+    body = {
+        "mcpServers": {
+            "Snyk": {
+                "command": cli_path,
+                "args": ["mcp", "-t", "stdio"],
+            }
+        }
+    }
+    fd, name = tempfile.mkstemp(suffix=".mcp.json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(body, f)
+        yield Path(name)
+    finally:
+        try:
+            os.unlink(name)
+        except FileNotFoundError:
+            pass
+
+
+@contextlib.contextmanager
+def _native_mcp_codex_source(cli_path: str) -> Iterator[Path]:
+    """Yield a temp .mcp-codex.toml with the Snyk server pointing at ``cli_path``.
+
+    Codex-specific parallel to ``_native_mcp_source``: ``merge_codex_config``
+    reads a TOML source, so we materialize a temp TOML with only the
+    ``[mcp_servers.Snyk]`` table populated. The suffix ``.mcp-codex.toml``
+    keeps the ``source.name`` gates in ``install_recipe`` / ``verify_recipe``
+    matching on the substituted file too.
+    """
+    body = f'[mcp_servers.Snyk]\ncommand = {json.dumps(cli_path)}\nargs = ["mcp", "-t", "stdio"]\n'
+    fd, name = tempfile.mkstemp(suffix=".mcp-codex.toml")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(body)
+        yield Path(name)
+    finally:
+        try:
+            os.unlink(name)
+        except FileNotFoundError:
+            pass
+
+
 def install_recipe(
-    recipe_id: str, ade: str, manifest: Manifest, payload: PayloadContext, dry_run: bool
+    recipe_id: str,
+    ade: str,
+    manifest: Manifest,
+    payload: PayloadContext,
+    dry_run: bool,
+    cli_path: Optional[str] = None,
 ) -> None:
     sources = manifest.get_sources(recipe_id, ade)
     if not sources:
@@ -2158,17 +2344,32 @@ def install_recipe(
     if cm:
         target = resolve_ade_path(ade, cm["target"])
         source = payload.resolve_src(cm["source"])
-        if sys.platform == "darwin" and ade not in CLI_ADES and source.name == ".mcp.json":
-            source = payload.resolve_src("mcp/.mcp.mac.json")
-
-        merge_config(cm["strategy"], target, source, payload, dry_run)
+        if cli_path and source.name == ".mcp.json":
+            # --cli-path wins over the darwin shell-wrapper swap: with an
+            # absolute binary path there is no npx-on-login-shell-PATH problem
+            # to work around.
+            with _native_mcp_source(cli_path) as native_src:
+                merge_config(cm["strategy"], target, native_src, payload, dry_run)
+        elif cli_path and source.name == ".mcp-codex.toml":
+            with _native_mcp_codex_source(cli_path) as native_src:
+                merge_config(cm["strategy"], target, native_src, payload, dry_run)
+        else:
+            if sys.platform == "darwin" and ade not in CLI_ADES and source.name == ".mcp.json":
+                source = payload.resolve_src("mcp/.mcp.mac.json")
+            merge_config(cm["strategy"], target, source, payload, dry_run)
         cleanup_legacy_config_merge(cm, ade, payload, dry_run)
 
     # chmod +x on Python files
     chmod_python_files(ade_home, dry_run)
 
 
-def verify_recipe(recipe_id: str, ade: str, manifest: Manifest, payload: PayloadContext) -> bool:
+def verify_recipe(
+    recipe_id: str,
+    ade: str,
+    manifest: Manifest,
+    payload: PayloadContext,
+    cli_path: Optional[str] = None,
+) -> bool:
     sources = manifest.get_sources(recipe_id, ade)
     if not sources:
         return True
@@ -2199,30 +2400,40 @@ def verify_recipe(recipe_id: str, ade: str, manifest: Manifest, payload: Payload
     if cm:
         strategy = cm["strategy"].replace("merge_", "verify_", 1)
         target = resolve_ade_path(ade, cm["target"])
-        with _expand_source(strategy, payload.resolve_src(cm["source"])) as resolved_path:
-            lib_dir = str(payload.payload_dir / "lib")
-            if lib_dir not in sys.path:
-                sys.path.insert(0, lib_dir)
-            import merge_json
+        raw_source = payload.resolve_src(cm["source"])
+        src_ctx: contextlib.AbstractContextManager[Path]
+        if cli_path and raw_source.name == ".mcp.json":
+            src_ctx = _native_mcp_source(cli_path)
+        elif cli_path and raw_source.name == ".mcp-codex.toml":
+            src_ctx = _native_mcp_codex_source(cli_path)
+        else:
+            src_ctx = contextlib.nullcontext(raw_source)
+        with src_ctx as raw:
+            with _expand_source(strategy, raw) as resolved_path:
+                lib_dir = str(payload.payload_dir / "lib")
+                if lib_dir not in sys.path:
+                    sys.path.insert(0, lib_dir)
+                import merge_json
 
-            try:
-                if (
-                    sys.platform == "darwin"
-                    and ade not in CLI_ADES
-                    and resolved_path.name == ".mcp.json"
-                ):
-                    resolved_path = payload.resolve_src("mcp/.mcp.mac.json")
+                try:
+                    if (
+                        not cli_path
+                        and sys.platform == "darwin"
+                        and ade not in CLI_ADES
+                        and resolved_path.name == ".mcp.json"
+                    ):
+                        resolved_path = payload.resolve_src("mcp/.mcp.mac.json")
 
-                merge_json.STRATEGIES[strategy](str(target), str(resolved_path))
-                print(f"    {C.green('OK')} hooks registered in {cm['target']}")
-            except (SystemExit, KeyError):
-                print(f"    {C.red('MISSING')} hooks in {cm['target']}")
-                ok = False
-            except ValueError as e:
-                print(
-                    f"    {C.red('ERROR')} Cannot update configuration, parse error in file {cm['target']}. Please fix the error: {e}"
-                )
-                ok = False
+                    merge_json.STRATEGIES[strategy](str(target), str(resolved_path))
+                    print(f"    {C.green('OK')} hooks registered in {cm['target']}")
+                except (SystemExit, KeyError):
+                    print(f"    {C.red('MISSING')} hooks in {cm['target']}")
+                    ok = False
+                except ValueError as e:
+                    print(
+                        f"    {C.red('ERROR')} Cannot update configuration, parse error in file {cm['target']}. Please fix the error: {e}"
+                    )
+                    ok = False
 
     return ok
 
@@ -2441,6 +2652,13 @@ def write_control_identifier(identifier: str, dry_run: bool) -> None:
 def main() -> None:
     args = parse_args()
 
+    if args.cli_path:
+        # Expand and absolutize so downstream consumers (MCP config, sidecar,
+        # hook resolver) all see the same absolute path — a relative
+        # `--cli-path` would validate against the installer's cwd but fail at
+        # scan time when the IDE-spawned hook runs in a different cwd.
+        args.cli_path = os.path.abspath(os.path.expanduser(args.cli_path))
+
     if args.diag_dump:
         lib_dir = str(Path(__file__).resolve().parent / "lib")
         if lib_dir not in sys.path:
@@ -2505,6 +2723,7 @@ def main() -> None:
             print_prerequisite_versions(
                 snyk_version=manifest.prerequisite_version("snyk"),
                 node_version=manifest.prerequisite_version("node"),
+                cli_path=args.cli_path,
             )
         else:
             check_prerequisites(
@@ -2513,6 +2732,7 @@ def main() -> None:
                 node_version=manifest.prerequisite_version("node"),
                 no_latest_deps=args.no_latest_deps,
                 nvm_version=manifest.prerequisite_version("nvm"),
+                cli_path=args.cli_path,
             )
         print()
         ades = get_target_ades(args.ade, args.yes)
@@ -2523,7 +2743,7 @@ def main() -> None:
             for recipe_id in recipes:
                 if manifest.is_workspace_scoped(recipe_id):
                     continue
-                if not verify_recipe(recipe_id, ade, manifest, payload):
+                if not verify_recipe(recipe_id, ade, manifest, payload, cli_path=args.cli_path):
                     all_ok = False
         for recipe_id in recipes:
             if not manifest.is_workspace_scoped(recipe_id):
@@ -2551,7 +2771,13 @@ def main() -> None:
         node_version=manifest.prerequisite_version("node"),
         no_latest_deps=args.no_latest_deps,
         nvm_version=manifest.prerequisite_version("nvm"),
+        cli_path=args.cli_path,
     )
+    if not args.uninstall:
+        # Uninstall is per-ADE and must not clear the sidecar: other ADEs'
+        # installed hooks still depend on it. Users who want to fully purge
+        # can remove ~/.snyk-studio/ manually.
+        _sync_cli_path_sidecar(args.cli_path, args.dry_run)
     print()
 
     # ADE detection
@@ -2689,7 +2915,7 @@ def main() -> None:
         for recipe_id in recipes:
             if manifest.is_workspace_scoped(recipe_id):
                 continue
-            install_recipe(recipe_id, ade, manifest, payload, args.dry_run)
+            install_recipe(recipe_id, ade, manifest, payload, args.dry_run, cli_path=args.cli_path)
     for recipe_id in recipes:
         if not manifest.is_workspace_scoped(recipe_id):
             continue
@@ -2707,7 +2933,7 @@ def main() -> None:
             for recipe_id in recipes:
                 if manifest.is_workspace_scoped(recipe_id):
                     continue
-                if not verify_recipe(recipe_id, ade, manifest, payload):
+                if not verify_recipe(recipe_id, ade, manifest, payload, cli_path=args.cli_path):
                     all_ok = False
         for recipe_id in recipes:
             if not manifest.is_workspace_scoped(recipe_id):

@@ -157,6 +157,33 @@ def get_snyk_binary_names() -> List[str]:
 
 
 # =============================================================================
+# INSTALLER SIDECAR
+# =============================================================================
+
+
+_CLI_PATH_SIDECAR = os.path.join(os.path.expanduser("~"), ".snyk-studio", "cli-path")
+
+
+def snyk_cli_from_sidecar() -> Optional[str]:
+    """Return the absolute Snyk CLI path pinned by the installer's ``--cli-path``.
+
+    Reads ``~/.snyk-studio/cli-path`` (written by the installer). Returns
+    ``None`` if the sidecar is missing or the recorded path is not an
+    executable file. Callers use this before falling back to ``PATH``
+    resolution so a standalone-CLI install works even when ``snyk`` isn't
+    on the IDE-inherited PATH.
+    """
+    try:
+        with open(_CLI_PATH_SIDECAR, encoding="utf-8") as f:
+            pinned = f.read().strip()
+    except (FileNotFoundError, OSError):
+        return None
+    if pinned and os.path.isfile(pinned) and os.access(pinned, os.X_OK):
+        return pinned
+    return None
+
+
+# =============================================================================
 # FILE LOCKING
 # =============================================================================
 

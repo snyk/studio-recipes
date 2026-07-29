@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import platform_utils
 from platform_utils import STUDIO_VERSION as SNYK_STUDIO_VERSION  # noqa: E402
 from platform_utils import log as _platform_log  # noqa: E402
+from platform_utils import snyk_cli_from_sidecar  # noqa: E402
 
 WORKSPACE = ""
 CACHE_DIR = ""
@@ -179,7 +180,7 @@ def main() -> None:
             )
             return
 
-    snyk_bin = shutil.which("snyk")
+    snyk_bin = snyk_cli_from_sidecar() or shutil.which("snyk")
     if snyk_bin is None:
         log("Snyk CLI not found on PATH")
         finish("snyk_not_found", started_at=started_at)

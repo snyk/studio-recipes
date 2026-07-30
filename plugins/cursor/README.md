@@ -6,7 +6,7 @@ A Cursor plugin that bundles Snyk security scanning, automated remediation, and 
 
 | Component | Description |
 |-----------|-------------|
-| **Snyk MCP Server** | Snyk's MCP server (experimental profile) providing security scanning tools |
+| **Snyk MCP Server** | Snyk's MCP server (installed by every profile) providing security scanning tools |
 | **Secure at Inception Hooks** | Automatic background SAST scanning on file edits, blocking the agent if new vulnerabilities are introduced |
 | **`/snyk-fix` Command** | Scan for vulnerabilities, fix them, validate, and optionally create a PR |
 | **`/snyk-batch-fix` Command** | Batch fix vulnerabilities detected by the Secure at Inception hooks |

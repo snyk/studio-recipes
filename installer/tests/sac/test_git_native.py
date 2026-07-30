@@ -422,7 +422,7 @@ class TestGitNative:
     @requires_git
     @pytest.mark.skipif(os.name == "nt", reason="POSIX git hooks only")
     def test_first_blocking_recipe_is_not_masked_by_a_second_passing_one(self, workspace):
-        """sac-hooks and secrets-hooks are both workspace-scoped and can both
+        """secure-at-commit and secrets-precommit-hook are both workspace-scoped and can both
         append their own command block to the same .git/hooks/pre-commit --
         if it already existed (e.g. from another tool) without `set -e`
         (only seeded when we create the file from scratch), a failing first

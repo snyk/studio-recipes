@@ -315,7 +315,7 @@ class TestParseArgs:
         assert args.list_mode is False
         assert args.yes is False
         assert args.no_latest_deps is False
-        assert args.secrets_precommit_hook is False
+        assert args.recipes is None
         assert args.control_identifier is None
 
     def test_all_flags(self):
@@ -331,7 +331,8 @@ class TestParseArgs:
                 "--list",
                 "-y",
                 "--no-latest-deps",
-                "--secrets-precommit-hook",
+                "--recipes",
+                "secure-at-commit",
                 "--control-identifier",
                 "machine-123",
             ]
@@ -344,20 +345,50 @@ class TestParseArgs:
         assert args.list_mode is True
         assert args.yes is True
         assert args.no_latest_deps is True
-        assert args.secrets_precommit_hook is True
+        assert args.recipes == ["secure-at-commit"]
         assert args.control_identifier == "machine-123"
 
     def test_no_latest_deps_explicit(self):
         args = installer.parse_args(["--no-latest-deps"])
         assert args.no_latest_deps is True
 
-    def test_secrets_precommit_hook_flag_sets_true(self):
-        args = installer.parse_args(["--secrets-precommit-hook"])
-        assert args.secrets_precommit_hook is True
-
-    def test_secrets_precommit_hook_rejects_value(self):
+    def test_removed_secrets_precommit_hook_flag_rejected(self):
         with pytest.raises(SystemExit):
-            installer.parse_args(["--secrets-precommit-hook", "remove"])
+            installer.parse_args(["--secrets-precommit-hook"])
+
+    def test_recipes_single_name(self):
+        args = installer.parse_args(["--recipes", "secrets-precommit-hook"])
+        assert args.recipes == ["secrets-precommit-hook"]
+
+    def test_recipes_multiple_names(self):
+        args = installer.parse_args(["--recipes", "secure-at-commit,secrets-precommit-hook"])
+        assert args.recipes == ["secure-at-commit", "secrets-precommit-hook"]
+
+    def test_recipes_strips_surrounding_whitespace(self):
+        args = installer.parse_args(["--recipes", " secure-at-commit , secrets-precommit-hook "])
+        assert args.recipes == ["secure-at-commit", "secrets-precommit-hook"]
+
+    def test_recipes_collapses_duplicates(self):
+        args = installer.parse_args(["--recipes", "secure-at-commit,secure-at-commit"])
+        assert args.recipes == ["secure-at-commit"]
+
+    def test_recipes_rejects_empty_value(self):
+        with pytest.raises(SystemExit):
+            installer.parse_args(["--recipes", ""])
+
+    def test_recipes_rejects_empty_element(self):
+        with pytest.raises(SystemExit):
+            installer.parse_args(["--recipes", "secure-at-commit,,secrets-precommit-hook"])
+
+    def test_recipes_rejects_repeated_flag(self):
+        with pytest.raises(SystemExit):
+            installer.parse_args(
+                ["--recipes", "secure-at-commit", "--recipes", "secrets-precommit-hook"]
+            )
+
+    def test_recipes_preserves_case_for_exact_matching(self):
+        args = installer.parse_args(["--recipes", "Secure-At-Commit"])
+        assert args.recipes == ["Secure-At-Commit"]
 
     def test_invalid_ade_rejected(self):
         with pytest.raises(SystemExit):
@@ -1290,28 +1321,64 @@ class TestManifest:
     def test_resolve_default_profile(self, manifest):
         recipes = manifest.resolve_recipes("default")
         assert "sai-hooks-async" in recipes
-        assert "secrets-hooks" not in recipes
+        assert "secrets-precommit-hook" not in recipes
         assert "snyk-fix-command" in recipes
         assert len(recipes) == 6
 
-    def test_resolve_default_profile_with_secrets_precommit_hook_flag(self, manifest):
-        recipes = manifest.resolve_recipes("default", secrets_precommit_hook=True)
-        assert "sai-hooks-async" in recipes
-        assert "secrets-hooks" in recipes
-        assert "snyk-fix-command" in recipes
-        assert len(recipes) == 7
-
     def test_resolve_minimal_profile(self, manifest):
         recipes = manifest.resolve_recipes("minimal")
-        assert "sai-hooks-async" in recipes
-        assert "mcp-config" in recipes
-        assert "snyk-fix-command" not in recipes
+        assert recipes == ["sai-hooks-async", "mcp-config"]
 
-    def test_secrets_precommit_hook_flag_adds_to_minimal_profile(self, manifest):
-        recipes = manifest.resolve_recipes("minimal", secrets_precommit_hook=True)
-        assert "sai-hooks-async" in recipes
-        assert "secrets-hooks" in recipes
-        assert "mcp-config" in recipes
+    def test_resolve_experimental_profile(self, manifest):
+        recipes = manifest.resolve_recipes("experimental")
+        assert "secure-at-commit" in recipes
+        assert "sai-hooks-async" not in recipes
+        assert "secrets-precommit-hook" not in recipes
+        assert len(recipes) == 6
+
+    def test_selection_replaces_profile_list(self, manifest):
+        recipes = manifest.resolve_recipes("experimental", ["secrets-precommit-hook"])
+        assert recipes == ["secrets-precommit-hook"]
+
+    def test_selection_of_both_commit_hooks_follows_manifest_order(self, manifest):
+        # Typed in the opposite order to the manifest's declaration order.
+        recipes = manifest.resolve_recipes(
+            "experimental", ["secrets-precommit-hook", "secure-at-commit"]
+        )
+        assert recipes == ["secure-at-commit", "secrets-precommit-hook"]
+
+    def test_selection_narrows_the_profile_to_one_member(self, manifest):
+        assert manifest.resolve_recipes("experimental", ["secure-at-commit"]) == [
+            "secure-at-commit"
+        ]
+
+    def test_unprofiled_recipes_is_pinned(self, manifest):
+        # A recipe left out of every profile silently becomes user-selectable,
+        # so adding one has to be a deliberate decision rather than an omission.
+        assert manifest.unprofiled_recipes() == ["secrets-precommit-hook"]
+
+    def test_unprofiled_recipes_empty_when_a_profile_lists_everything(self, manifest, monkeypatch):
+        monkeypatch.setitem(manifest.profiles, "everything", {"recipes": ["*"]})
+        assert manifest.unprofiled_recipes() == []
+
+    def test_nameable_recipes_under_experimental(self, manifest):
+        # Every recipe but the Secure at Inception hooks: the profile's own
+        # members plus the unprofiled secrets hook.
+        assert manifest.nameable_recipes("experimental") == [
+            "snyk-fix-command",
+            "snyk-batch-fix-command",
+            "snyk-fix-skill",
+            "mcp-config",
+            "secure-at-commit",
+            "secrets-precommit-hook",
+            "secure-dependency-health-check-skill",
+        ]
+
+    def test_nameable_recipes_excludes_disabled(self, manifest, monkeypatch):
+        monkeypatch.setitem(
+            manifest.recipes, "secrets-precommit-hook", {"type": "hooks", "enabled": False}
+        )
+        assert "secrets-precommit-hook" not in manifest.nameable_recipes("experimental")
 
     def test_unknown_profile_exits(self, manifest):
         with pytest.raises(SystemExit):
@@ -1335,7 +1402,7 @@ class TestManifest:
 
     def test_gemini_sources_for_all_default_recipes(self, manifest):
         # snyk-fix-skill is limited to command-less platforms (codex, copilot-cli);
-        # workspace-scoped recipes (e.g. secrets-hooks) have no per-ADE sources.
+        # workspace-scoped recipes (e.g. secrets-precommit-hook) have no per-ADE sources.
         skill_only_recipes = {"snyk-fix-skill"}
         for recipe_id in manifest.resolve_recipes("default"):
             if recipe_id in skill_only_recipes or manifest.is_workspace_scoped(recipe_id):
@@ -1345,7 +1412,7 @@ class TestManifest:
 
     def test_kiro_sources_for_all_default_recipes_except_hooks(self, manifest):
         # snyk-fix-skill is limited to command-less platforms (codex, copilot-cli);
-        # workspace-scoped recipes (e.g. secrets-hooks) have no per-ADE sources.
+        # workspace-scoped recipes (e.g. secrets-precommit-hook) have no per-ADE sources.
         skill_only_recipes = {"snyk-fix-skill"}
         for recipe_id in manifest.resolve_recipes("default"):
             if recipe_id in (
@@ -1516,6 +1583,278 @@ class TestManifest:
     def test_conflicting_scopes_unknown_ade(self, manifest):
         assert manifest.conflicting_rule_scopes("nonexistent") == []
         assert manifest.conflicting_skill_scopes("nonexistent") == []
+
+
+# ===========================================================================
+# TestValidateRecipeSelection
+# ===========================================================================
+
+
+class TestValidateRecipeSelection:
+    @pytest.fixture
+    def manifest(self):
+        return installer.Manifest(INSTALLER_DIR / "manifest.json")
+
+    def _validate(self, manifest, profile, selection):
+        with pytest.raises(SystemExit) as excinfo:
+            installer.validate_recipe_selection(manifest, profile, selection)
+        assert excinfo.value.code != 0
+
+    def test_no_selection_is_always_accepted(self, manifest):
+        installer.validate_recipe_selection(manifest, "default", None)
+        installer.validate_recipe_selection(manifest, "experimental", None)
+
+    def test_eligible_selection_is_accepted(self, manifest):
+        installer.validate_recipe_selection(
+            manifest, "experimental", ["secure-at-commit", "secrets-precommit-hook"]
+        )
+
+    def test_non_experimental_profile_rejects_selection(self, manifest, capsys):
+        self._validate(manifest, "default", ["secure-at-commit"])
+        assert "--recipes requires --profile experimental" in capsys.readouterr().err
+
+    def test_gate_precedes_eligibility(self, manifest, capsys):
+        # secrets-precommit-hook belongs to no profile, so it satisfies the
+        # eligibility rule everywhere; only the gate can reject it here.
+        self._validate(manifest, "default", ["secrets-precommit-hook"])
+        err = capsys.readouterr().err
+        assert "--recipes requires --profile experimental" in err
+        assert "not selectable" not in err
+
+    def test_profile_member_is_accepted(self, manifest):
+        installer.validate_recipe_selection(manifest, "experimental", ["mcp-config"])
+
+    def test_sai_hooks_not_nameable_under_experimental(self, manifest, capsys):
+        # sai-hooks-async belongs to default and minimal but not experimental,
+        # which makes it the only name the eligibility rule rejects.
+        self._validate(manifest, "experimental", ["sai-hooks-async"])
+        err = capsys.readouterr().err
+        assert "not selectable under profile 'experimental'" in err
+        assert "sai-hooks-async" not in err.split("Selectable under 'experimental': ")[1]
+
+    def test_unknown_name_rejected_with_nameable_listed(self, manifest, capsys):
+        self._validate(manifest, "experimental", ["not-a-real-recipe"])
+        err = capsys.readouterr().err
+        assert "unknown recipe" in err
+        listing = err.split("Selectable under 'experimental': ")[1]
+        assert "secure-at-commit" in listing
+        assert "secrets-precommit-hook" in listing
+
+    def test_superseded_name_rejected(self, manifest, capsys):
+        self._validate(manifest, "experimental", ["sac-hooks"])
+        assert "unknown recipe" in capsys.readouterr().err
+
+    def test_case_mismatch_rejected(self, manifest, capsys):
+        self._validate(manifest, "experimental", ["Secure-At-Commit"])
+        assert "unknown recipe" in capsys.readouterr().err
+
+    def test_disabled_name_rejected(self, manifest, capsys, monkeypatch):
+        monkeypatch.setitem(
+            manifest.recipes, "secrets-precommit-hook", {"type": "hooks", "enabled": False}
+        )
+        self._validate(manifest, "experimental", ["secrets-precommit-hook"])
+        assert "recipe is disabled" in capsys.readouterr().err
+
+    def test_explicitly_named_conflicting_pair_rejected(self, manifest, capsys, monkeypatch):
+        # The shipped manifest's only conflicts_with edge touches
+        # sai-hooks-async, which is not nameable under experimental, so the
+        # edge has to be synthesised between two nameable recipes.
+        conflicting = dict(manifest.recipes["secrets-precommit-hook"])
+        conflicting["conflicts_with"] = ["secure-at-commit"]
+        monkeypatch.setitem(manifest.recipes, "secrets-precommit-hook", conflicting)
+        self._validate(manifest, "experimental", ["secure-at-commit", "secrets-precommit-hook"])
+        err = capsys.readouterr().err
+        assert "secrets-precommit-hook" in err
+        assert "secure-at-commit" in err
+        assert "incompatible" in err
+
+    def test_conflict_detected_in_either_direction(self, manifest, capsys, monkeypatch):
+        conflicting = dict(manifest.recipes["secure-at-commit"])
+        conflicting["conflicts_with"] = ["secrets-precommit-hook"]
+        monkeypatch.setitem(manifest.recipes, "secure-at-commit", conflicting)
+        self._validate(manifest, "experimental", ["secrets-precommit-hook", "secure-at-commit"])
+        assert "incompatible" in capsys.readouterr().err
+
+    def test_profile_list_conflict_still_prunes_with_a_warning(self, manifest, capsys):
+        manifest.profiles["both-hooks"] = {"recipes": ["sai-hooks-async", "secure-at-commit"]}
+        recipes = manifest.resolve_recipes("both-hooks")
+        assert recipes == ["secure-at-commit"]
+        assert "skipping sai-hooks-async" in capsys.readouterr().out
+
+
+# ===========================================================================
+# TestRecipeSelectionInMain
+# ===========================================================================
+
+
+class TestRecipeSelectionInMain:
+    """main()'s install-path guards and the notice for modes that ignore --recipes."""
+
+    @pytest.fixture
+    def manifest(self):
+        return installer.Manifest(INSTALLER_DIR / "manifest.json")
+
+    @staticmethod
+    def _args(**overrides):
+        args = MagicMock(
+            list_mode=False,
+            yes=True,
+            dry_run=False,
+            read_only=False,
+            control_identifier=None,
+            uninstall=False,
+            verify=False,
+            diag_dump=False,
+            ade="claude",
+            profile="experimental",
+            workspace=None,
+            no_latest_deps=False,
+            cli_path=None,
+            recipes=None,
+        )
+        for name, value in overrides.items():
+            setattr(args, name, value)
+        return args
+
+    def _stub_main(self, monkeypatch, manifest, args, workspace=None):
+        monkeypatch.setattr(installer, "parse_args", lambda: args)
+        monkeypatch.setattr(installer, "PayloadContext", lambda: MagicMock())
+        monkeypatch.setattr(installer, "Manifest", lambda *a, **kw: manifest)
+        monkeypatch.setattr(installer, "check_prerequisites", lambda *a, **kw: None)
+        monkeypatch.setattr(installer, "_sync_cli_path_sidecar", lambda *a, **kw: None)
+        monkeypatch.setattr(installer, "get_target_ades", lambda *a, **kw: ["claude"])
+        monkeypatch.setattr(installer, "resolve_workspace", lambda *a, **kw: workspace)
+        monkeypatch.setattr(installer, "print_banner", lambda: None)
+        monkeypatch.setattr(installer, "install_recipe", lambda *a, **kw: None)
+        monkeypatch.setattr(installer, "install_workspace_recipe", lambda *a, **kw: None)
+        monkeypatch.setattr(installer, "verify_recipe", lambda *a, **kw: True)
+        monkeypatch.setattr(installer, "verify_workspace_recipe", lambda *a, **kw: True)
+        # The ADE conflict sweeps read the real home directory and shell out to
+        # the Snyk CLI; neither is under test here.
+        monkeypatch.setattr(manifest, "are_extension_settings_conflicting", lambda ade: [])
+        monkeypatch.setattr(manifest, "are_rules_conflicting", lambda ade: False)
+        monkeypatch.setattr(manifest, "are_skills_conflicting", lambda ade: False)
+        monkeypatch.setattr(manifest, "detect_stale_conflicts", lambda recipes: [])
+
+    def test_workspace_only_selection_without_a_workspace_exits(
+        self, monkeypatch, manifest, capsys
+    ):
+        args = self._args(recipes=["secrets-precommit-hook"])
+        self._stub_main(monkeypatch, manifest, args)
+
+        with pytest.raises(SystemExit) as excinfo:
+            installer.main()
+
+        assert excinfo.value.code != 0
+        assert "every selected recipe is workspace-scoped" in capsys.readouterr().err
+
+    def test_selection_of_both_hooks_without_a_workspace_exits(self, monkeypatch, manifest, capsys):
+        args = self._args(recipes=["secure-at-commit", "secrets-precommit-hook"])
+        self._stub_main(monkeypatch, manifest, args)
+
+        with pytest.raises(SystemExit) as excinfo:
+            installer.main()
+
+        assert excinfo.value.code != 0
+        assert "every selected recipe is workspace-scoped" in capsys.readouterr().err
+
+    def test_empty_resolution_exits_with_its_own_message(self, monkeypatch, manifest, capsys):
+        # Every shipped profile resolves to something, and a disabled name is
+        # rejected by the validator before resolution, so the only way to reach
+        # this guard is a profile that lists nothing.
+        monkeypatch.setitem(manifest.profiles, "_empty", {"recipes": []})
+        self._stub_main(monkeypatch, manifest, self._args(profile="_empty"))
+
+        with pytest.raises(SystemExit) as excinfo:
+            installer.main()
+
+        assert excinfo.value.code != 0
+        err = capsys.readouterr().err
+        assert "produced no recipes" in err
+        assert "workspace-scoped" not in err
+
+    def test_aborted_run_leaves_a_stale_conflict_in_place(self, monkeypatch, manifest, capsys):
+        # Under -y the stale-conflict block uninstalls without prompting, so the
+        # guards above have to fire before it ever runs.
+        self._stub_main(monkeypatch, manifest, self._args(recipes=["secure-at-commit"]))
+        monkeypatch.setattr(
+            manifest,
+            "detect_stale_conflicts",
+            lambda recipes: [("secure-at-commit", "sai-hooks-async", "claude")],
+        )
+        removed: list = []
+        monkeypatch.setattr(
+            installer, "uninstall_ade_recipe", lambda *a, **kw: removed.append(a) or None
+        )
+
+        with pytest.raises(SystemExit):
+            installer.main()
+
+        assert removed == []
+
+    def test_mixed_scope_resolution_without_a_workspace_still_succeeds(
+        self, monkeypatch, manifest, capsys
+    ):
+        # The experimental profile pairs the workspace-scoped secure-at-commit
+        # with globally-scoped recipes, so a bare profile reaches this path.
+        self._stub_main(monkeypatch, manifest, self._args())
+
+        installer.main()
+
+        assert "skipping workspace-scoped recipes: secure-at-commit" in capsys.readouterr().out
+
+    def test_verify_notes_the_unused_selection_without_validating_it(
+        self, monkeypatch, manifest, capsys
+    ):
+        args = self._args(verify=True, profile="default", recipes=["not-a-real-recipe"])
+        self._stub_main(monkeypatch, manifest, args)
+
+        installer.main()
+
+        out = capsys.readouterr().out
+        assert "--verify does not use --recipes" in out
+        assert "All checks passed" in out
+
+    def test_uninstall_notes_the_unused_selection_without_validating_it(
+        self, monkeypatch, manifest, capsys
+    ):
+        args = self._args(uninstall=True, profile="default", recipes=["not-a-real-recipe"])
+        self._stub_main(monkeypatch, manifest, args)
+        swept: list = []
+        monkeypatch.setattr(installer, "uninstall", lambda *a, **kw: swept.append(a) or None)
+
+        installer.main()
+
+        out = capsys.readouterr().out
+        assert "--uninstall does not use --recipes" in out
+        assert "Uninstall complete" in out
+        assert len(swept) == 1
+
+    def test_list_notes_the_unused_selection(self, monkeypatch, manifest, capsys):
+        args = self._args(list_mode=True, profile="default", recipes=["bogus"])
+        self._stub_main(monkeypatch, manifest, args)
+
+        installer.main()
+
+        assert "--list does not use --recipes" in capsys.readouterr().out
+
+    def test_no_notice_without_a_selection(self, monkeypatch, manifest, capsys):
+        args = self._args(list_mode=True, profile="default")
+        self._stub_main(monkeypatch, manifest, args)
+
+        installer.main()
+
+        assert "--recipes" not in capsys.readouterr().out
+
+    @pytest.mark.parametrize("mode", ["diag_dump", "list_mode", "verify", "uninstall"])
+    def test_every_mode_returning_before_resolution_notes_the_selection(self, mode, capsys):
+        args = self._args(recipes=["secure-at-commit"], **{mode: True})
+        installer.notify_unused_recipe_selection(args)
+        assert "does not use --recipes" in capsys.readouterr().out
+
+    def test_install_path_gets_no_notice(self, capsys):
+        installer.notify_unused_recipe_selection(self._args(recipes=["secure-at-commit"]))
+        assert capsys.readouterr().out == ""
 
 
 # ===========================================================================
@@ -2417,7 +2756,7 @@ class TestConflictPromptAutoYes:
             workspace=None,
             no_latest_deps=False,
             cli_path=None,
-            secrets_precommit_hook=False,
+            recipes=None,
         )
 
     def _stub_main(self, monkeypatch, manifest, ade="cursor"):
@@ -2442,7 +2781,9 @@ class TestConflictPromptAutoYes:
     @staticmethod
     def _base_manifest():
         m = MagicMock()
-        m.resolve_recipes.return_value = []
+        # Non-empty and ADE-scoped: main() aborts on an empty resolution and on a
+        # workspace-only one with no workspace, neither of which these tests exercise.
+        m.resolve_recipes.return_value = ["mcp-config"]
         m.detect_stale_conflicts.return_value = []
         m.are_extension_settings_conflicting.return_value = []
         m.are_rules_conflicting.return_value = False
@@ -2518,13 +2859,15 @@ class TestConflictResolutionPolicy:
             workspace=None,
             no_latest_deps=False,
             cli_path=None,
-            secrets_precommit_hook=False,
+            recipes=None,
         )
 
     @staticmethod
     def _base_manifest():
         m = MagicMock()
-        m.resolve_recipes.return_value = []
+        # Non-empty and ADE-scoped: main() aborts on an empty resolution and on a
+        # workspace-only one with no workspace, neither of which these tests exercise.
+        m.resolve_recipes.return_value = ["mcp-config"]
         m.detect_stale_conflicts.return_value = []
         m.are_extension_settings_conflicting.return_value = []
         m.are_rules_conflicting.return_value = False

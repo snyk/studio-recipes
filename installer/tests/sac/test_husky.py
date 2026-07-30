@@ -146,7 +146,7 @@ class TestHusky:
     @requires_git
     @pytest.mark.skipif(os.name == "nt", reason="Husky pre-commit scripts are POSIX shell scripts")
     def test_first_blocking_recipe_is_not_masked_by_a_second_passing_one(self, workspace):
-        """sac-hooks and secrets-hooks are both workspace-scoped and can both
+        """secure-at-commit and secrets-precommit-hook are both workspace-scoped and can both
         append their own command block to the same .husky/pre-commit. Without
         `|| exit $?`, a failing first block's exit status gets silently
         overwritten by whatever the second (unrelated, later-appended) block

@@ -1,4 +1,4 @@
-"""Shared fixtures/helpers for the secure-at-commit (sac-hooks) test package.
+"""Shared fixtures/helpers for the secure-at-commit test package.
 
 Split out of a single 3300+ line ``test_secure_at_commit.py`` into one file
 per concern - see the sibling ``test_*.py`` modules for what each covers.

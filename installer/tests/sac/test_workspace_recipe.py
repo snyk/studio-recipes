@@ -1,4 +1,4 @@
-"""End-to-end installer wiring for the sac-hooks workspace recipe: install
+"""End-to-end installer wiring for the secure-at-commit workspace recipe: install
 copies the script and wires whichever hook mechanism is detected, verify
 reflects that state, uninstall cleans up files and the hook -- plus the
 workspace/path-resolution helpers this wiring depends on."""
@@ -36,7 +36,9 @@ class TestInstallWorkspaceRecipe:
     def test_install_copies_script_into_workspace_and_wires_hook(
         self, workspace, manifest, payload, capsys
     ):
-        installer.install_workspace_recipe("sac-hooks", manifest, payload, workspace, dry_run=False)
+        installer.install_workspace_recipe(
+            "secure-at-commit", manifest, payload, workspace, dry_run=False
+        )
         # Script lives at <workspace>/.snyk-studio/components/scripts/...
         script = workspace / SAC_DEST
         assert script.is_file()
@@ -69,8 +71,12 @@ class TestInstallWorkspaceRecipe:
             target = husky_dir / "pre-commit"
             target.write_text("#!/usr/bin/env sh\necho husky\n", encoding="utf-8")
 
-        installer.install_workspace_recipe("sac-hooks", manifest, payload, workspace, dry_run=False)
-        installer.install_workspace_recipe("sac-hooks", manifest, payload, workspace, dry_run=False)
+        installer.install_workspace_recipe(
+            "secure-at-commit", manifest, payload, workspace, dry_run=False
+        )
+        installer.install_workspace_recipe(
+            "secure-at-commit", manifest, payload, workspace, dry_run=False
+        )
         hook = target.read_text(encoding="utf-8")
         assert hook.count("# >>> snyk-secure-at-commit >>>") == 1
         if manager == "husky":
@@ -83,13 +89,17 @@ class TestInstallWorkspaceRecipe:
     def test_reinstall_after_precommit_appears_moves_from_git_native_to_precommit(
         self, workspace, manifest, payload
     ):
-        installer.install_workspace_recipe("sac-hooks", manifest, payload, workspace, dry_run=False)
+        installer.install_workspace_recipe(
+            "secure-at-commit", manifest, payload, workspace, dry_run=False
+        )
         native_hook = workspace / ".git" / "hooks" / "pre-commit"
         assert SPEC.begin_marker in native_hook.read_text(encoding="utf-8")
 
         precommit_config = workspace / ".pre-commit-config.yaml"
         precommit_config.write_text("repos: []\n", encoding="utf-8")
-        installer.install_workspace_recipe("sac-hooks", manifest, payload, workspace, dry_run=False)
+        installer.install_workspace_recipe(
+            "secure-at-commit", manifest, payload, workspace, dry_run=False
+        )
 
         precommit_text = precommit_config.read_text(encoding="utf-8")
         assert SPEC.begin_marker in precommit_text
@@ -98,8 +108,10 @@ class TestInstallWorkspaceRecipe:
             assert SPEC.begin_marker not in native_hook.read_text(encoding="utf-8")
 
     def test_verify_after_install_passes(self, workspace, manifest, payload):
-        installer.install_workspace_recipe("sac-hooks", manifest, payload, workspace, dry_run=False)
-        ok = installer.verify_workspace_recipe("sac-hooks", manifest, payload, workspace)
+        installer.install_workspace_recipe(
+            "secure-at-commit", manifest, payload, workspace, dry_run=False
+        )
+        ok = installer.verify_workspace_recipe("secure-at-commit", manifest, payload, workspace)
         assert ok is True
 
     def test_verify_reports_ok_via_fallback_native_hook_when_precommit_yaml_is_unintegrated(
@@ -109,13 +121,15 @@ class TestInstallWorkspaceRecipe:
         protection even when a newer .pre-commit-config.yaml exists but was
         never actually wired up with our hook - verify must not report
         missing when the repo is still genuinely protected another way."""
-        installer.install_workspace_recipe("sac-hooks", manifest, payload, workspace, dry_run=False)
+        installer.install_workspace_recipe(
+            "secure-at-commit", manifest, payload, workspace, dry_run=False
+        )
         native_hook = workspace / ".git" / "hooks" / "pre-commit"
         assert SPEC.begin_marker in native_hook.read_text(encoding="utf-8")
 
         (workspace / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
 
-        ok = installer.verify_workspace_recipe("sac-hooks", manifest, payload, workspace)
+        ok = installer.verify_workspace_recipe("secure-at-commit", manifest, payload, workspace)
         assert ok is True
 
     def test_install_workspace_recipe_passes_manifest_display_name(
@@ -130,7 +144,9 @@ class TestInstallWorkspaceRecipe:
 
         monkeypatch.setattr(git_hooks, "install_hook", fake_install_hook)
 
-        installer.install_workspace_recipe("sac-hooks", manifest, payload, workspace, dry_run=False)
+        installer.install_workspace_recipe(
+            "secure-at-commit", manifest, payload, workspace, dry_run=False
+        )
 
         assert captured["workspace"] == workspace
         assert captured["spec"].name == "Snyk Secure At Commit"
@@ -156,7 +172,9 @@ class TestInstallWorkspaceRecipe:
 
         monkeypatch.setattr(git_hooks, "install_hook", fake_install_hook)
 
-        installer.install_workspace_recipe("sac-hooks", manifest, payload, workspace, dry_run=False)
+        installer.install_workspace_recipe(
+            "secure-at-commit", manifest, payload, workspace, dry_run=False
+        )
 
         out = capsys.readouterr().out
         assert "pre-commit integration skipped" in out
@@ -169,7 +187,9 @@ class TestInstallWorkspaceRecipe:
         original = "repos: [\n"
         path.write_text(original, encoding="utf-8")
 
-        installer.install_workspace_recipe("sac-hooks", manifest, payload, workspace, dry_run=False)
+        installer.install_workspace_recipe(
+            "secure-at-commit", manifest, payload, workspace, dry_run=False
+        )
 
         out = capsys.readouterr().out
         assert "pre-commit integration skipped" in out
@@ -179,7 +199,9 @@ class TestInstallWorkspaceRecipe:
     def test_reinstall_with_malformed_new_precommit_config_keeps_existing_native_hook(
         self, workspace, manifest, payload, capsys
     ):
-        installer.install_workspace_recipe("sac-hooks", manifest, payload, workspace, dry_run=False)
+        installer.install_workspace_recipe(
+            "secure-at-commit", manifest, payload, workspace, dry_run=False
+        )
         native_hook = workspace / ".git" / "hooks" / "pre-commit"
         assert SPEC.begin_marker in native_hook.read_text(encoding="utf-8")
 
@@ -187,7 +209,9 @@ class TestInstallWorkspaceRecipe:
         original = "repos: [\n"
         path.write_text(original, encoding="utf-8")
 
-        installer.install_workspace_recipe("sac-hooks", manifest, payload, workspace, dry_run=False)
+        installer.install_workspace_recipe(
+            "secure-at-commit", manifest, payload, workspace, dry_run=False
+        )
 
         out = capsys.readouterr().out
         assert "pre-commit integration skipped" in out
@@ -201,7 +225,9 @@ class TestInstallWorkspaceRecipe:
         original = b"\xff\xfe\x00"
         path.write_bytes(original)
 
-        installer.install_workspace_recipe("sac-hooks", manifest, payload, workspace, dry_run=False)
+        installer.install_workspace_recipe(
+            "secure-at-commit", manifest, payload, workspace, dry_run=False
+        )
 
         out = capsys.readouterr().out
         assert "pre-commit integration skipped" in out
@@ -216,7 +242,9 @@ class TestInstallWorkspaceRecipe:
 
         monkeypatch.setattr(git_hooks, "install_hook", fake_install_hook)
 
-        installer.install_workspace_recipe("sac-hooks", manifest, payload, workspace, dry_run=False)
+        installer.install_workspace_recipe(
+            "secure-at-commit", manifest, payload, workspace, dry_run=False
+        )
 
         out = capsys.readouterr().out
         assert "pre-commit integration skipped" in out
@@ -233,11 +261,11 @@ class TestInstallWorkspaceRecipe:
 
         with pytest.raises(type(error), match=str(error)):
             installer.install_workspace_recipe(
-                "sac-hooks", manifest, payload, workspace, dry_run=False
+                "secure-at-commit", manifest, payload, workspace, dry_run=False
             )
 
     def test_verify_without_install_fails(self, workspace, manifest, payload):
-        ok = installer.verify_workspace_recipe("sac-hooks", manifest, payload, workspace)
+        ok = installer.verify_workspace_recipe("secure-at-commit", manifest, payload, workspace)
         assert ok is False
 
     def test_verify_workspace_recipe_passes_manifest_display_name(
@@ -252,7 +280,7 @@ class TestInstallWorkspaceRecipe:
 
         monkeypatch.setattr(git_hooks, "verify_hook", fake_verify_hook)
 
-        ok = installer.verify_workspace_recipe("sac-hooks", manifest, payload, workspace)
+        ok = installer.verify_workspace_recipe("secure-at-commit", manifest, payload, workspace)
 
         assert ok is False
         assert captured["workspace"] == workspace
@@ -263,9 +291,11 @@ class TestInstallWorkspaceRecipe:
     ):
         """Both the script and the pre-commit shim live inside the workspace
         — verify output should render them relative, not as absolute paths."""
-        installer.install_workspace_recipe("sac-hooks", manifest, payload, workspace, dry_run=False)
+        installer.install_workspace_recipe(
+            "secure-at-commit", manifest, payload, workspace, dry_run=False
+        )
         capsys.readouterr()
-        installer.verify_workspace_recipe("sac-hooks", manifest, payload, workspace)
+        installer.verify_workspace_recipe("secure-at-commit", manifest, payload, workspace)
         out = capsys.readouterr().out
 
         # _display_path renders with the native separator -- normalize
@@ -276,11 +306,13 @@ class TestInstallWorkspaceRecipe:
         assert workspace.resolve().as_posix() not in out_posix
 
     def test_uninstall_removes_script_and_workspace_integration(self, workspace, manifest, payload):
-        installer.install_workspace_recipe("sac-hooks", manifest, payload, workspace, dry_run=False)
+        installer.install_workspace_recipe(
+            "secure-at-commit", manifest, payload, workspace, dry_run=False
+        )
         assert (workspace / SAC_DEST).is_file()
 
         installer.uninstall_workspace_recipe(
-            "sac-hooks", manifest, payload, workspace, dry_run=False
+            "secure-at-commit", manifest, payload, workspace, dry_run=False
         )
 
         # The shim is gone…
@@ -308,7 +340,7 @@ class TestInstallWorkspaceRecipe:
         legacy.write_text("# legacy script\n")
 
         installer.uninstall_workspace_recipe(
-            "sac-hooks", manifest, payload, workspace, dry_run=False
+            "secure-at-commit", manifest, payload, workspace, dry_run=False
         )
 
         assert not (workspace / ".git" / "hooks" / "pre-commit").exists()
@@ -356,7 +388,9 @@ class TestInstallWorkspaceRecipe:
         legacy.write_text("# legacy script\n")
 
         # Re-run install (an upgrade).
-        installer.install_workspace_recipe("sac-hooks", manifest, payload, workspace, dry_run=False)
+        installer.install_workspace_recipe(
+            "secure-at-commit", manifest, payload, workspace, dry_run=False
+        )
 
         hook = (workspace / ".git" / "hooks" / "pre-commit").read_text()
         # The shim now points at the new location, with no duplicate block…
@@ -375,7 +409,9 @@ class TestInstallWorkspaceRecipe:
         # layout did) and must leave the policy file untouched.
         policy = workspace / ".snyk"
         policy.write_text("version: v1.0.0\nignore: {}\n")
-        installer.install_workspace_recipe("sac-hooks", manifest, payload, workspace, dry_run=False)
+        installer.install_workspace_recipe(
+            "secure-at-commit", manifest, payload, workspace, dry_run=False
+        )
         assert (workspace / SAC_DEST).is_file()
         # The policy file is still a file with its original contents.
         assert policy.is_file()
@@ -390,7 +426,7 @@ class TestInstallWorkspaceRecipe:
         legacy.write_text("# legacy script\n")
 
         installer.uninstall_workspace_recipe(
-            "sac-hooks", manifest, payload, workspace, dry_run=False
+            "secure-at-commit", manifest, payload, workspace, dry_run=False
         )
 
         assert not legacy.exists()
@@ -410,7 +446,7 @@ class TestInstallWorkspaceRecipe:
         (pycache / "snyk_secure_at_commit.cpython-312.pyc").write_bytes(b"\x00")
 
         installer.uninstall_workspace_recipe(
-            "sac-hooks", manifest, payload, workspace, dry_run=False
+            "secure-at-commit", manifest, payload, workspace, dry_run=False
         )
 
         assert not pycache.exists()
@@ -431,7 +467,7 @@ class TestInstallWorkspaceRecipe:
         user_file.write_text("user data\n")
 
         installer.uninstall_workspace_recipe(
-            "sac-hooks", manifest, payload, workspace, dry_run=False
+            "secure-at-commit", manifest, payload, workspace, dry_run=False
         )
 
         assert not legacy.exists()
@@ -440,7 +476,9 @@ class TestInstallWorkspaceRecipe:
         assert user_file.is_file()
 
     def test_dry_run_makes_no_filesystem_changes(self, workspace, manifest, payload):
-        installer.install_workspace_recipe("sac-hooks", manifest, payload, workspace, dry_run=True)
+        installer.install_workspace_recipe(
+            "secure-at-commit", manifest, payload, workspace, dry_run=True
+        )
         assert not (workspace / SAC_DEST).exists()
         assert not (workspace / ".git" / "hooks" / "pre-commit").exists()
 
@@ -455,7 +493,9 @@ class TestInstallWorkspaceRecipe:
         elsewhere.mkdir()
         monkeypatch.chdir(elsewhere)
 
-        installer.install_workspace_recipe("sac-hooks", manifest, payload, target, dry_run=False)
+        installer.install_workspace_recipe(
+            "secure-at-commit", manifest, payload, target, dry_run=False
+        )
         # Files land under the explicit workspace, not under cwd.
         assert (target / SAC_DEST).is_file()
         assert not (elsewhere / ".snyk").exists()

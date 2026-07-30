@@ -41,7 +41,7 @@ python3 build_installer.py --only sh --only ps1
 Everything the installer ships is declared in [`manifest.json`](manifest.json). The two sections you'll edit most:
 
 - **`recipes`** — each entry maps recipe sources to per-assistant destinations. Add new entries to bundle internal recipes, or set `"enabled": false` to drop ones you don't need.
-- **`profiles`** — named bundles (`default`, `minimal`, `experimental`) that select which recipes get installed. Add your own profile, or change the membership of an existing one.
+- **`profiles`** — named bundles (`default`, `minimal`, `experimental`) that select which recipes get installed. Add your own profile, or change the membership of an existing one. A recipe listed in no profile at all becomes an opt-in extra that users can request by name with `--recipes`, so mark a recipe that isn't ready with `"enabled": false` rather than just leaving it out of the profiles.
 
 Rebuild with `python3 build_installer.py` after editing.
 

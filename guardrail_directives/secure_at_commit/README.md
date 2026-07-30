@@ -26,7 +26,7 @@ To target a repository other than your current directory, pass `--workspace`:
 bash ./snyk-studio-install.sh --profile experimental --workspace /path/to/repo
 ```
 
-> SAC and SAI are mutually exclusive. The `experimental` profile installs SAC in place of the default Secure at Inception guardrails, and the installer warns you if leftover SAI hooks are still present.
+> SAC and SAI are mutually exclusive. The `experimental` profile installs SAC in place of the default Secure at Inception guardrails, and the installer warns you if leftover SAI hooks are still present. To install the hook without the profile's fix commands, skills, and MCP configuration, add `--recipes secure-at-commit`.
 
 ## How it works
 

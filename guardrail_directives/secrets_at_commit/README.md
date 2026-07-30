@@ -2,14 +2,20 @@
 
 A Git pre-commit check that scans the changes you're about to commit for hardcoded secrets and blocks when a finding is classified as part of this commit.
 
-Secrets At Commit is secrets-only. It can be installed alongside Secure At Inception or Secure At Commit because it does not run SAST or SCA scans. It is opt-in and installs into a target Git repository.
+Secrets At Commit is secrets-only. It can be installed alongside Secure At Commit because it does not run SAST or SCA scans. It is opt-in and installs into a target Git repository.
 
 ## Install
 
-Run the Snyk Studio installer from the repository you want to protect, or pass `--workspace`:
+It belongs to no profile, so name it with `--recipes` under the **experimental** profile. Run the Snyk Studio installer from the repository you want to protect, or pass `--workspace`:
 
 ```bash
-bash ./snyk-studio-install.sh --workspace /path/to/repo --secrets-precommit-hook
+bash ./snyk-studio-install.sh --profile experimental --recipes secrets-precommit-hook --workspace /path/to/repo
+```
+
+To install it alongside Secure At Commit, name both:
+
+```bash
+bash ./snyk-studio-install.sh --profile experimental --recipes secure-at-commit,secrets-precommit-hook --workspace /path/to/repo
 ```
 
 Authenticate the Snyk CLI before using the hook:

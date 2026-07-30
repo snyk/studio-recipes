@@ -42,7 +42,7 @@ Blocks dependency installation until security scans pass.
 
 Guardrails come in a few forms. Most teams layer rules with one deterministic hook model.
 
-| Consideration | Rules | SAI Hooks | SAC Hooks *(experimental)* |
+| Consideration | Rules | SAI Hooks | SAC Hooks *(experimental profile)* |
 |---|---|---|---|
 | **Enforcement** | Non-deterministic — the AI may skip them | Deterministic — always run as code is written | Deterministic — always run at `git commit` |
 | **Setup** | Drop-in instructions the AI reads as guidance | Scripts wired to assistant lifecycle events | One pre-commit hook per repository |
@@ -50,6 +50,8 @@ Guardrails come in a few forms. Most teams layer rules with one deterministic ho
 | **Best for** | Real-time inline feedback during generation | Catching issues as the assistant writes | A final gate on everything staged, from any source |
 
 [SAI](./secure_at_inception/) and [SAC](./secure_at_commit/) hooks are mutually exclusive — pick the moment you want the deterministic gate to fire (as code is written, or at commit).
+
+The `experimental` profile installs SAC alongside the fix commands, skills, and MCP configuration. To install a commit-time hook on its own, name it with `--recipes` under that profile.
 
 **Recommendation:** Use SAI hooks where available for deterministic enforcement during generation, and add rules on top so developers see issues inline. Prefer SAC hooks when you want a single commit-time gate that also covers manual edits.
 

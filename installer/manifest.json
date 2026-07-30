@@ -261,7 +261,7 @@
         }
       }
     },
-    "sac-hooks": {
+    "secure-at-commit": {
       "type": "hooks",
       "scope": "workspace",
       "description": "Secure At Commit pre-commit hook (CLI version)",
@@ -283,7 +283,7 @@
         }
       }
     },
-    "secrets-hooks": {
+    "secrets-precommit-hook": {
       "type": "hooks",
       "scope": "workspace",
       "description": "Secrets At Commit pre-commit hook (secrets-only)",
@@ -434,7 +434,7 @@
     },
     "experimental": {
       "recipes": [
-        "sac-hooks",
+        "secure-at-commit",
         "snyk-fix-command",
         "snyk-batch-fix-command",
         "snyk-fix-skill",

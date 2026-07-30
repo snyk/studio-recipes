@@ -27,7 +27,9 @@ Options:
     --cli-path <path>                          Use the standalone Snyk CLI at <path>. Skips all
                                                Node.js/npm/nvm checks. If omitted, falls back to
                                                npx (the default).
-    --secrets-precommit-hook                   Install the Secrets At Commit pre-commit hook
+    --recipes <a,b,c>                          Install exactly these recipes instead of the
+                                               profile's own list (requires
+                                               --profile experimental)
     --control-identifier <id>                  Machine/control identifier to record
     --diag-dump                                Create a diagnostic zip for Snyk support and print its path.
     --out-file <path>                          Output path for the diagnostic zip (default: timestamped zip in cwd).
@@ -49,7 +51,7 @@ import sys
 import tempfile
 from pathlib import Path
 from subprocess import run
-from typing import Any, Dict, Iterator, List, Optional, Tuple, cast
+from typing import Any, Dict, Iterator, List, Optional, Set, Tuple, cast
 
 # When set (by generated install.sh / install.ps1 / install.py), manifest and recipe sources
 # live under this directory (flat layout from the release zip).
@@ -57,7 +59,9 @@ BUNDLE_ENV = "SNYK_STUDIO_BUNDLE_ROOT"
 
 GLOBAL = "global"
 WORKSPACE = "workspace"
-SECRETS_HOOK_RECIPE_ID = "secrets-hooks"
+SECRETS_HOOK_RECIPE_ID = "secrets-precommit-hook"
+# The only profile under which --recipes may name an explicit selection.
+RECIPE_SELECTION_PROFILE = "experimental"
 
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -241,9 +245,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--secrets-precommit-hook",
-        action="store_true",
-        help="Install the Secrets At Commit pre-commit hook.",
+        "--recipes",
+        action="append",
+        default=None,
+        metavar="A,B,C",
+        help=(
+            "Comma-separated recipe identifiers to install in place of the "
+            f"profile's own recipe list. Requires --profile {RECIPE_SELECTION_PROFILE}; "
+            "run --list to see the available identifiers."
+        ),
     )
     parser.add_argument(
         "--control-identifier",
@@ -271,7 +281,58 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         metavar="N",
         help="Include logs from workspaces active in the last N days (default: 1, minimum: 1).",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    args.recipes = _parse_recipe_selection(parser, args.recipes)
+    return args
+
+
+def _parse_recipe_selection(
+    parser: argparse.ArgumentParser, values: Optional[List[str]]
+) -> Optional[List[str]]:
+    """Normalise ``--recipes`` values into an ordered list of unique names.
+
+    ``--recipes`` is registered with ``action="append"`` only so a repeated flag
+    can be rejected instead of silently keeping the last value. Identifiers are
+    matched exactly downstream, so nothing but surrounding whitespace is
+    stripped here, and install order comes from the manifest rather than this
+    list.
+    """
+    if values is None:
+        return None
+    if len(values) > 1:
+        parser.error("--recipes may be given only once; pass one comma-separated list")
+
+    selection: List[str] = []
+    for element in values[0].split(","):
+        name = element.strip()
+        if not name:
+            parser.error("--recipes takes a comma-separated list of recipe identifiers")
+        if name not in selection:
+            selection.append(name)
+    return selection
+
+
+def notify_unused_recipe_selection(args: argparse.Namespace) -> None:
+    """Note that a mode returning before recipe resolution ignores ``--recipes``.
+
+    These modes never validate the selection, so without the notice a typed
+    flag would be swallowed in silence.
+    """
+    if not args.recipes:
+        return
+    modes = [
+        flag
+        for flag, requested in (
+            ("--diag-dump", args.diag_dump),
+            ("--list", args.list_mode),
+            ("--verify", args.verify),
+            ("--uninstall", args.uninstall),
+        )
+        if requested
+    ]
+    if not modes:
+        return
+    print(f"  {C.yellow('NOTE')} {modes[0]} does not use --recipes; ignoring the selection")
 
 
 # =============================================================================
@@ -359,21 +420,46 @@ class Manifest:
         self.profiles: Dict[str, Any] = self.data.get("profiles", {})
         self.conflicting_resources: Dict[str, Any] = self.data.get("conflicting-resources", {})
 
-    def resolve_recipes(self, profile: str, secrets_precommit_hook: bool = False) -> List[str]:
+    def profile_recipes(self, profile: str) -> List[str]:
+        """Return the recipe ids a profile's list names, expanding ``"*"``."""
+        listed = self.profiles.get(profile, {}).get("recipes", [])
+        if "*" in listed:
+            return list(self.recipes.keys())
+        return list(listed)
+
+    def unprofiled_recipes(self) -> List[str]:
+        """Return the recipes that appear in no profile's recipe list.
+
+        These are the opt-in extras: never installed by a bare profile, always
+        nameable by ``--recipes``. A profile listing ``"*"`` covers every
+        recipe, so it empties this set rather than making ``"*"`` a name.
+        """
+        profiled: Set[str] = set()
+        for profile in self.profiles:
+            profiled.update(self.profile_recipes(profile))
+        return [r for r in self.recipes if r not in profiled]
+
+    def nameable_recipes(self, profile: str) -> List[str]:
+        """Return the identifiers ``--recipes`` accepts under *profile*.
+
+        Disabled recipes are excluded, so a name rejected for being disabled is
+        never listed back to the user as a suggestion.
+        """
+        candidates = set(self.profile_recipes(profile)) | set(self.unprofiled_recipes())
+        return [r for r in self.recipes if r in candidates and self.recipes[r].get("enabled", True)]
+
+    def resolve_recipes(self, profile: str, selection: Optional[List[str]] = None) -> List[str]:
         if profile not in self.profiles:
             print(f"Unknown profile: {profile}", file=sys.stderr)
             print(f"Available: {list(self.profiles.keys())}", file=sys.stderr)
             sys.exit(1)
 
-        profile_recipes = self.profiles[profile]["recipes"]
         all_ids = list(self.recipes.keys())
 
-        active = set(all_ids) if "*" in profile_recipes else set(profile_recipes)
-        active = {r for r in active if self.recipes[r].get("enabled", True)}
-
-        if secrets_precommit_hook:
-            if self.recipes.get(SECRETS_HOOK_RECIPE_ID, {}).get("enabled", True):
-                active.add(SECRETS_HOOK_RECIPE_ID)
+        # An explicit selection replaces the profile's list outright; the
+        # profile then serves only as the eligibility gate applied upstream.
+        chosen = self.profile_recipes(profile) if selection is None else selection
+        active = {r for r in chosen if r in self.recipes and self.recipes[r].get("enabled", True)}
 
         # Honour each enabled recipe's `conflicts_with` list. Iterating in
         # manifest declaration order (rather than set iteration order, which
@@ -677,6 +763,53 @@ class Manifest:
                 print(f"  {C.red('ERROR')} Failed to update settings file {raw_path}: {e}")
 
         return updated_paths
+
+
+def validate_recipe_selection(
+    manifest: Manifest, profile: str, selection: Optional[List[str]]
+) -> None:
+    """Reject an explicit ``--recipes`` selection the manifest cannot satisfy.
+
+    The profile gate is checked before name eligibility: opt-in recipes belong
+    to no profile, so the eligibility rule alone would make them nameable under
+    every profile.
+    """
+    if not selection:
+        return
+
+    if profile != RECIPE_SELECTION_PROFILE:
+        print(
+            f"  Error: --recipes requires --profile {RECIPE_SELECTION_PROFILE} (got '{profile}').",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    nameable = manifest.nameable_recipes(profile)
+    for name in selection:
+        if name in nameable:
+            continue
+        if name not in manifest.recipes:
+            reason = "unknown recipe"
+        elif not manifest.recipes[name].get("enabled", True):
+            reason = "recipe is disabled"
+        else:
+            reason = f"not selectable under profile '{profile}'"
+        print(f"  Error: --recipes '{name}': {reason}.", file=sys.stderr)
+        print(f"  Selectable under '{profile}': {', '.join(nameable)}", file=sys.stderr)
+        sys.exit(1)
+
+    # An over-broad profile list gets its conflict silently pruned with a NOTE,
+    # but explicit intent deserves an error.
+    selected = set(selection)
+    for name in selection:
+        for conflict in manifest.recipes[name].get("conflicts_with", []):
+            if conflict not in selected:
+                continue
+            print(
+                f"  Error: --recipes names both '{name}' and '{conflict}', which are incompatible.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
 
 # =============================================================================
@@ -2178,10 +2311,9 @@ def resolve_verify_recipes(
     manifest: Manifest,
     payload: PayloadContext,
     profile: str,
-    secrets_precommit_hook: bool,
     workspace: Optional[Path],
 ) -> List[str]:
-    recipes = manifest.resolve_recipes(profile, secrets_precommit_hook)
+    recipes = manifest.resolve_recipes(profile)
     if (
         workspace is not None
         and SECRETS_HOOK_RECIPE_ID not in recipes
@@ -2756,6 +2888,8 @@ def main() -> None:
         # scan time when the IDE-spawned hook runs in a different cwd.
         args.cli_path = os.path.abspath(os.path.expanduser(args.cli_path))
 
+    notify_unused_recipe_selection(args)
+
     if args.diag_dump:
         lib_dir = str(Path(__file__).resolve().parent / "lib")
         if lib_dir not in sys.path:
@@ -2834,9 +2968,7 @@ def main() -> None:
         print()
         ades = get_target_ades(args.ade, args.yes)
         workspace = resolve_workspace(args.workspace)
-        recipes = resolve_verify_recipes(
-            manifest, payload, args.profile, args.secrets_precommit_hook, workspace
-        )
+        recipes = resolve_verify_recipes(manifest, payload, args.profile, workspace)
         all_ok = True
         for ade in ades:
             for recipe_id in recipes:
@@ -2921,7 +3053,27 @@ def main() -> None:
         )
 
     # Normal installation
-    recipes = manifest.resolve_recipes(args.profile, args.secrets_precommit_hook)
+    validate_recipe_selection(manifest, args.profile, args.recipes)
+    recipes = manifest.resolve_recipes(args.profile, args.recipes)
+
+    # Both exits must precede the stale-conflict cleanup below, which under -y
+    # uninstalls without prompting -- failing after it would leave the machine
+    # with fewer recipes than it started with. Emptiness is checked first
+    # because `all()` over an empty list is True.
+    if not recipes:
+        print(
+            "  Error: recipe resolution produced no recipes to install.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if workspace is None and all(manifest.is_workspace_scoped(r) for r in recipes):
+        print(
+            "  Error: every selected recipe is workspace-scoped and no workspace was "
+            "resolved; pass --workspace or run inside a git repository.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     show_plan(ades, recipes, args.profile, manifest, workspace)
 
     # Detect stale on-disk installs of recipes that are mutually exclusive

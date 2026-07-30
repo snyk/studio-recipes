@@ -365,7 +365,9 @@ def _install_secrets_hook(repo: Path) -> None:
     manifest = installer.Manifest(INSTALLER_DIR / "manifest.json")
     payload = installer.PayloadContext()
     payload.setup()
-    installer.install_workspace_recipe("secrets-hooks", manifest, payload, repo, dry_run=False)
+    installer.install_workspace_recipe(
+        "secrets-precommit-hook", manifest, payload, repo, dry_run=False
+    )
     assert (repo / SECRETS_DEST).is_file()
 
 

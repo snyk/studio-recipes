@@ -74,6 +74,10 @@ def resolve_log_file(repo_root: str) -> str:
         os.path.expanduser("~"),
         ".snyk-studio",
         "git-hooks",
+        # Deliberately not the recipe id: this directory name predates the
+        # rename to secrets-precommit-hook, and changing it would orphan logs
+        # already on disk that the diagnostic bundle collects by walking the
+        # log root. Nothing derives this literal from the manifest.
         "secrets-hooks",
         "ws",
         name,

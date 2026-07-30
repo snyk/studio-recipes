@@ -128,8 +128,13 @@ def _collect_sai_logs(zf: zipfile.ZipFile, log_root: Path, cutoff: datetime) -> 
 
 
 def _collect_git_hook_logs(zf: zipfile.ZipFile, log_root: Path, cutoff: datetime) -> None:
-    """Persistent logs for the git-native pre-commit hooks (currently
-    just secrets-hooks)."""
+    """Persistent logs for the git-native pre-commit hooks.
+
+    Collected by walking whatever directories exist under the log root, so the
+    names here are on-disk directory names rather than recipe ids: the only one
+    today is ``secrets-hooks``, which deliberately keeps a spelling the recipe
+    id no longer uses (see ``persistent_log.resolve_log_file``).
+    """
     _collect_ws_scoped_logs(zf, log_root, cutoff, "logs/git-hooks")
 
 

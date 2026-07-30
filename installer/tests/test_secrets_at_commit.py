@@ -115,42 +115,40 @@ def _stage(repo: Path, name: str, content: str) -> None:
 
 class TestManifest:
     def test_workspace_scoped(self, manifest):
-        assert manifest.is_workspace_scoped("secrets-hooks") is True
+        assert manifest.is_workspace_scoped("secrets-precommit-hook") is True
 
     def test_excluded_from_default_and_experimental_profiles_by_default(self, manifest):
-        assert "secrets-hooks" not in manifest.resolve_recipes("default")
-        assert "secrets-hooks" not in manifest.resolve_recipes("experimental")
+        assert "secrets-precommit-hook" not in manifest.resolve_recipes("default")
+        assert "secrets-precommit-hook" not in manifest.resolve_recipes("experimental")
 
-    def test_flag_adds_to_default_and_experimental_profiles(self, manifest):
-        assert "secrets-hooks" in manifest.resolve_recipes("default", secrets_precommit_hook=True)
-        assert "secrets-hooks" in manifest.resolve_recipes(
-            "experimental", secrets_precommit_hook=True
+    def test_selection_replaces_the_profile_with_the_secrets_hook(self, manifest):
+        assert manifest.resolve_recipes("experimental", ["secrets-precommit-hook"]) == [
+            "secrets-precommit-hook"
+        ]
+
+    def test_profile_can_include_secrets_hook_without_a_selection(self, manifest):
+        manifest.profiles["with-secrets"] = {"recipes": ["mcp-config", "secrets-precommit-hook"]}
+        assert "secrets-precommit-hook" in manifest.resolve_recipes("with-secrets")
+
+    def test_coexists_with_secure_at_commit(self, manifest):
+        # Secrets At Commit scans secrets only, so it can be selected alongside
+        # the other commit-time hook.
+        recipes = manifest.resolve_recipes(
+            "experimental", ["secure-at-commit", "secrets-precommit-hook"]
         )
-
-    def test_profile_can_include_secrets_hook_without_flag(self, manifest):
-        manifest.profiles["with-secrets"] = {"recipes": ["mcp-config", "secrets-hooks"]}
-        assert "secrets-hooks" in manifest.resolve_recipes("with-secrets")
-
-    def test_coexists_with_profile_commit_hooks(self, manifest):
-        # Secrets At Commit scans secrets only, so it can be added alongside
-        # the commit-time hooks selected by each profile.
-        recipes = manifest.resolve_recipes("default", secrets_precommit_hook=True)
-        assert "sai-hooks-async" in recipes
-        assert "secrets-hooks" in recipes
-        recipes = manifest.resolve_recipes("experimental", secrets_precommit_hook=True)
-        assert "sac-hooks" in recipes
-        assert "secrets-hooks" in recipes
+        assert "secure-at-commit" in recipes
+        assert "secrets-precommit-hook" in recipes
 
     def test_pre_commit_integration_command_has_no_flags(self, manifest):
         # There's only one mode (audit mode was removed), so the installed
         # command line is just the bare script invocation -- no --staged.
-        ws = manifest.recipes["secrets-hooks"]["sources"]["workspace"]
+        ws = manifest.recipes["secrets-precommit-hook"]["sources"]["workspace"]
         cmd = ws["pre_commit_integration"]["command"]
         assert cmd.split()[-1].endswith("snyk_secrets_at_commit.py")
         assert ws["pre_commit_integration"]["tag"] == "snyk-secrets-at-commit"
 
     def test_source_files_exist(self, manifest, payload):
-        for f in manifest.recipes["secrets-hooks"]["sources"]["workspace"]["files"]:
+        for f in manifest.recipes["secrets-precommit-hook"]["sources"]["workspace"]["files"]:
             assert payload.resolve_src(f["src"]).is_file(), f["src"]
 
     def test_default_profile_does_not_install_secrets_hook_by_default(
@@ -168,8 +166,8 @@ class TestManifest:
         if hook.exists():
             assert "snyk-secrets-at-commit" not in hook.read_text(encoding="utf-8")
 
-    def test_flag_installs_secrets_hook_files_and_integration(self, repo, manifest, payload):
-        recipes = manifest.resolve_recipes("default", secrets_precommit_hook=True)
+    def test_selection_installs_secrets_hook_files_and_integration(self, repo, manifest, payload):
+        recipes = manifest.resolve_recipes("experimental", ["secrets-precommit-hook"])
         for recipe_id in recipes:
             if manifest.is_workspace_scoped(recipe_id):
                 installer.install_workspace_recipe(
@@ -177,43 +175,76 @@ class TestManifest:
                 )
 
         assert (repo / SECRETS_DEST).is_file()
-        assert installer.verify_workspace_recipe("secrets-hooks", manifest, payload, repo) is True
-
-    def test_verify_includes_existing_secrets_hook_without_flag(self, repo, manifest, payload):
-        recipes = installer.resolve_verify_recipes(
-            manifest, payload, "default", secrets_precommit_hook=False, workspace=repo
+        assert (
+            installer.verify_workspace_recipe("secrets-precommit-hook", manifest, payload, repo)
+            is True
         )
-        assert "secrets-hooks" not in recipes
 
-        installer.install_workspace_recipe("secrets-hooks", manifest, payload, repo, dry_run=False)
+    def test_narrowed_install_verifies_clean(self, repo, manifest, payload):
+        # A selection narrower than the profile must verify against what it
+        # actually resolved, not against the profile's own list.
+        recipes = manifest.resolve_recipes("experimental", ["secrets-precommit-hook"])
+        for recipe_id in recipes:
+            installer.install_workspace_recipe(recipe_id, manifest, payload, repo, dry_run=False)
 
-        recipes = installer.resolve_verify_recipes(
-            manifest, payload, "default", secrets_precommit_hook=False, workspace=repo
+        assert all(
+            installer.verify_workspace_recipe(recipe_id, manifest, payload, repo)
+            for recipe_id in recipes
         )
-        assert "secrets-hooks" in recipes
+
+    def test_verify_includes_existing_secrets_hook_without_a_selection(
+        self, repo, manifest, payload
+    ):
+        recipes = installer.resolve_verify_recipes(manifest, payload, "default", workspace=repo)
+        assert "secrets-precommit-hook" not in recipes
+
+        installer.install_workspace_recipe(
+            "secrets-precommit-hook", manifest, payload, repo, dry_run=False
+        )
+
+        recipes = installer.resolve_verify_recipes(manifest, payload, "default", workspace=repo)
+        assert "secrets-precommit-hook" in recipes
 
     def test_verify_includes_existing_secrets_hook_when_files_are_missing(
         self, repo, manifest, payload
     ):
-        installer.install_workspace_recipe("secrets-hooks", manifest, payload, repo, dry_run=False)
+        installer.install_workspace_recipe(
+            "secrets-precommit-hook", manifest, payload, repo, dry_run=False
+        )
         shutil.rmtree(repo / ".snyk-studio")
 
-        recipes = installer.resolve_verify_recipes(
-            manifest, payload, "default", secrets_precommit_hook=False, workspace=repo
+        recipes = installer.resolve_verify_recipes(manifest, payload, "default", workspace=repo)
+        assert "secrets-precommit-hook" in recipes
+        assert (
+            installer.verify_workspace_recipe("secrets-precommit-hook", manifest, payload, repo)
+            is False
         )
-        assert "secrets-hooks" in recipes
-        assert installer.verify_workspace_recipe("secrets-hooks", manifest, payload, repo) is False
 
     def test_uninstall_removes_secrets_hook_even_when_default_profile_excludes_it(
         self, repo, manifest, payload
     ):
-        installer.install_workspace_recipe("secrets-hooks", manifest, payload, repo, dry_run=False)
+        installer.install_workspace_recipe(
+            "secrets-precommit-hook", manifest, payload, repo, dry_run=False
+        )
         assert (repo / SECRETS_DEST).is_file()
 
         installer.uninstall([], manifest, payload, workspace=repo, dry_run=False)
 
         assert not (repo / SECRETS_DEST).exists()
-        assert installer.verify_workspace_recipe("secrets-hooks", manifest, payload, repo) is False
+        assert (
+            installer.verify_workspace_recipe("secrets-precommit-hook", manifest, payload, repo)
+            is False
+        )
+
+    def test_uninstall_after_a_narrowed_install_ignores_unselected_recipes(
+        self, repo, manifest, payload
+    ):
+        for recipe_id in manifest.resolve_recipes("experimental", ["secrets-precommit-hook"]):
+            installer.install_workspace_recipe(recipe_id, manifest, payload, repo, dry_run=False)
+
+        installer.uninstall([], manifest, payload, workspace=repo, dry_run=False)
+
+        assert not (repo / SECRETS_DEST).exists()
 
 
 # ============================================================================
@@ -2733,6 +2764,10 @@ class TestLineStrategyKnownLimitation:
 
 class TestPersistentLog:
     def test_path_under_home_snyk_studio(self, tmp_path, monkeypatch):
+        # The "secrets-hooks" component deliberately keeps the pre-rename
+        # spelling of the recipe id so logs already on disk stay discoverable by
+        # the diagnostic bundle. Renaming it here and in persistent_log.py
+        # together would leave the suite green while orphaning those logs.
         monkeypatch.setattr(os.path, "expanduser", lambda p: p.replace("~", str(tmp_path)))
         path = persistent_log.resolve_log_file("/home/user/my-repo")
         expected = os.path.join(

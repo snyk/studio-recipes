@@ -53,7 +53,7 @@ For non-interactive setups (CI, containers, shared workstations), set the `SNYK_
 | **minimal** | Secure at Inception guardrails and MCP configuration only |
 | **experimental** *(early access)* | [Secure at **Commit**](../guardrail_directives/secure_at_commit/) (SAST + SCA) guardrails, on-demand fix commands (`/snyk-fix`, `/snyk-batch-fix`), secure dependency health-check skill, and MCP configuration — run inside the target repo or pass `--workspace`. |
 
-Choose with `--profile <name>`. [Secrets At Commit](../guardrail_directives/secrets_at_commit/) is opt-in and installs into a target repository. Run the installer inside that repository or pass `--workspace <path>`, and add `--secrets-precommit-hook`.
+Choose with `--profile <name>`. Under `--profile experimental` you can also install individual recipes instead of the whole profile with `--recipes` (see below). [Secrets At Commit](../guardrail_directives/secrets_at_commit/) is opt-in: it belongs to no profile and installs only when named there.
 
 ---
 
@@ -64,7 +64,7 @@ Choose with `--profile <name>`. [Secrets At Commit](../guardrail_directives/secr
 | Preview without writing files | `--dry-run` |
 | Install for one assistant only | `--ade <cursor\|claude\|gemini\|kiro\|codex\|windsurf\|copilot-cli\|copilot-vscode>` |
 | Choose the repo for workspace-scoped commit-time hooks | `--workspace <path>` |
-| Install the Secrets At Commit hook | `--secrets-precommit-hook` |
+| Install exactly the named recipes instead of the profile's own list | `--recipes <a,b,c>` (requires `--profile experimental`; run `--list` for the identifiers) |
 | Skip confirmation prompts | `-y`, `--yes` |
 | Re-verify a previous install | `--verify` |
 | Verify without installing/upgrading prerequisites | `--verify --read-only` |
@@ -83,11 +83,17 @@ bash ./snyk-studio-install.sh --ade cursor --profile minimal -y
 # Preview changes
 bash ./snyk-studio-install.sh --dry-run
 
-# Experimental: Secure at Commit into a specific repo
+# Experimental profile: Secure at Commit plus the fix commands, skills, and MCP config
 bash ./snyk-studio-install.sh --profile experimental --workspace /path/to/repo -y
 
-# Default profile with Secrets At Commit for a specific repo
-bash ./snyk-studio-install.sh --workspace /path/to/repo --secrets-precommit-hook -y
+# Experimental: Secure at Commit alone into a specific repo
+bash ./snyk-studio-install.sh --profile experimental --recipes secure-at-commit --workspace /path/to/repo -y
+
+# Experimental: Secrets At Commit alone into a specific repo
+bash ./snyk-studio-install.sh --profile experimental --recipes secrets-precommit-hook --workspace /path/to/repo -y
+
+# Experimental: both commit-time hooks into a specific repo
+bash ./snyk-studio-install.sh --profile experimental --recipes secure-at-commit,secrets-precommit-hook --workspace /path/to/repo -y
 
 # Cleanly remove assistant-scoped recipes
 bash ./snyk-studio-install.sh --uninstall -y

@@ -1,4 +1,4 @@
-"""Manifest plumbing for sac-hooks: scope, profile membership, and
+"""Manifest plumbing for secure-at-commit: scope, profile membership, and
 conflicts_with resolution against the SAI recipe."""
 
 from pathlib import Path
@@ -8,18 +8,18 @@ from tests.sac.conftest import installer
 
 class TestManifestSAC:
     def test_sac_hooks_is_workspace_scoped(self, manifest):
-        assert manifest.is_workspace_scoped("sac-hooks") is True
-        # secrets-hooks is the one other legitimate workspace-scoped recipe.
+        assert manifest.is_workspace_scoped("secure-at-commit") is True
+        # secrets-precommit-hook is the one other legitimate workspace-scoped recipe.
         for rid in manifest.all_recipe_ids():
-            if rid in ("sac-hooks", "secrets-hooks"):
+            if rid in ("secure-at-commit", "secrets-precommit-hook"):
                 continue
             assert manifest.is_workspace_scoped(rid) is False, rid
 
     def test_sac_hooks_workspace_sources(self, manifest):
-        sources = manifest.recipes["sac-hooks"]["sources"]
+        sources = manifest.recipes["secure-at-commit"]["sources"]
         assert list(sources.keys()) == ["workspace"]
         ws = sources["workspace"]
-        assert ws["files"], "sac-hooks must ship files"
+        assert ws["files"], "secure-at-commit must ship files"
         # All file dests are workspace-relative under .snyk-studio/components/scripts/
         # so the script ships inside the repo and any committed hook config
         # (e.g. .pre-commit-config.yaml) references it portably. The directory
@@ -59,30 +59,30 @@ class TestManifestSAC:
 
     def test_experimental_profile_excludes_sai(self, manifest):
         recipes = manifest.resolve_recipes("experimental")
-        assert "sac-hooks" in recipes
+        assert "secure-at-commit" in recipes
         assert "sai-hooks-async" not in recipes
 
     def test_default_profile_excludes_sac(self, manifest):
         recipes = manifest.resolve_recipes("default")
         assert "sai-hooks-async" in recipes
-        assert "sac-hooks" not in recipes
+        assert "secure-at-commit" not in recipes
 
     def test_conflicts_with_drops_sai_when_both_listed(self, manifest, monkeypatch):
-        """If a profile happens to list both sac-hooks and sai-hooks-async,
+        """If a profile happens to list both secure-at-commit and sai-hooks-async,
         sai-hooks-async is dropped because of conflicts_with."""
         monkeypatch.setitem(
             manifest.profiles,
             "_both",
-            {"recipes": ["sai-hooks-async", "sac-hooks", "mcp-config"]},
+            {"recipes": ["sai-hooks-async", "secure-at-commit", "mcp-config"]},
         )
         recipes = manifest.resolve_recipes("_both")
-        assert "sac-hooks" in recipes
+        assert "secure-at-commit" in recipes
         assert "sai-hooks-async" not in recipes
         assert "mcp-config" in recipes
 
     def test_conflicts_with_no_op_when_only_sai(self, manifest, monkeypatch):
         """A profile that lists only SAI is unaffected by SAC's
-        conflicts_with declaration (sac-hooks isn't in the active set)."""
+        conflicts_with declaration (secure-at-commit isn't in the active set)."""
         monkeypatch.setitem(manifest.profiles, "_only_sai", {"recipes": ["sai-hooks-async"]})
         recipes = manifest.resolve_recipes("_only_sai")
         assert recipes == ["sai-hooks-async"]
@@ -120,9 +120,9 @@ class TestManifestSAC:
         assert "sai-hooks-async" not in recipes
 
     def test_sac_source_files_exist_in_repo(self, manifest, payload):
-        """Every src path declared on sac-hooks must resolve to a real file
+        """Every src path declared on secure-at-commit must resolve to a real file
         in the payload — protects against typos in manifest.json."""
-        for f in manifest.recipes["sac-hooks"]["sources"]["workspace"]["files"]:
+        for f in manifest.recipes["secure-at-commit"]["sources"]["workspace"]["files"]:
             src = payload.resolve_src(f["src"])
             assert src.is_file(), f["src"]
 
@@ -135,13 +135,13 @@ class TestDetectStaleConflicts:
 
     def test_no_stale_conflicts_when_nothing_on_disk(self, manifest, tmp_path, monkeypatch):
         """Clean baseline: no SAI files installed → no stale conflicts even
-        when sac-hooks declares it conflicts with sai-hooks-async."""
+        when secure-at-commit declares it conflicts with sai-hooks-async."""
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        assert manifest.detect_stale_conflicts(["sac-hooks"]) == []
+        assert manifest.detect_stale_conflicts(["secure-at-commit"]) == []
 
     def test_reports_sai_files_present_for_each_affected_ade(self, manifest, tmp_path, monkeypatch):
         """SAI files exist for claude and cursor (from a prior install via
-        the default profile). Installing sac-hooks must report both ADEs
+        the default profile). Installing secure-at-commit must report both ADEs
         — the warning should cover every ADE where the stale install
         actually lives, not just the one being targeted now."""
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -153,10 +153,10 @@ class TestDetectStaleConflicts:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("# stale SAI hook\n")
 
-        stale = manifest.detect_stale_conflicts(["sac-hooks"])
+        stale = manifest.detect_stale_conflicts(["secure-at-commit"])
         triples = {(active, conflicted, ade) for active, conflicted, ade in stale}
-        assert ("sac-hooks", "sai-hooks-async", "claude") in triples
-        assert ("sac-hooks", "sai-hooks-async", "cursor") in triples
+        assert ("secure-at-commit", "sai-hooks-async", "claude") in triples
+        assert ("secure-at-commit", "sai-hooks-async", "cursor") in triples
 
     def test_skips_workspace_scoped_conflicted_recipes(self, manifest, tmp_path, monkeypatch):
         """Workspace-scoped conflicted recipes need a different path
@@ -164,9 +164,9 @@ class TestDetectStaleConflicts:
         declares such a conflict — this test guards against a future
         misuse silently going undetected."""
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        # Fake an active recipe that "conflicts with" sac-hooks itself
+        # Fake an active recipe that "conflicts with" secure-at-commit itself
         # (workspace-scoped). The detector must not crash and must not
-        # report a stale conflict for sac-hooks.
+        # report a stale conflict for secure-at-commit.
         monkeypatch.setitem(
             manifest.recipes,
             "_pretend",
@@ -174,7 +174,7 @@ class TestDetectStaleConflicts:
                 "type": "hooks",
                 "description": "synthetic",
                 "enabled": True,
-                "conflicts_with": ["sac-hooks"],
+                "conflicts_with": ["secure-at-commit"],
                 "sources": {},
             },
         )

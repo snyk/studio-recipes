@@ -196,6 +196,53 @@ class TestCollectSaiLogs:
 
 
 # ---------------------------------------------------------------------------
+# _collect_git_hook_logs
+# ---------------------------------------------------------------------------
+
+
+class TestCollectGitHookLogs:
+    def _run(self, log_root, cutoff=None):
+        if cutoff is None:
+            cutoff = _FAR_PAST
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            diag._collect_git_hook_logs(zf, log_root, cutoff)
+        buf.seek(0)
+        return zipfile.ZipFile(buf, "r")
+
+    def test_collects_under_git_hooks_zip_prefix(self, tmp_path):
+        ws = tmp_path / "secrets-hooks" / "ws" / "my-repo"
+        ws.mkdir(parents=True)
+        (ws / "log.txt").write_text(f"{_ts(_NOW)} entry\n")
+
+        zf = self._run(tmp_path)
+        names = set(zf.namelist())
+        zf.close()
+
+        assert "logs/git-hooks/secrets-hooks/my-repo/log.txt" in names
+        # Never lands under the SAI collector's plain "logs/" prefix.
+        assert "logs/secrets-hooks/my-repo/log.txt" not in names
+
+    def test_no_error_on_missing_log_root(self, tmp_path):
+        zf = self._run(tmp_path / "nonexistent")
+        assert zf.namelist() == []
+        zf.close()
+
+    def test_rotated_log_included_when_entries_in_window(self, tmp_path):
+        ws = tmp_path / "secrets-hooks" / "ws" / "my-repo"
+        ws.mkdir(parents=True)
+        (ws / "log.txt").write_text(f"{_ts(_NOW)} current\n")
+        (ws / "log.txt.1").write_text(f"{_ts(_NOW - timedelta(hours=2))} rotated\n")
+
+        zf = self._run(tmp_path, cutoff=_NOW - timedelta(hours=24))
+        names = set(zf.namelist())
+        zf.close()
+
+        assert "logs/git-hooks/secrets-hooks/my-repo/log.txt" in names
+        assert "logs/git-hooks/secrets-hooks/my-repo/log.txt.1" in names
+
+
+# ---------------------------------------------------------------------------
 # _filter_log_entries
 # ---------------------------------------------------------------------------
 

@@ -315,6 +315,7 @@ class TestParseArgs:
         assert args.list_mode is False
         assert args.yes is False
         assert args.no_latest_deps is False
+        assert args.secrets_precommit_hook is False
         assert args.control_identifier is None
 
     def test_all_flags(self):
@@ -330,6 +331,7 @@ class TestParseArgs:
                 "--list",
                 "-y",
                 "--no-latest-deps",
+                "--secrets-precommit-hook",
                 "--control-identifier",
                 "machine-123",
             ]
@@ -342,11 +344,20 @@ class TestParseArgs:
         assert args.list_mode is True
         assert args.yes is True
         assert args.no_latest_deps is True
+        assert args.secrets_precommit_hook is True
         assert args.control_identifier == "machine-123"
 
     def test_no_latest_deps_explicit(self):
         args = installer.parse_args(["--no-latest-deps"])
         assert args.no_latest_deps is True
+
+    def test_secrets_precommit_hook_flag_sets_true(self):
+        args = installer.parse_args(["--secrets-precommit-hook"])
+        assert args.secrets_precommit_hook is True
+
+    def test_secrets_precommit_hook_rejects_value(self):
+        with pytest.raises(SystemExit):
+            installer.parse_args(["--secrets-precommit-hook", "remove"])
 
     def test_invalid_ade_rejected(self):
         with pytest.raises(SystemExit):
@@ -1279,14 +1290,28 @@ class TestManifest:
     def test_resolve_default_profile(self, manifest):
         recipes = manifest.resolve_recipes("default")
         assert "sai-hooks-async" in recipes
+        assert "secrets-hooks" not in recipes
         assert "snyk-fix-command" in recipes
         assert len(recipes) == 6
+
+    def test_resolve_default_profile_with_secrets_precommit_hook_flag(self, manifest):
+        recipes = manifest.resolve_recipes("default", secrets_precommit_hook=True)
+        assert "sai-hooks-async" in recipes
+        assert "secrets-hooks" in recipes
+        assert "snyk-fix-command" in recipes
+        assert len(recipes) == 7
 
     def test_resolve_minimal_profile(self, manifest):
         recipes = manifest.resolve_recipes("minimal")
         assert "sai-hooks-async" in recipes
         assert "mcp-config" in recipes
         assert "snyk-fix-command" not in recipes
+
+    def test_secrets_precommit_hook_flag_adds_to_minimal_profile(self, manifest):
+        recipes = manifest.resolve_recipes("minimal", secrets_precommit_hook=True)
+        assert "sai-hooks-async" in recipes
+        assert "secrets-hooks" in recipes
+        assert "mcp-config" in recipes
 
     def test_unknown_profile_exits(self, manifest):
         with pytest.raises(SystemExit):
@@ -1309,19 +1334,24 @@ class TestManifest:
         assert sources["config_merge"]["target"] == ".kiro/settings/mcp.json"
 
     def test_gemini_sources_for_all_default_recipes(self, manifest):
-        # snyk-fix-skill is intentionally limited to command-less platforms (codex, copilot-cli)
+        # snyk-fix-skill is limited to command-less platforms (codex, copilot-cli);
+        # workspace-scoped recipes (e.g. secrets-hooks) have no per-ADE sources.
         skill_only_recipes = {"snyk-fix-skill"}
         for recipe_id in manifest.resolve_recipes("default"):
-            if recipe_id in skill_only_recipes:
+            if recipe_id in skill_only_recipes or manifest.is_workspace_scoped(recipe_id):
                 continue
             sources = manifest.get_sources(recipe_id, "gemini")
             assert sources, f"missing gemini sources for {recipe_id}"
 
     def test_kiro_sources_for_all_default_recipes_except_hooks(self, manifest):
-        # snyk-fix-skill is intentionally limited to command-less platforms (codex, copilot-cli)
+        # snyk-fix-skill is limited to command-less platforms (codex, copilot-cli);
+        # workspace-scoped recipes (e.g. secrets-hooks) have no per-ADE sources.
         skill_only_recipes = {"snyk-fix-skill"}
         for recipe_id in manifest.resolve_recipes("default"):
-            if recipe_id in ("sai-hooks-async", *skill_only_recipes):
+            if recipe_id in (
+                "sai-hooks-async",
+                *skill_only_recipes,
+            ) or manifest.is_workspace_scoped(recipe_id):
                 continue
             sources = manifest.get_sources(recipe_id, "kiro")
             assert sources, f"missing kiro sources for {recipe_id}"
@@ -1380,7 +1410,7 @@ class TestManifest:
         assert sources["config_merge"]["strategy"] == "merge_mcp_servers"
 
     def test_codex_has_no_slash_command_recipes(self, manifest):
-        # Codex CLI does not support user-defined slash commands.
+        # Codex does not support user-defined slash commands.
         for recipe_id in ("snyk-fix-command", "snyk-batch-fix-command"):
             assert manifest.get_sources(recipe_id, "codex") == {}, recipe_id
 
@@ -2387,6 +2417,7 @@ class TestConflictPromptAutoYes:
             workspace=None,
             no_latest_deps=False,
             cli_path=None,
+            secrets_precommit_hook=False,
         )
 
     def _stub_main(self, monkeypatch, manifest, ade="cursor"):
@@ -2487,6 +2518,7 @@ class TestConflictResolutionPolicy:
             workspace=None,
             no_latest_deps=False,
             cli_path=None,
+            secrets_precommit_hook=False,
         )
 
     @staticmethod

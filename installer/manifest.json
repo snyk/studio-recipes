@@ -139,7 +139,7 @@
           ]
         }
       },
-      "comment": "Codex CLI does not support user-defined slash commands; this recipe is intentionally not provided for codex."
+      "comment": "Codex does not support user-defined slash commands; this recipe is intentionally not provided for codex."
     },
     "snyk-batch-fix-command": {
       "type": "command",
@@ -177,7 +177,7 @@
           ]
         }
       },
-      "comment": "Codex CLI does not support user-defined slash commands; this recipe is intentionally not provided for codex."
+      "comment": "Codex does not support user-defined slash commands; this recipe is intentionally not provided for codex."
     },
     "snyk-fix-skill": {
       "type": "skill",
@@ -277,7 +277,37 @@
           ],
           "pre_commit_integration": {
             "tag": "snyk-secure-at-commit",
-            "command": "uv run .snyk-studio/components/scripts/snyk_secure_at_commit.py --staged"
+            "command": "uv run .snyk-studio/components/scripts/snyk_secure_at_commit.py --staged",
+            "name": "Snyk Secure At Commit"
+          }
+        }
+      }
+    },
+    "secrets-hooks": {
+      "type": "hooks",
+      "scope": "workspace",
+      "description": "Secrets At Commit pre-commit hook (secrets-only)",
+      "enabled": true,
+      "sources": {
+        "workspace": {
+          "files": [
+            { "src": "guardrail_directives/secrets_at_commit/snyk_secrets_at_commit.py", "dest": ".snyk-studio/components/scripts/snyk_secrets_at_commit.py" },
+            { "src": "guardrail_directives/secrets_at_commit/lib/__init__.py", "dest": ".snyk-studio/components/scripts/lib/__init__.py" },
+            { "src": "guardrail_directives/secrets_at_commit/lib/findings.py", "dest": ".snyk-studio/components/scripts/lib/findings.py" },
+            { "src": "guardrail_directives/secrets_at_commit/lib/diff_scope.py", "dest": ".snyk-studio/components/scripts/lib/diff_scope.py" },
+            { "src": "guardrail_directives/secrets_at_commit/lib/baseline.py", "dest": ".snyk-studio/components/scripts/lib/baseline.py" },
+            { "src": "guardrail_directives/secrets_at_commit/lib/git_ops.py", "dest": ".snyk-studio/components/scripts/lib/git_ops.py" },
+            { "src": "guardrail_directives/secrets_at_commit/lib/index_snapshot.py", "dest": ".snyk-studio/components/scripts/lib/index_snapshot.py" },
+            { "src": "guardrail_directives/secrets_at_commit/lib/proc.py", "dest": ".snyk-studio/components/scripts/lib/proc.py" },
+            { "src": "guardrail_directives/secrets_at_commit/lib/snyk_cli.py", "dest": ".snyk-studio/components/scripts/lib/snyk_cli.py" },
+            { "src": "guardrail_directives/secrets_at_commit/lib/report.py", "dest": ".snyk-studio/components/scripts/lib/report.py" },
+            { "src": "guardrail_directives/secrets_at_commit/lib/timing.py", "dest": ".snyk-studio/components/scripts/lib/timing.py" },
+            { "src": "guardrail_directives/secrets_at_commit/lib/persistent_log.py", "dest": ".snyk-studio/components/scripts/lib/persistent_log.py" }
+          ],
+          "pre_commit_integration": {
+            "tag": "snyk-secrets-at-commit",
+            "command": "uv run .snyk-studio/components/scripts/snyk_secrets_at_commit.py",
+            "name": "Snyk Secrets At Commit"
           }
         }
       }

@@ -69,14 +69,18 @@ def _filter_log_entries(path: Path, cutoff_ts: float) -> str:
     return "".join(lines)
 
 
-def _collect_sai_logs(zf: zipfile.ZipFile, log_root: Path, cutoff: datetime) -> None:
+def _collect_ws_scoped_logs(
+    zf: zipfile.ZipFile, log_root: Path, cutoff: datetime, zip_prefix: str
+) -> None:
+    """Walks <log_root>/<name>/ws/<workspace>/log.txt(.1), adding recent
+    entries to the zip under {zip_prefix}/<name>/<workspace>/log.txt(.1)."""
     cutoff_ts = cutoff.timestamp()
     try:
-        ade_dirs = list(log_root.iterdir())
+        name_dirs = list(log_root.iterdir())
     except OSError:
         return
-    for ade_dir in ade_dirs:
-        ws_root = ade_dir / "ws"
+    for name_dir in name_dirs:
+        ws_root = name_dir / "ws"
         if not ws_root.is_dir():
             continue
         try:
@@ -84,7 +88,7 @@ def _collect_sai_logs(zf: zipfile.ZipFile, log_root: Path, cutoff: datetime) -> 
         except OSError:
             continue
         for ws_dir in ws_dirs:
-            ade = re.sub(r"[^a-zA-Z0-9_\-.]", "_", Path(ade_dir.name).name)
+            name = re.sub(r"[^a-zA-Z0-9_\-.]", "_", Path(name_dir.name).name)
             ws = re.sub(r"[^a-zA-Z0-9_\-.]", "_", Path(ws_dir.name).name)
             log_txt = ws_dir / "log.txt"
             log_txt1 = ws_dir / "log.txt.1"
@@ -106,7 +110,7 @@ def _collect_sai_logs(zf: zipfile.ZipFile, log_root: Path, cutoff: datetime) -> 
                 content = _filter_log_entries(log_txt, cutoff_ts)
                 if content:
                     try:
-                        zf.writestr(f"logs/{ade}/{ws}/log.txt", content)
+                        zf.writestr(f"{zip_prefix}/{name}/{ws}/log.txt", content)
                     except OSError:
                         pass
 
@@ -114,9 +118,19 @@ def _collect_sai_logs(zf: zipfile.ZipFile, log_root: Path, cutoff: datetime) -> 
                 content1 = _filter_log_entries(log_txt1, cutoff_ts)
                 if content1:
                     try:
-                        zf.writestr(f"logs/{ade}/{ws}/log.txt.1", content1)
+                        zf.writestr(f"{zip_prefix}/{name}/{ws}/log.txt.1", content1)
                     except OSError:
                         pass
+
+
+def _collect_sai_logs(zf: zipfile.ZipFile, log_root: Path, cutoff: datetime) -> None:
+    _collect_ws_scoped_logs(zf, log_root, cutoff, "logs")
+
+
+def _collect_git_hook_logs(zf: zipfile.ZipFile, log_root: Path, cutoff: datetime) -> None:
+    """Persistent logs for the git-native pre-commit hooks (currently
+    just secrets-hooks)."""
+    _collect_ws_scoped_logs(zf, log_root, cutoff, "logs/git-hooks")
 
 
 def _collect_installed_recipes(
@@ -311,6 +325,7 @@ def run(
     log_root = Path(
         os.environ.get("SNYK_STUDIO_LOG_DIR", str(Path.home() / ".snyk-studio" / "ades"))
     )
+    git_hooks_log_root = Path.home() / ".snyk-studio" / "git-hooks"
     log_cutoff = datetime.now(timezone.utc) - timedelta(days=log_days)
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     filename = f"snyk-studio-diag-{ts}.zip"
@@ -321,6 +336,7 @@ def run(
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
             _collect_machine_id(zf)
             _collect_sai_logs(zf, log_root, log_cutoff)
+            _collect_git_hook_logs(zf, git_hooks_log_root, log_cutoff)
             _collect_installed_recipes(zf, ade_homes)
             _collect_ade_versions(zf, ade_homes)
             _collect_dependency_versions(zf)

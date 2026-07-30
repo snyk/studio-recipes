@@ -14,9 +14,10 @@ Options:
     --profile <name>                           Installation profile (default, minimal, experimental)
     --ade <cursor|claude|gemini|windsurf|kiro> Target specific ADE (auto-detect if omitted)
     --workspace <path>                         Workspace root for workspace-scoped recipes
+                                               (e.g. commit-time hooks)
                                                (defaults to the enclosing git repo; skipped if neither)
     --dry-run                                  Show what would be installed without making changes
-    --uninstall                                Remove Snyk recipes from detected ADEs
+    --uninstall                                Remove Snyk recipes from detected ADEs and any resolved workspace
     --verify                                   Verify installed files and merged configs match manifest
     --read-only                                With --verify, only report prerequisite versions instead
                                                of offering to install/upgrade them
@@ -26,6 +27,7 @@ Options:
     --cli-path <path>                          Use the standalone Snyk CLI at <path>. Skips all
                                                Node.js/npm/nvm checks. If omitted, falls back to
                                                npx (the default).
+    --secrets-precommit-hook                   Install the Secrets At Commit pre-commit hook
     --control-identifier <id>                  Machine/control identifier to record
     --diag-dump                                Create a diagnostic zip for Snyk support and print its path.
     --out-file <path>                          Output path for the diagnostic zip (default: timestamped zip in cwd).
@@ -55,6 +57,7 @@ BUNDLE_ENV = "SNYK_STUDIO_BUNDLE_ROOT"
 
 GLOBAL = "global"
 WORKSPACE = "workspace"
+SECRETS_HOOK_RECIPE_ID = "secrets-hooks"
 
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -83,10 +86,29 @@ if _IS_WINDOWS:
 
 
 class Color:
-    """ANSI color codes with auto-detection of terminal support."""
+    """ANSI color codes with auto-detection of terminal support.
+
+    ``enabled`` re-detects on every read rather than being fixed once at
+    construction time. The module-level ``C`` instance below is created a
+    single time at import, long before ``main()`` runs - caching the
+    detection result there would freeze it based on whatever stdout looked
+    like at import time (e.g. under pytest, before any test's capsys
+    fixture has swapped stdout out), rather than the stdout actually in use
+    when a message gets printed.
+    """
 
     def __init__(self):
-        self.enabled = self._detect()
+        self._enabled: Optional[bool] = None
+
+    @property
+    def enabled(self) -> bool:
+        if self._enabled is not None:
+            return self._enabled
+        return self._detect()
+
+    @enabled.setter
+    def enabled(self, value: bool) -> None:
+        self._enabled = value
 
     def _detect(self) -> bool:
         if not hasattr(sys.stdout, "isatty") or not sys.stdout.isatty():
@@ -165,7 +187,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--dry-run", action="store_true", help="Show what would be installed without making changes"
     )
     parser.add_argument(
-        "--uninstall", action="store_true", help="Remove Snyk recipes from detected ADEs"
+        "--uninstall",
+        action="store_true",
+        help="Remove Snyk recipes from detected ADEs and any resolved workspace",
     )
     parser.add_argument(
         "--verify",
@@ -210,11 +234,16 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--workspace",
         default=None,
         help=(
-            "Workspace root for workspace-scoped recipes (e.g. sac-hooks). "
+            "Workspace root for workspace-scoped recipes (e.g. commit-time hooks). "
             "If omitted, the installer walks up from the current directory looking "
             "for a git repository; if none is found, workspace-scoped recipes are "
             "skipped."
         ),
+    )
+    parser.add_argument(
+        "--secrets-precommit-hook",
+        action="store_true",
+        help="Install the Secrets At Commit pre-commit hook.",
     )
     parser.add_argument(
         "--control-identifier",
@@ -330,7 +359,7 @@ class Manifest:
         self.profiles: Dict[str, Any] = self.data.get("profiles", {})
         self.conflicting_resources: Dict[str, Any] = self.data.get("conflicting-resources", {})
 
-    def resolve_recipes(self, profile: str) -> List[str]:
+    def resolve_recipes(self, profile: str, secrets_precommit_hook: bool = False) -> List[str]:
         if profile not in self.profiles:
             print(f"Unknown profile: {profile}", file=sys.stderr)
             print(f"Available: {list(self.profiles.keys())}", file=sys.stderr)
@@ -341,6 +370,10 @@ class Manifest:
 
         active = set(all_ids) if "*" in profile_recipes else set(profile_recipes)
         active = {r for r in active if self.recipes[r].get("enabled", True)}
+
+        if secrets_precommit_hook:
+            if self.recipes.get(SECRETS_HOOK_RECIPE_ID, {}).get("enabled", True):
+                active.add(SECRETS_HOOK_RECIPE_ID)
 
         # Honour each enabled recipe's `conflicts_with` list. Iterating in
         # manifest declaration order (rather than set iteration order, which
@@ -377,11 +410,10 @@ class Manifest:
 
         ``conflicts_with`` is normally a build-time concern: it just keeps a
         profile from listing two incompatible recipes at once. But if a user
-        previously installed the conflicted recipe (e.g. via
-        ``--profile default`` installing ``sai-hooks-async``) and then runs
-        the experimental profile (which installs ``sac-hooks`` declaring a
-        conflict with SAI), the old files stay on disk and double-fire
-        alongside the new install. This walks every ADE the conflicted
+        previously installed the conflicted recipe (for example, from another
+        profile) and then runs a profile with a mutually exclusive recipe, the
+        old files stay on disk and double-fire alongside the new install. This
+        walks every ADE the conflicted
         recipe ships sources for and reports the ones whose first file is
         actually present, so the installer can surface a warning + offer to
         clean up before the new install proceeds.
@@ -391,8 +423,8 @@ class Manifest:
             conflicts = self.recipes.get(active_rid, {}).get("conflicts_with", [])
             for conflicted_rid in conflicts:
                 # Workspace-scoped conflicted recipes would need a different
-                # path resolver; today the only declared conflict is sac
-                # against sai (ADE-scoped) so we only handle that case.
+                # path resolver; current declared conflicts target ADE-scoped
+                # recipes, so we only handle that case.
                 if self.is_workspace_scoped(conflicted_rid):
                     continue
                 # Check every ADE the conflicted recipe ships sources for —
@@ -1604,11 +1636,9 @@ def expand_install_tokens(s: str, workspace: Path) -> str:
     """Replace ``$WORKSPACE`` with the absolute workspace path.
 
     Used when materialising a ``pre_commit_integration.command`` string so the
-    shim doesn't depend on shell variable expansion at git-hook time. The SAC
-    recipe doesn't use ``$WORKSPACE`` (its command is workspace-relative so
-    the resulting `.pre-commit-config.yaml` / `.husky/pre-commit` stays
-    portable when committed), but the helper is kept for any future recipe
-    that needs an absolute path baked in.
+    shim doesn't depend on shell variable expansion at git-hook time. Recipes
+    can still use workspace-relative commands when generated hook files should
+    stay portable after being committed.
     """
     return s.replace("$WORKSPACE", str(workspace.resolve()))
 
@@ -1716,7 +1746,7 @@ def get_target_ades(
     print("  2) Claude Code")
     print("  3) Gemini Code")
     print("  4) Kiro")
-    print("  5) Codex CLI")
+    print("  5) Codex")
     print("  6) Windsurf")
     print("  7) GitHub Copilot CLI")
     print("  8) GitHub Copilot in VS Code")
@@ -2099,6 +2129,73 @@ def _load_git_hooks(payload: PayloadContext) -> Any:
     return git_hooks
 
 
+def _display_name_from_hook_tag(tag: str) -> str:
+    words = tag.removeprefix("snyk-").replace("-", " ").title()
+    return f"Snyk {words}" if tag.startswith("snyk-") else words
+
+
+def _pre_commit_integration_parts(pci: Dict[str, Any], workspace: Path) -> Tuple[str, str, str]:
+    """Build shared hook fields from a manifest pre-commit integration block.
+
+    The bundled manifest is tested to declare a display name for every hook,
+    but keep the installer tolerant of older/external manifests that predate
+    the field.
+    """
+    tag = pci.get("tag", "snyk-secure-at-commit")
+    command = expand_install_tokens(pci["command"], workspace)
+    name = pci.get("name") or _display_name_from_hook_tag(tag)
+    return tag, command, name
+
+
+def _pre_commit_hook_spec(git_hooks: Any, pci: Dict[str, Any], workspace: Path) -> Any:
+    tag, command, name = _pre_commit_integration_parts(pci, workspace)
+    return git_hooks.HookSpec(tag=tag, command=command, name=name)
+
+
+def _has_installed_secrets_hook_files(manifest: Manifest, workspace: Path) -> bool:
+    sources = (
+        manifest.recipes.get(SECRETS_HOOK_RECIPE_ID, {}).get("sources", {}).get("workspace", {})
+    )
+    return any(
+        resolve_install_path(workspace, f["dest"]).exists() for f in sources.get("files", [])
+    )
+
+
+def _has_installed_workspace_hook_integration(
+    manifest: Manifest, payload: PayloadContext, workspace: Path, recipe_id: str
+) -> bool:
+    sources = manifest.recipes.get(recipe_id, {}).get("sources", {}).get("workspace", {})
+    pci = sources.get("pre_commit_integration")
+    if not pci:
+        return False
+    git_hooks = _load_git_hooks(payload)
+    spec = _pre_commit_hook_spec(git_hooks, pci, workspace)
+    _integration_kind, found, _path = git_hooks.verify_hook(workspace, spec)
+    return bool(found)
+
+
+def resolve_verify_recipes(
+    manifest: Manifest,
+    payload: PayloadContext,
+    profile: str,
+    secrets_precommit_hook: bool,
+    workspace: Optional[Path],
+) -> List[str]:
+    recipes = manifest.resolve_recipes(profile, secrets_precommit_hook)
+    if (
+        workspace is not None
+        and SECRETS_HOOK_RECIPE_ID not in recipes
+        and (
+            _has_installed_secrets_hook_files(manifest, workspace)
+            or _has_installed_workspace_hook_integration(
+                manifest, payload, workspace, SECRETS_HOOK_RECIPE_ID
+            )
+        )
+    ):
+        recipes.append(SECRETS_HOOK_RECIPE_ID)
+    return recipes
+
+
 def install_workspace_recipe(
     recipe_id: str,
     manifest: Manifest,
@@ -2109,7 +2206,7 @@ def install_workspace_recipe(
     """Install a recipe whose sources live under the synthetic ``workspace`` key.
 
     Files are copied relative to *workspace* and any ``pre_commit_integration``
-    block is wired up via the detected hook manager (pre-commit framework,
+    block is wired up via the detected hook integration (pre-commit framework,
     Husky, or git native).
     """
     sources = manifest.recipes.get(recipe_id, {}).get("sources", {}).get("workspace", {})
@@ -2130,19 +2227,18 @@ def install_workspace_recipe(
 
     pci = sources.get("pre_commit_integration")
     if pci:
-        command = expand_install_tokens(pci["command"], workspace)
-        tag = pci.get("tag", "snyk-secure-at-commit")
+        tag, command, _name = _pre_commit_integration_parts(pci, workspace)
         if dry_run:
             print(f"    {C.dim(f'[dry-run] pre-commit integrate ({tag}): {command}')}")
         else:
             git_hooks = _load_git_hooks(payload)
-            spec = git_hooks.HookSpec(tag=tag, command=command)
+            spec = _pre_commit_hook_spec(git_hooks, pci, workspace)
             try:
-                manager, installed, path = git_hooks.install_hook(workspace, spec)
-            except FileNotFoundError as e:
+                integration_kind, installed, path = git_hooks.install_hook(workspace, spec)
+            except (FileNotFoundError, git_hooks.HookIntegrationSkipped) as e:
                 print(f"    {C.red('ERROR')} pre-commit integration skipped: {e}")
             else:
-                label = f"{manager} -> {path}"
+                label = f"{integration_kind} -> {path}"
                 if installed:
                     print(f"    {C.green('hook installed')} {label}")
                 else:
@@ -2188,14 +2284,13 @@ def verify_workspace_recipe(
     pci = sources.get("pre_commit_integration")
     if pci:
         git_hooks = _load_git_hooks(payload)
-        command = expand_install_tokens(pci["command"], workspace)
-        spec = git_hooks.HookSpec(tag=pci.get("tag", "snyk-secure-at-commit"), command=command)
-        manager, found, path = git_hooks.verify_hook(workspace, spec)
+        spec = _pre_commit_hook_spec(git_hooks, pci, workspace)
+        integration_kind, found, path = git_hooks.verify_hook(workspace, spec)
         if found:
             shim_label = _display_path(Path(path), workspace)
-            print(f"    {C.green('OK')} pre-commit shim present ({manager}: {shim_label})")
+            print(f"    {C.green('OK')} pre-commit shim present ({integration_kind}: {shim_label})")
         else:
-            print(f"    {C.red('MISSING')} pre-commit shim ({manager})")
+            print(f"    {C.red('MISSING')} pre-commit shim ({integration_kind})")
             ok = False
     return ok
 
@@ -2221,16 +2316,15 @@ def uninstall_workspace_recipe(
 
     pci = sources.get("pre_commit_integration")
     if pci:
-        tag = pci.get("tag", "snyk-secure-at-commit")
+        tag, _command, _name = _pre_commit_integration_parts(pci, workspace)
         if dry_run:
             print(f"    {C.dim(f'[dry-run] pre-commit unintegrate ({tag})')}")
         else:
             git_hooks = _load_git_hooks(payload)
-            command = expand_install_tokens(pci["command"], workspace)
-            spec = git_hooks.HookSpec(tag=tag, command=command)
-            manager, removed, path = git_hooks.uninstall_hook(workspace, spec)
+            spec = _pre_commit_hook_spec(git_hooks, pci, workspace)
+            integration_kind, removed, path = git_hooks.uninstall_hook(workspace, spec)
             if removed:
-                print(f"    {C.green('hook removed:')} {manager} -> {path}")
+                print(f"    {C.green('hook removed:')} {integration_kind} -> {path}")
 
     files = sources.get("files", [])
     transforms = sources.get("transforms", [])
@@ -2740,7 +2834,9 @@ def main() -> None:
         print()
         ades = get_target_ades(args.ade, args.yes)
         workspace = resolve_workspace(args.workspace)
-        recipes = manifest.resolve_recipes(args.profile)
+        recipes = resolve_verify_recipes(
+            manifest, payload, args.profile, args.secrets_precommit_hook, workspace
+        )
         all_ok = True
         for ade in ades:
             for recipe_id in recipes:
@@ -2786,7 +2882,7 @@ def main() -> None:
     # ADE detection
     ades = get_target_ades(args.ade, args.yes)
 
-    # Workspace resolution for workspace-scoped recipes (e.g. sac-hooks).
+    # Workspace resolution for workspace-scoped recipes.
     # Explicit --workspace overrides everything; otherwise walk up from cwd
     # looking for a git repo; otherwise None (we'll skip workspace recipes
     # with a visible notice rather than guessing).
@@ -2825,14 +2921,14 @@ def main() -> None:
         )
 
     # Normal installation
-    recipes = manifest.resolve_recipes(args.profile)
+    recipes = manifest.resolve_recipes(args.profile, args.secrets_precommit_hook)
     show_plan(ades, recipes, args.profile, manifest, workspace)
 
     # Detect stale on-disk installs of recipes that are mutually exclusive
     # with what's about to be installed. Without this check, switching
-    # profiles (e.g. default → experimental) would leave the old SAI files
-    # behind so both SAI and SAC fire at once. Warn before the user commits
-    # to the install so they can opt into cleanup with one prompt.
+    # profiles can leave old hook files behind so both old and new systems
+    # fire at once. Warn before the user commits to the install so they can
+    # opt into cleanup with one prompt.
     stale_conflicts = manifest.detect_stale_conflicts(recipes)
     if stale_conflicts:
         print()

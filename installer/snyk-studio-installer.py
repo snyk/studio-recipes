@@ -1775,13 +1775,15 @@ _HOOK_EXPAND_STRATEGIES: frozenset[str] = frozenset(
 
 # Strategies whose source file carries hook commands the Windows installer
 # rewrites from ``uv run`` to ``uvw run --gui-script`` to suppress the console
-# window ``uv run`` would otherwise pop up under graphical ADEs. Includes the
-# Copilot CLI strategy, which on Windows needs both the GUI rewrite and
-# install-time $HOME expansion (its hooks run with Windows-native paths, not a
-# bash shell that would expand $HOME at hook time).
+# window ``uv run`` would otherwise pop up under graphical ADEs. Cursor is
+# intentionally excluded: Windows GUI-E2E investigation on July 27, 2026
+# showed Cursor reliably consumed hook stdout via ``uv run`` while
+# ``uvw run --gui-script`` still dropped ``followup_message`` responses.
+# Copilot CLI still needs both the GUI rewrite and install-time $HOME
+# expansion (its hooks run with Windows-native paths, not a bash shell that
+# would expand $HOME at hook time).
 _HOOK_GUI_STRATEGIES: frozenset[str] = frozenset(
     {
-        "cursor_hooks",
         "claude_settings",
         "gemini_settings",
         "kiro_settings",
@@ -1810,7 +1812,8 @@ def _should_gui_transform(strategy: str) -> bool:
 
     Applies on Windows only. Runs for both ``merge_*`` and ``unmerge_*``
     strategies so the unmerge source matches the on-disk form the installer
-    wrote.
+    wrote. Cursor is excluded on purpose: its Windows hooks now preserve the
+    canonical ``uv run`` launcher.
     """
     if not _IS_WINDOWS:
         return False

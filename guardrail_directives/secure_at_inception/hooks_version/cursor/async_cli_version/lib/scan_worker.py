@@ -152,6 +152,15 @@ def main() -> None:
             [snyk_bin, "code", "test", ".", "--json"],
             capture_output=True,
             text=True,
+            # snyk always emits UTF-8 JSON regardless of platform; text=True
+            # alone decodes using the ambient locale encoding instead (e.g.
+            # cp1252 on Windows), which crashes on legitimate non-ASCII
+            # characters in vulnerability descriptions (confirmed live:
+            # curly quotes in a real CVE description). errors="replace" is a
+            # belt-and-suspenders fallback if snyk ever emits something that
+            # isn't valid UTF-8.
+            encoding="utf-8",
+            errors="replace",
             timeout=300,
             cwd=WORKSPACE,
             env=env,

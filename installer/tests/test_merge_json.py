@@ -495,23 +495,18 @@ class TestMergeCursorHooks:
             'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
         )
 
-    def test_merge_replaces_uv_run_with_uvw_gui_script(self, write_json, tmp_path):
-        """Windows upgrade path: an older installer wrote `uv run ...` to the
-        target. The current Windows installer now writes `uvw run --gui-script ...`.
-        Same script (matched by file name) -> the old entry must be replaced in
-        place, not appended alongside."""
+    def test_merge_replaces_uvw_gui_script_with_uv_run(self, write_json, tmp_path):
+        """Windows upgrade path: an older installer wrote
+        ``uvw run --gui-script ...`` to the target, but Cursor now preserves
+        the canonical ``uv run ...`` form. Same script (matched by file name)
+        -> the old entry must be replaced in place, not appended alongside."""
         source = write_json(
             "source/cursor_hooks.json",
             {
                 "version": 1,
                 "hooks": {
                     "afterFileEdit": [
-                        {
-                            "command": (
-                                "uvw run --gui-script "
-                                '"$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
-                            )
-                        }
+                        {"command": 'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'}
                     ]
                 },
             },
@@ -531,7 +526,7 @@ class TestMergeCursorHooks:
         after_edit = read_json(target)["hooks"]["afterFileEdit"]
         assert len(after_edit) == 1
         assert after_edit[0]["command"] == (
-            'uvw run --gui-script "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
+            'uv run "$HOME/.cursor/hooks/snyk_secure_at_inception.py"'
         )
 
     def test_merge_replaces_any_runner_of_same_script(self, write_json, snyk_cursor_source):

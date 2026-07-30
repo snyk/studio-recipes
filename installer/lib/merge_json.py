@@ -35,11 +35,11 @@ from pathlib import Path
 from typing import Any
 
 # Token used by the Windows installer to suppress the cmd.exe window `uv run`
-# pops up under graphical ADEs. The installed-on-Windows form of every SAI
-# hook command is `uvw run --gui-script <path>`; everywhere else the source
-# form `uv run <path>` is preserved. Matching/dedup is by script file name
-# (see _command_script_names), so the rewritten launcher needs no special
-# handling there.
+# pops up under graphical ADEs. Most Windows GUI-hook strategies are rewritten
+# to `uvw run --gui-script <path>`, but Cursor is intentionally excluded and
+# now preserves the canonical `uv run <path>` form. Matching/dedup is by
+# script file name (see _command_script_names), so the rewritten launcher
+# needs no special handling there.
 _UVW_GUI_TOKEN = "uvw run --gui-script"
 _UV_RUN_RE = re.compile(r"(?<![\w./-])uv run(?!\S)")
 

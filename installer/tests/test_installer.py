@@ -947,12 +947,12 @@ class TestWinCompatibility:
         monkeypatch.setattr(installer, "_IS_WINDOWS", False)
         assert installer._should_gui_transform("merge_cursor_hooks") is False
         monkeypatch.setattr(installer, "_IS_WINDOWS", True)
-        assert installer._should_gui_transform("merge_cursor_hooks") is True
-        assert installer._should_gui_transform("unmerge_cursor_hooks") is True
+        assert installer._should_gui_transform("merge_cursor_hooks") is False
+        assert installer._should_gui_transform("unmerge_cursor_hooks") is False
         assert installer._should_gui_transform("merge_copilot_cli_hooks") is True
         assert installer._should_gui_transform("merge_mcp_servers") is False
 
-    def test_expand_source_rewrites_uv_run_on_windows(self, monkeypatch, tmp_path):
+    def test_expand_source_preserves_cursor_uv_run_on_windows(self, monkeypatch, tmp_path):
         monkeypatch.setattr(installer, "_IS_WINDOWS", True)
         monkeypatch.setattr(
             installer.os.path, "expanduser", lambda p: "/home/me" if p == "~" else p
@@ -973,8 +973,9 @@ class TestWinCompatibility:
         with installer._expand_source("merge_cursor_hooks", src) as resolved:
             data = json.loads(Path(resolved).read_text())
         cmd = data["hooks"]["afterFileEdit"][0]["command"]
-        assert "uvw run --gui-script" in cmd
-        assert "uv run" not in cmd.replace("uvw run", "")
+        assert cmd.startswith("uv run ")
+        assert "uvw run --gui-script" not in cmd
+        assert "$HOME" not in cmd
 
     def test_expand_source_preserves_uv_run_off_windows(self, monkeypatch, tmp_path):
         monkeypatch.setattr(installer, "_IS_WINDOWS", False)

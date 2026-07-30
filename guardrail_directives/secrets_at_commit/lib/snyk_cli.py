@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Literal, Optional, Tuple
 
@@ -61,18 +62,109 @@ def _search_paths_windows(env: Dict[str, str]) -> List[str]:
     return paths
 
 
+def _debug(message: str) -> None:
+    if os.environ.get("SECRETS_HOOK_DEBUG") == "1":
+        print(f"  [debug] {message}", file=sys.stderr)
+
+
+# The installer writes this file when invoked with --cli-path, pinning a
+# standalone Snyk CLI that is deliberately not on PATH. It has to win over PATH
+# probing: after a standalone install there may be no `snyk` on PATH at all, and
+# any `snyk` that is there is the npm CLI the user opted out of.
+def _cli_path_sidecar() -> str:
+    """Resolved per call, not at import, so `~` follows the caller's HOME."""
+    return os.path.join(os.path.expanduser("~"), ".snyk-studio", "cli-path")
+
+
+def _read_sidecar() -> Optional[str]:
+    """Returns the sidecar's stripped contents, or None if it can't be read."""
+    sidecar = _cli_path_sidecar()
+    try:
+        with open(sidecar, encoding="utf-8-sig") as f:
+            return f.read().strip()
+    except (OSError, UnicodeDecodeError):
+        # Distinguish "exists but unreadable" from "not pinned at all":
+        # the former silently falls back to the npm CLI the user opted out of.
+        if os.path.exists(sidecar):
+            _debug(f"pinned Snyk CLI file {sidecar} could not be read")
+        return None
+
+
+def _pin_problem(pinned: str) -> Optional[str]:
+    """Returns why `pinned` is unusable, phrased to follow the sidecar path in
+    a message, or None when it is usable."""
+    if not pinned:
+        return "is empty or unreadable"
+    if not os.path.isabs(pinned):
+        # A relative pin would resolve against the scan workspace -- a
+        # snapshot of the very content being committed -- at exec time.
+        return f'pins "{pinned}", which is not an absolute path'
+    if not os.path.isfile(pinned):
+        return f'pins "{pinned}", which does not exist'
+    if not os.access(pinned, os.X_OK):
+        return f'pins "{pinned}", which is not executable'
+    return None
+
+
+def _snyk_cli_from_sidecar() -> Optional[str]:
+    """Returns the installer-pinned CLI path, or None if unpinned/stale."""
+    pinned = _read_sidecar()
+    if pinned is None:
+        return None
+    problem = _pin_problem(pinned)
+    if problem is None:
+        return pinned
+    _debug(f"{_cli_path_sidecar()} {problem}")
+    return None
+
+
+@dataclass(frozen=True)
+class StaleSidecar:
+    """A sidecar that exists but pins no usable CLI."""
+
+    path: str
+    problem: str
+
+
+def stale_sidecar_pin() -> Optional[StaleSidecar]:
+    """Returns the sidecar and why its pin is unusable, else None."""
+    sidecar = _cli_path_sidecar()
+    if not os.path.isfile(sidecar):
+        return None
+    problem = _pin_problem(_read_sidecar() or "")
+    return StaleSidecar(sidecar, problem) if problem else None
+
+
+def _prepend_to_path(env: Dict[str, str], bin_dir: str) -> None:
+    """Puts `bin_dir` at the front, dropping any existing occurrence so it
+    can't stay shadowed, and any empty entry -- empty means cwd on POSIX, which
+    during a scan is the workspace snapshot of the content being committed."""
+    entries = [p for p in env.get("PATH", "").split(os.pathsep) if p and p != bin_dir]
+    env["PATH"] = os.pathsep.join([bin_dir, *entries])
+
+
 def _augment_path_for_snyk(env: Dict[str, str]) -> None:
+    pinned = _snyk_cli_from_sidecar()
+    if pinned:
+        # The scan execs the pin by absolute path, so this isn't for discovery:
+        # it stops a `snyk` the CLI shells out to reaching the npm CLI the user
+        # opted out of -- so the pin must lead PATH, not merely appear on it.
+        _prepend_to_path(env, os.path.dirname(pinned))
+        return
     if shutil.which("snyk", path=env.get("PATH", "")):
         return
     search = _search_paths_windows(env) if IS_WINDOWS else _search_paths_unix(env)
     for bin_dir in search:
         for name in _SNYK_BINARY_NAMES:
             if os.path.isfile(os.path.join(bin_dir, name)):
-                env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+                _prepend_to_path(env, bin_dir)
                 return
 
 
 def find_snyk_binary() -> Optional[str]:
+    pinned = _snyk_cli_from_sidecar()
+    if pinned:
+        return pinned
     env = os.environ.copy()
     _augment_path_for_snyk(env)
     for name in _SNYK_BINARY_NAMES:
@@ -166,8 +258,7 @@ def run_secrets_scan(
         return "error", []
     if result.returncode > 1:
         status = _classify_failure(result.stderr, result.stdout)
-        if os.environ.get("SECRETS_HOOK_DEBUG") == "1":
-            print(f"  [debug] snyk stderr: {result.stderr[:300]}", file=sys.stderr)
+        _debug(f"snyk stderr: {result.stderr[:300]}")
         return status, []
     findings = parse_secrets_results(result.stdout)
     if findings is None:

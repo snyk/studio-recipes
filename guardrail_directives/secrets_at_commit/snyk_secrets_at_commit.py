@@ -59,6 +59,7 @@ from lib.snyk_cli import (
     resolve_scan_files,
     run_concurrent_scans,
     run_secrets_scan,
+    stale_sidecar_pin,
 )
 from lib.timing import Timer, pre_existing_notice, summary_line
 
@@ -140,18 +141,45 @@ def _fail_open_or_block(
     return EXIT_BLOCK if blocking else EXIT_OK
 
 
-def _handle_scan_failure(status: ScanStatus) -> int:
+def _shell_quoted(path: str) -> str:
+    """Quotes a path with whitespace so the hint stays copy-pasteable -- the
+    probed Windows location is `C:\\Program Files\\Snyk`."""
+    return f'"{path}"' if any(c.isspace() for c in path) else path
+
+
+def _auth_hint(snyk_bin: str) -> str:
+    return f"Snyk CLI not authenticated -- run `{_shell_quoted(snyk_bin)} auth`"
+
+
+def _cli_not_found_message() -> str:
+    stale = stale_sidecar_pin()
+    if stale:
+        # PATH was already probed and came up empty before we got here, so
+        # repairing the pin is the only fix -- and don't send a standalone-CLI
+        # user to `npm install -g snyk`, the install they opted out of.
+        return (
+            f"Snyk CLI not found -- {stale.path} {stale.problem}, and no snyk on "
+            "PATH either; re-run the installer with --cli-path pointing at a "
+            "valid standalone CLI"
+        )
+    return "Snyk CLI not found on PATH -- install with `npm install -g snyk`"
+
+
+def _handle_scan_failure(status: ScanStatus, snyk_bin: str) -> int:
+    """`snyk_bin` is interpolated into the hints: after a standalone install
+    there may be no `snyk` on PATH to suggest running."""
     if status == "auth_required":
-        return _fail_open_or_block("Snyk CLI not authenticated -- run `snyk auth`", indent=True)
+        return _fail_open_or_block(_auth_hint(snyk_bin), indent=True)
+    manual_hint = f"run `{_shell_quoted(snyk_bin)} secrets test` manually to check"
     if status == "timeout":
         return _fail_open_or_block(
             f"scan timed out after {_scan_timeout():.0f}s",
-            action_hint="run `snyk secrets test` manually to check",
+            action_hint=manual_hint,
             indent=True,
         )
     return _fail_open_or_block(
         "scan did not complete",
-        action_hint="run `snyk secrets test` manually to check",
+        action_hint=manual_hint,
         indent=True,
     )
 
@@ -463,11 +491,13 @@ def _run() -> int:
 
     snyk_bin = find_snyk_binary()
     if snyk_bin is None:
-        return _fail_open_or_block(
-            "Snyk CLI not found on PATH -- install with `npm install -g snyk`"
-        )
+        return _fail_open_or_block(_cli_not_found_message())
+    # Warned once here, not in the resolver: that runs per scan thread.
+    stale = stale_sidecar_pin()
+    if stale:
+        log(f"{stale.path} {stale.problem}; scanning with {snyk_bin} instead")
     if check_snyk_auth() is None:
-        return _fail_open_or_block("Snyk CLI not authenticated -- run `snyk auth`")
+        return _fail_open_or_block(_auth_hint(snyk_bin))
     timer.mark("prereqs_checked")
 
     timeout = _scan_timeout()
@@ -489,7 +519,7 @@ def _run() -> int:
     status, added, pre_existing = _scan_and_classify(scope, strategy, snyk_bin, timeout, timer)
 
     if status != "success":
-        exit_code = _handle_scan_failure(status)
+        exit_code = _handle_scan_failure(status, snyk_bin)
         _log_summary(timer, status, 0)
         return exit_code
 

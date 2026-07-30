@@ -847,6 +847,174 @@ class TestFilterBySeverity:
 # ============================================================================
 
 
+class TestFindSnykBinary:
+    """The sidecar lives under `~`, which the autouse `_isolate_home` fixture
+    redirects -- so these write to the fake home rather than patch a path."""
+
+    @staticmethod
+    def _fake_cli(path: Path, *, executable: bool = True) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+        path.chmod(0o755 if executable else 0o644)
+        return path
+
+    @classmethod
+    def _fake_cli_on_path(cls, bin_dir: Path) -> Path:
+        # shutil.which() on Windows only matches PATHEXT suffixes, so an
+        # extensionless `snyk` there would never be discovered.
+        return cls._fake_cli(bin_dir / ("snyk.cmd" if os.name == "nt" else "snyk"))
+
+    @staticmethod
+    def _pin(target: str, *, encoding: str = "utf-8") -> Path:
+        sidecar = Path(os.path.expanduser("~")) / ".snyk-studio" / "cli-path"
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text(target, encoding=encoding)
+        return sidecar
+
+    def test_sidecar_pin_wins_over_path(self, monkeypatch, tmp_path):
+        pinned = self._fake_cli(tmp_path / "standalone" / "snyk")
+        self._pin(str(pinned))
+        on_path = self._fake_cli_on_path(tmp_path / "npm-bin")
+        monkeypatch.setenv("PATH", str(on_path.parent))
+        assert snyk_cli.find_snyk_binary() == str(pinned)
+
+    def test_bom_and_trailing_newline_in_sidecar_are_tolerated(self, monkeypatch, tmp_path):
+        pinned = self._fake_cli(tmp_path / "standalone" / "snyk")
+        self._pin(f"{pinned}\n", encoding="utf-8-sig")
+        monkeypatch.setenv("PATH", "")
+        assert snyk_cli.find_snyk_binary() == str(pinned)
+
+    def test_missing_sidecar_falls_back_to_path(self, monkeypatch, tmp_path):
+        on_path = self._fake_cli_on_path(tmp_path / "npm-bin")
+        monkeypatch.setenv("PATH", str(on_path.parent))
+        assert snyk_cli.find_snyk_binary() == str(on_path)
+
+    def test_stale_sidecar_pin_falls_back_to_path(self, monkeypatch, tmp_path):
+        self._pin(str(tmp_path / "uninstalled" / "snyk"))
+        on_path = self._fake_cli_on_path(tmp_path / "npm-bin")
+        monkeypatch.setenv("PATH", str(on_path.parent))
+        assert snyk_cli.find_snyk_binary() == str(on_path)
+
+    @pytest.mark.skipif(os.name == "nt", reason="X_OK is not meaningful on Windows")
+    def test_non_executable_pin_falls_back_to_path(self, monkeypatch, tmp_path):
+        self._pin(str(self._fake_cli(tmp_path / "standalone" / "snyk", executable=False)))
+        on_path = self._fake_cli_on_path(tmp_path / "npm-bin")
+        monkeypatch.setenv("PATH", str(on_path.parent))
+        assert snyk_cli.find_snyk_binary() == str(on_path)
+
+    def test_relative_pin_is_ignored(self, monkeypatch, tmp_path):
+        # A relative pin would resolve against the scan workspace -- a
+        # snapshot of the content being committed -- not the install dir.
+        self._fake_cli(tmp_path / "cwd" / "snyk")
+        monkeypatch.chdir(tmp_path / "cwd")
+        self._pin("snyk")
+        on_path = self._fake_cli_on_path(tmp_path / "npm-bin")
+        monkeypatch.setenv("PATH", str(on_path.parent))
+        assert snyk_cli.find_snyk_binary() == str(on_path)
+
+    def test_pinned_dir_is_prepended_to_scan_env_path(self, tmp_path):
+        pinned = self._fake_cli(tmp_path / "standalone" / "snyk")
+        self._pin(str(pinned))
+        env = {"PATH": "/usr/bin"}
+        snyk_cli._augment_path_for_snyk(env)
+        assert env["PATH"].split(os.pathsep)[0] == str(pinned.parent)
+
+    def test_pinned_dir_already_on_path_is_moved_to_the_front(self, tmp_path):
+        # Merely being on PATH isn't enough: an npm dir ahead of it would still
+        # win for a `snyk` the CLI shells out to.
+        pinned = self._fake_cli(tmp_path / "standalone" / "snyk")
+        self._pin(str(pinned))
+        env = {"PATH": os.pathsep.join(["/usr/bin", str(pinned.parent)])}
+        snyk_cli._augment_path_for_snyk(env)
+        entries = env["PATH"].split(os.pathsep)
+        assert entries[0] == str(pinned.parent)
+        assert entries.count(str(pinned.parent)) == 1
+
+    def test_empty_path_gains_no_trailing_separator(self, tmp_path):
+        # A trailing separator leaves an empty entry, which means cwd on
+        # POSIX -- during a scan that is the snapshot being committed.
+        pinned = self._fake_cli(tmp_path / "standalone" / "snyk")
+        self._pin(str(pinned))
+        env = {}
+        snyk_cli._augment_path_for_snyk(env)
+        assert env["PATH"] == str(pinned.parent)
+
+    def test_probed_dir_prepend_leaves_no_empty_path_entry(self, monkeypatch, tmp_path):
+        probed = self._fake_cli_on_path(tmp_path / "probed-bin")
+        monkeypatch.setattr(snyk_cli, "_search_paths_unix", lambda env: [str(probed.parent)])
+        monkeypatch.setattr(snyk_cli, "_search_paths_windows", lambda env: [str(probed.parent)])
+        env = {"PATH": ""}
+        snyk_cli._augment_path_for_snyk(env)
+        assert env["PATH"] == str(probed.parent)
+
+    def test_scan_env_carries_pinned_dir(self, monkeypatch, tmp_path):
+        pinned = self._fake_cli(tmp_path / "standalone" / "snyk")
+        self._pin(str(pinned))
+        monkeypatch.setenv("PATH", "/usr/bin")
+        assert snyk_cli._snyk_env()["PATH"].split(os.pathsep)[0] == str(pinned.parent)
+
+    def test_stale_sidecar_is_named_in_the_not_found_message(self, tmp_path):
+        missing = tmp_path / "uninstalled" / "snyk"
+        sidecar = self._pin(str(missing))
+        message = secrets_hook._cli_not_found_message()
+        assert str(sidecar) in message
+        # The pinned value too, so the user doesn't have to cat the file to
+        # learn which of the three unusable cases they hit.
+        assert str(missing) in message
+        assert "npm install" not in message
+
+    def test_empty_sidecar_message_reads_without_a_pinned_value(self, tmp_path):
+        sidecar = self._pin("  \n")
+        message = secrets_hook._cli_not_found_message()
+        assert f"{sidecar} is empty or unreadable" in message
+
+    def test_unreadable_sidecar_is_reported_under_debug(self, monkeypatch, capsys):
+        # Undecodable bytes stand in for any unreadable sidecar (EACCES too):
+        # silently falling back to PATH runs the CLI the user opted out of.
+        self._pin("")
+        (Path(os.path.expanduser("~")) / ".snyk-studio" / "cli-path").write_bytes(b"\xff\xfe/snyk")
+        monkeypatch.setenv("SECRETS_HOOK_DEBUG", "1")
+        assert snyk_cli._snyk_cli_from_sidecar() is None
+        assert "could not be read" in capsys.readouterr().err
+
+    def test_interior_empty_path_entry_is_dropped(self, tmp_path):
+        pinned = self._fake_cli(tmp_path / "standalone" / "snyk")
+        self._pin(str(pinned))
+        env = {"PATH": os.pathsep.join(["/usr/bin", "", "/bin"])}
+        snyk_cli._augment_path_for_snyk(env)
+        assert "" not in env["PATH"].split(os.pathsep)
+
+    def test_pin_problem_names_the_failed_check(self, tmp_path):
+        missing = tmp_path / "gone" / "snyk"
+        assert snyk_cli._pin_problem(str(missing)) == f'pins "{missing}", which does not exist'
+        assert snyk_cli._pin_problem("snyk") == 'pins "snyk", which is not an absolute path'
+        assert snyk_cli._pin_problem("") == "is empty or unreadable"
+        assert snyk_cli._pin_problem(str(self._fake_cli(tmp_path / "ok" / "snyk"))) is None
+
+    @pytest.mark.skipif(os.name == "nt", reason="X_OK is not meaningful on Windows")
+    def test_pin_problem_reports_a_non_executable_pin(self, tmp_path):
+        pinned = self._fake_cli(tmp_path / "standalone" / "snyk", executable=False)
+        assert snyk_cli._pin_problem(str(pinned)) == f'pins "{pinned}", which is not executable'
+
+    def test_windows_style_pin_is_not_backslash_escaped(self):
+        # repr() would double the separators, leaving a path the user can't
+        # paste back into --cli-path. Not absolute on POSIX, so still stale.
+        pinned = r"C:\Program Files\Snyk\snyk.exe"
+        self._pin(pinned)
+        assert pinned in secrets_hook._cli_not_found_message()
+
+    def test_stale_message_does_not_suggest_falling_back_to_path(self, tmp_path):
+        # find_snyk_binary() probes PATH before this message is reached, so
+        # deleting the sidecar to "fall back to PATH" is a guaranteed no-op.
+        self._pin(str(tmp_path / "uninstalled" / "snyk"))
+        message = secrets_hook._cli_not_found_message()
+        assert "delete" not in message
+        assert "no snyk on PATH either" in message
+
+    def test_not_found_message_without_a_sidecar_suggests_npm(self):
+        assert "npm install -g snyk" in secrets_hook._cli_not_found_message()
+
+
 class TestCheckSnykAuth:
     @staticmethod
     def _write_config(config_home: Path, payload: str, *, encoding: str = "utf-8") -> None:
@@ -2085,17 +2253,67 @@ class TestOutputScenarios:
         rc, err = self._run(capsys, "Snyk CLI not authenticated (fail-open, default)", [])
         assert rc == secrets_hook.EXIT_OK
         assert (
-            "[snyk] Snyk CLI not authenticated -- run `snyk auth`; "
+            "[snyk] Snyk CLI not authenticated -- run `/usr/bin/snyk auth`; "
             "allowing commit (set SECRETS_BLOCK_ON_SCAN_FAILURE=1 to block instead)" in err
         )
+
+    def test_scan_auth_failure_hint_names_the_resolved_binary(self, monkeypatch, capsys):
+        # A standalone-pin user may have no `snyk` on PATH to run at all.
+        monkeypatch.setattr(secrets_hook, "find_snyk_binary", lambda: "/opt/snyk/snyk")
+        monkeypatch.setattr(
+            secrets_hook, "run_secrets_scan", lambda *a, **kw: ("auth_required", [])
+        )
+        rc, err = self._run(capsys, "scan reported auth_required (fail-open)", [])
+        assert rc == secrets_hook.EXIT_OK
+        assert re.search(
+            r"^  Snyk CLI not authenticated -- run `/opt/snyk/snyk auth`; allowing commit ",
+            err,
+            re.M,
+        )
+
+    def test_scan_error_hint_names_the_resolved_binary(self, monkeypatch, capsys):
+        monkeypatch.setattr(secrets_hook, "find_snyk_binary", lambda: "/opt/snyk/snyk")
+        monkeypatch.setattr(secrets_hook, "run_secrets_scan", lambda *a, **kw: ("error", []))
+        rc, err = self._run(capsys, "scan did not complete (fail-open)", [])
+        assert rc == secrets_hook.EXIT_OK
+        assert "run `/opt/snyk/snyk secrets test` manually to check" in err
+
+    def test_stale_pin_falling_back_to_path_warns_outside_debug(self, monkeypatch, capsys):
+        # Otherwise the user believes they're scanning with the pinned
+        # standalone CLI while the hook quietly used the npm one.
+        sidecar = Path(os.path.expanduser("~")) / ".snyk-studio" / "cli-path"
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text("/gone/snyk", encoding="utf-8")
+        monkeypatch.setattr(secrets_hook, "run_secrets_scan", lambda *a, **kw: ("success", []))
+        rc, err = self._run(capsys, "stale pin, scanned with PATH fallback", [])
+        assert rc == secrets_hook.EXIT_OK
+        assert (
+            f'[snyk] {sidecar} pins "/gone/snyk", which does not exist; '
+            "scanning with /usr/bin/snyk instead" in err
+        )
+
+    def test_no_sidecar_emits_no_stale_pin_warning(self, monkeypatch, capsys):
+        monkeypatch.setattr(secrets_hook, "run_secrets_scan", lambda *a, **kw: ("success", []))
+        _, err = self._run(capsys, "no sidecar, no warning", [])
+        assert "cli-path" not in err
+
+    def test_hint_quotes_a_binary_path_with_spaces(self, monkeypatch, capsys):
+        # _search_paths_windows probes C:\Program Files\Snyk, so a resolved
+        # path with spaces is routine -- the hint has to stay runnable.
+        monkeypatch.setattr(
+            secrets_hook, "find_snyk_binary", lambda: r"C:\Program Files\Snyk\snyk.exe"
+        )
+        monkeypatch.setattr(secrets_hook, "run_secrets_scan", lambda *a, **kw: ("error", []))
+        _, err = self._run(capsys, "scan did not complete, spaced binary path", [])
+        assert r'run `"C:\Program Files\Snyk\snyk.exe" secrets test`' in err
 
     def test_scan_timeout_fail_open(self, monkeypatch, capsys):
         monkeypatch.setattr(secrets_hook, "run_secrets_scan", lambda *a, **kw: ("timeout", []))
         rc, err = self._run(capsys, "scan timeout, fail-open (default)", [])
         assert rc == secrets_hook.EXIT_OK
         assert re.search(
-            r"^  scan timed out after \d+s; allowing commit \(run `snyk secrets test` manually "
-            r"to check; set SECRETS_BLOCK_ON_SCAN_FAILURE=1 to block instead\)$",
+            r"^  scan timed out after \d+s; allowing commit \(run `/usr/bin/snyk secrets test` "
+            r"manually to check; set SECRETS_BLOCK_ON_SCAN_FAILURE=1 to block instead\)$",
             err,
             re.M,
         )
@@ -2108,8 +2326,8 @@ class TestOutputScenarios:
         )
         assert rc == secrets_hook.EXIT_BLOCK
         assert re.search(
-            r"^  scan timed out after \d+s; blocking commit \(run `snyk secrets test` manually "
-            r"to check\)$",
+            r"^  scan timed out after \d+s; blocking commit \(run `/usr/bin/snyk secrets test` "
+            r"manually to check\)$",
             err,
             re.M,
         )

@@ -2303,8 +2303,7 @@ def _has_installed_workspace_hook_integration(
         return False
     git_hooks = _load_git_hooks(payload)
     spec = _pre_commit_hook_spec(git_hooks, pci, workspace)
-    _integration_kind, found, _path = git_hooks.verify_hook(workspace, spec)
-    return bool(found)
+    return bool(git_hooks.verify_hook(workspace, spec).found)
 
 
 def resolve_verify_recipes(
@@ -2417,12 +2416,16 @@ def verify_workspace_recipe(
     if pci:
         git_hooks = _load_git_hooks(payload)
         spec = _pre_commit_hook_spec(git_hooks, pci, workspace)
-        integration_kind, found, path = git_hooks.verify_hook(workspace, spec)
-        if found:
-            shim_label = _display_path(Path(path), workspace)
-            print(f"    {C.green('OK')} pre-commit shim present ({integration_kind}: {shim_label})")
+        verification = git_hooks.verify_hook(workspace, spec)
+        if verification.found:
+            shim_label = _display_path(Path(verification.path), workspace)
+            print(
+                f"    {C.green('OK')} pre-commit shim present ({verification.kind}: {shim_label})"
+            )
         else:
-            print(f"    {C.red('MISSING')} pre-commit shim ({integration_kind})")
+            where = f" ({verification.path})" if verification.path else ""
+            why = f" - {verification.reason}" if verification.reason else ""
+            print(f"    {C.red('MISSING')} pre-commit shim ({verification.kind}){where}{why}")
             ok = False
     return ok
 

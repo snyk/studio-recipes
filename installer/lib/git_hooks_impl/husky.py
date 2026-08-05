@@ -8,7 +8,14 @@ from .marked_files import (
     _uninstall_marked_file,
     _verify_marked_file,
 )
-from .types import HookIntegrationKind, HookSpec, HookStrategy, MarkedFilePolicy, normalize_path
+from .types import (
+    HookCheckResult,
+    HookIntegrationKind,
+    HookSpec,
+    HookStrategy,
+    MarkedFilePolicy,
+    normalize_path,
+)
 
 HUSKY_HOOK_PATH = Path(".husky") / "pre-commit"
 HUSKY_HOOKS_PATHS = (Path(".husky"), Path(".husky") / "_")
@@ -63,8 +70,9 @@ class HuskyStrategy(HookStrategy):
     def install(self, workspace: Path, spec: HookSpec) -> Tuple[bool, str]:
         return install_husky(workspace, spec)
 
-    def is_installed(self, workspace: Path, spec: HookSpec) -> Tuple[bool, str]:
-        return verify_husky(workspace, spec)
+    def is_installed(self, workspace: Path, spec: HookSpec) -> HookCheckResult:
+        ok, path = verify_husky(workspace, spec)
+        return HookCheckResult(ok, path)
 
     def safe_uninstall(self, workspace: Path, spec: HookSpec) -> Tuple[bool, str]:
         return uninstall_husky(workspace, spec)

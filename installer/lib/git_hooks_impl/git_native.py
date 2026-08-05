@@ -11,7 +11,14 @@ from .marked_files import (
     _uninstall_marked_file,
     _verify_marked_file,
 )
-from .types import HookIntegrationKind, HookSpec, HookStrategy, MarkedFilePolicy
+from .types import (
+    HookCheckResult,
+    HookIntegrationKind,
+    HookSpec,
+    HookStrategy,
+    MarkedFilePolicy,
+    normalize_path,
+)
 
 _IS_WINDOWS = sys.platform == "win32"
 _CREATE_NO_WINDOW = 0
@@ -147,10 +154,55 @@ def _git_version(workspace: Path) -> Optional[Tuple[int, int, int]]:
     return tuple(int(part) for part in match.groups())  # type: ignore[return-value]
 
 
-def resolve_core_hooks_path(workspace: Path) -> Optional[Path]:
-    """Return the effective ``core.hooksPath``, or ``None`` if unset."""
-    result = _run_git_safe(workspace, ["config", "--get", "core.hooksPath"])
-    value = result.stdout.strip() if result is not None else ""
+# core.hooksPath was added in Git 2.9.0 - older git stores the config value
+# but never reads it when looking for hooks, always using $GIT_DIR/hooks
+# instead.
+_HOOKS_PATH_MIN_VERSION = (2, 9, 0)
+
+
+def _hooks_path_supported(workspace: Path) -> bool:
+    # Unknown version is treated as unsupported too - the default hooks
+    # directory this falls back to is valid on every git version.
+    version = _git_version(workspace)
+    return version is not None and version >= _HOOKS_PATH_MIN_VERSION
+
+
+# Precedence order for a value set in *this repo's own* config, highest
+# first - matches git's own worktree -> local precedence. Queried directly
+# instead of via ``--show-scope`` (which needs git >= 2.26) so this works
+# down to whatever version ``core.hooksPath`` itself requires (see
+# ``_HOOKS_PATH_MIN_VERSION`` above). ``--worktree`` itself needs git >= 2.20
+# and only ever matches with ``extensions.worktreeConfig`` enabled; on older
+# git or without that extension it just fails and is treated as unset.
+_LOCAL_CONFIG_SCOPE_FLAGS = ("--worktree", "--local")
+
+
+def _read_repo_local_hooks_path_value(workspace: Path) -> str:
+    for scope_flag in _LOCAL_CONFIG_SCOPE_FLAGS:
+        result = _run_git_safe(workspace, ["config", scope_flag, "--get", "core.hooksPath"])
+        value = result.stdout.strip() if result is not None else ""
+        if value:
+            return value
+    return ""
+
+
+def resolve_core_hooks_path(workspace: Path, *, local_only: bool = False) -> Optional[Path]:
+    """Return the effective ``core.hooksPath``, or ``None`` if unset or
+    unsupported by this git version (see ``_hooks_path_supported``).
+
+    ``git config --get`` resolves system -> global -> local -> worktree, so
+    the effective value can be a global/system one with nothing to do with
+    *workspace*. With *local_only* set, only a value set in this repo's own
+    config (local/worktree scope) is honored; a global/system value is
+    treated as unset.
+    """
+    if not _hooks_path_supported(workspace):
+        return None
+    if local_only:
+        value = _read_repo_local_hooks_path_value(workspace)
+    else:
+        result = _run_git_safe(workspace, ["config", "--get", "core.hooksPath"])
+        value = result.stdout.strip() if result is not None else ""
     if not value:
         return None
     path = Path(value)
@@ -197,7 +249,7 @@ class ConfigBasedHookStrategy(GitNativeStrategy):
     def _section(cls, spec: HookSpec) -> str:
         return f"hook.{cls._config_safe_tag(spec.tag)}"
 
-    def is_installed(self, workspace: Path, spec: HookSpec) -> Tuple[bool, str]:
+    def is_installed(self, workspace: Path, spec: HookSpec) -> HookCheckResult:
         section = self._section(spec)
         path = f"{section} (git config)"
         events_result = _run_git_safe(workspace, ["config", "--get-all", f"{section}.event"])
@@ -205,14 +257,13 @@ class ConfigBasedHookStrategy(GitNativeStrategy):
         events = events_result.stdout if events_result is not None else ""
         command = command_result.stdout.strip() if command_result is not None else None
         ok = bool(events) and "pre-commit" in events.splitlines() and command == spec.command
-        return ok, path
+        return HookCheckResult(ok, path)
 
     def install(self, workspace: Path, spec: HookSpec) -> Tuple[bool, str]:
         """Returns (changed, path): changed=True if this call wrote new config."""
         section = self._section(spec)
         path = f"{section} (git config)"
-        already_ok, _ = self.is_installed(workspace, spec)
-        if already_ok:
+        if self.is_installed(workspace, spec).installed:
             return False, path
         try:
             _run_git_throws(
@@ -251,12 +302,16 @@ def _uninstall_shim_at(hook_path: Optional[Path], spec: HookSpec) -> Tuple[bool,
 
 
 class FileShimStrategy(GitNativeStrategy):
-    """File-based shim written to ``core.hooksPath`` if set, else the
-    repo's own ``<gitdir>/hooks/pre-commit``.
+    """File-based shim written to a repo-local ``core.hooksPath`` if set,
+    else the repo's own ``<gitdir>/hooks/pre-commit``.
 
     Always eligible: whichever location applies, it's the only correct
     place for a file-based hook to live, so there's no other file-based
     strategy left to fall back to if writing here fails.
+
+    Ignores a ``core.hooksPath`` inherited from global/system config (see
+    ``resolve_core_hooks_path``'s ``local_only``) - a hook shim must never
+    be written into a global hooks file shared across repos.
     """
 
     name = "git-native-file-shim"
@@ -265,13 +320,37 @@ class FileShimStrategy(GitNativeStrategy):
         return True
 
     def _hook_path(self, workspace: Path) -> Optional[Path]:
-        override = resolve_core_hooks_path(workspace)
+        override = resolve_core_hooks_path(workspace, local_only=True)
         if override is not None:
             return override / "pre-commit"
         return _git_hook_default_path(workspace)
 
-    def is_installed(self, workspace: Path, spec: HookSpec) -> Tuple[bool, str]:
-        return _is_shim_installed_at(self._hook_path(workspace), spec)
+    def _effective_hook_path(self, workspace: Path) -> Optional[Path]:
+        """Where git actually looks right now, ignoring local_only - used
+        only to detect drift from ``_hook_path``, never to decide where
+        to write."""
+        override = resolve_core_hooks_path(workspace, local_only=False)
+        if override is not None:
+            return override / "pre-commit"
+        return _git_hook_default_path(workspace)
+
+    def is_installed(self, workspace: Path, spec: HookSpec) -> HookCheckResult:
+        hook_path = self._hook_path(workspace)
+        ok, path = _is_shim_installed_at(hook_path, spec)
+        if not ok:
+            return HookCheckResult(ok, path)
+        effective_path = self._effective_hook_path(workspace)
+        if (
+            hook_path is not None
+            and effective_path is not None
+            and normalize_path(effective_path) != normalize_path(hook_path)
+        ):
+            # Marker text present, but core.hooksPath has since moved
+            # elsewhere (another tool, the user, Husky's own install) -
+            # git no longer executes this file.
+            reason = f"core.hooksPath now points to {effective_path}; git won't run this file"
+            return HookCheckResult(False, path, reason)
+        return HookCheckResult(ok, path)
 
     def install(self, workspace: Path, spec: HookSpec) -> Tuple[bool, str]:
         return _install_shim_at(self._hook_path(workspace), spec)

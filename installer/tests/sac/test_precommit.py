@@ -147,7 +147,7 @@ class TestPreCommitFramework:
             git_hooks.install_hook(workspace, SPEC)
 
         assert path.read_text(encoding="utf-8") == original
-        _, found, _ = git_hooks.verify_hook(workspace, SPEC)
+        _, found, _, _ = git_hooks.verify_hook(workspace, SPEC)
         assert found is False
         _, removed, _ = git_hooks.uninstall_hook(workspace, SPEC)
         assert removed is False
@@ -161,7 +161,7 @@ class TestPreCommitFramework:
         with pytest.raises(git_hooks.HookIntegrationSkipped, match="cannot safely read"):
             git_hooks.install_hook(workspace, SPEC)
 
-        _, found, _ = git_hooks.verify_hook(workspace, SPEC)
+        _, found, _, _ = git_hooks.verify_hook(workspace, SPEC)
         assert found is False
         _, removed, _ = git_hooks.uninstall_hook(workspace, SPEC)
         assert removed is False
@@ -223,7 +223,7 @@ class TestPreCommitFramework:
         )
         path.write_text(original, encoding="utf-8")
 
-        _, found, _ = git_hooks.verify_hook(workspace, SPEC)
+        _, found, _, _ = git_hooks.verify_hook(workspace, SPEC)
         assert found is False
         _, removed, _ = git_hooks.uninstall_hook(workspace, SPEC)
         assert removed is False
@@ -785,7 +785,7 @@ class TestPreCommitRuamelYaml:
             encoding="utf-8",
         )
 
-        _, found, _ = git_hooks.verify_hook(workspace, SPEC)
+        _, found, _, _ = git_hooks.verify_hook(workspace, SPEC)
         removed, _ = pre_commit.uninstall_precommit_framework(workspace, SPEC)
         _, installed, _ = git_hooks.install_hook(workspace, SPEC)
 

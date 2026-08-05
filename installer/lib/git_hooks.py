@@ -11,9 +11,10 @@ from git_hooks_impl.husky import HuskyStrategy
 from git_hooks_impl.pre_commit import PreCommitFrameworkStrategy
 from git_hooks_impl.types import (
     HookIntegrationKind,
-    HookIntegrationSkipped,  # noqa: F401
+    HookIntegrationSkipped,
     HookSpec,
     HookStrategy,
+    HookVerification,
     normalize_path,
 )
 
@@ -119,10 +120,27 @@ def _install_selected_strategy(
 
 
 def install_hook(workspace: Path, spec: HookSpec) -> Tuple[HookIntegrationKind, bool, str]:
+    """Install *spec*, but only report success once ``is_installed``
+    confirms git will actually execute it (a write can succeed and still
+    mean nothing - see ``FileShimStrategy.is_installed``). Raises
+    ``HookIntegrationSkipped`` instead of returning success on a
+    mismatch; the write itself is not rolled back.
+    """
     selected = _select_strategy(workspace, HOOK_STRATEGIES)
     strategy, installed, path = _install_selected_strategy(
         workspace, spec, selected, HOOK_STRATEGIES
     )
+    check = strategy.is_installed(workspace, spec)
+    if not check.installed:
+        detail = f": {check.reason}" if check.reason else ""
+        action = (
+            f"wrote {strategy.integration_kind} hook to {path}"
+            if installed
+            else f"found an existing {strategy.integration_kind} hook at {path}"
+        )
+        raise HookIntegrationSkipped(
+            f"{action}, but cannot confirm git will actually execute it{detail}"
+        )
     return strategy.integration_kind, installed, path
 
 
@@ -139,15 +157,24 @@ def uninstall_hook(workspace: Path, spec: HookSpec) -> Tuple[HookIntegrationKind
     return primary, removed_any, primary_path
 
 
-def verify_hook(workspace: Path, spec: HookSpec) -> Tuple[HookIntegrationKind, bool, str]:
+def verify_hook(workspace: Path, spec: HookSpec) -> HookVerification:
     selected = _select_strategy(workspace, HOOK_STRATEGIES)
-    ok, path = selected.is_installed(workspace, spec)
-    if ok:
-        return selected.integration_kind, True, path
+    check = selected.is_installed(workspace, spec)
+    if check.installed:
+        return HookVerification(selected.integration_kind, True, check.path)
+    # Not installed via the selected strategy. Check fallback-eligible
+    # siblings too - if one of them is genuinely installed, report that.
+    # Otherwise, keep the most informative unavailable result: a fallback
+    # with a specific reason (e.g. a legacy FileShimStrategy hit by
+    # hooksPath drift) diagnoses this better than the selected strategy's
+    # bare "not installed" with no reason.
+    best_kind, best_check = selected.integration_kind, check
     for strategy in HOOK_STRATEGIES:
         if strategy is selected or not strategy.fallback_eligible:
             continue
-        ok, path = strategy.is_installed(workspace, spec)
-        if ok:
-            return strategy.integration_kind, True, path
-    return selected.integration_kind, False, path
+        candidate = strategy.is_installed(workspace, spec)
+        if candidate.installed:
+            return HookVerification(strategy.integration_kind, True, candidate.path)
+        if candidate.reason and not best_check.reason:
+            best_kind, best_check = strategy.integration_kind, candidate
+    return HookVerification(best_kind, False, best_check.path, best_check.reason)

@@ -19,6 +19,7 @@ from tests.sac.conftest import (
     husky,
     installer,
     pre_commit,
+    types,
 )
 
 
@@ -62,6 +63,8 @@ class TestInstallWorkspaceRecipe:
         elif manager == "husky":
             if GIT is None:
                 pytest.skip("git not installed")
+            if not git_native._hooks_path_supported(workspace):
+                pytest.skip("Husky requires core.hooksPath, added in git 2.9.0")
             subprocess.run(
                 [GIT, "-C", str(workspace), "config", "core.hooksPath", ".husky"],
                 check=True,
@@ -276,7 +279,7 @@ class TestInstallWorkspaceRecipe:
         def fake_verify_hook(ws, spec):
             captured["workspace"] = ws
             captured["spec"] = spec
-            return "git-native", False, ""
+            return types.HookVerification("git-native", False, "", None)
 
         monkeypatch.setattr(git_hooks, "verify_hook", fake_verify_hook)
 

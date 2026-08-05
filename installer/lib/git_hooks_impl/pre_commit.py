@@ -15,6 +15,7 @@ from .marked_files import (
     _write_hook_text_for_update,
 )
 from .types import (
+    HookCheckResult,
     HookIntegrationKind,
     HookIntegrationSkipped,
     HookSpec,
@@ -382,8 +383,9 @@ class PreCommitFrameworkStrategy(HookStrategy):
     def install(self, workspace: Path, spec: HookSpec) -> Tuple[bool, str]:
         return install_precommit_framework(workspace, spec)
 
-    def is_installed(self, workspace: Path, spec: HookSpec) -> Tuple[bool, str]:
-        return verify_precommit_framework(workspace, spec)
+    def is_installed(self, workspace: Path, spec: HookSpec) -> HookCheckResult:
+        ok, path = verify_precommit_framework(workspace, spec)
+        return HookCheckResult(ok, path)
 
     def safe_uninstall(self, workspace: Path, spec: HookSpec) -> Tuple[bool, str]:
         return uninstall_precommit_framework(workspace, spec)

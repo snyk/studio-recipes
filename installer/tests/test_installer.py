@@ -1586,6 +1586,68 @@ class TestManifest:
 
 
 # ===========================================================================
+# TestDisplayHelpers
+# ===========================================================================
+
+
+class TestDisplayHelpers:
+    @pytest.fixture
+    def manifest(self):
+        return installer.Manifest(INSTALLER_DIR / "manifest.json")
+
+    def test_workspace_only_plan_omits_ades(self, manifest, tmp_path, capsys):
+        installer.show_plan(
+            ["cursor", "claude"],
+            ["secrets-precommit-hook"],
+            "experimental",
+            manifest,
+            tmp_path,
+        )
+
+        output = capsys.readouterr().out
+        assert "ADEs:" not in output
+        assert "Workspace:" in output
+        assert "workspace ->" in output
+
+    def test_workspace_only_summary_omits_ades(self, manifest, capsys):
+        installer.print_summary(["cursor"], ["secrets-precommit-hook"], False, manifest)
+
+        output = capsys.readouterr().out
+        assert "Recipes: 1" in output
+        assert "ADEs:" not in output
+
+    def test_ade_summary_keeps_only_ade_targets_with_sources(self, manifest, capsys):
+        installer.print_summary(["cursor", "kiro"], ["sai-hooks-async"], False, manifest)
+
+        output = capsys.readouterr().out
+        assert "ADEs:    cursor" in output
+        assert "kiro" not in output
+
+    def test_ade_plan_omits_missing_source_targets(self, manifest, capsys):
+        installer.show_plan(["kiro"], ["sai-hooks-async"], "default", manifest, None)
+
+        output = capsys.readouterr().out
+        assert "ADEs:" not in output
+        assert "kiro ->" not in output
+
+    def test_ade_plan_omits_sources_with_no_installable_entries(
+        self, manifest, capsys, monkeypatch
+    ):
+        monkeypatch.setattr(manifest, "is_workspace_scoped", lambda _: False)
+        monkeypatch.setattr(
+            manifest,
+            "get_sources",
+            lambda _, __: {"legacy_files": [{"dest": "old-config.json"}]},
+        )
+
+        installer.show_plan(["cursor"], ["fixture-recipe"], "default", manifest, None)
+
+        output = capsys.readouterr().out
+        assert "ADEs:" not in output
+        assert "cursor ->" not in output
+
+
+# ===========================================================================
 # TestValidateRecipeSelection
 # ===========================================================================
 

@@ -2775,6 +2775,30 @@ def uninstall(
 # =============================================================================
 
 
+def _has_installable_sources(sources: Dict[str, Any]) -> bool:
+    """Return whether an ADE source entry has anything the installer applies."""
+    return bool(sources.get("files") or sources.get("config_merge") or sources.get("transforms"))
+
+
+def _ade_install_targets(ades: List[str], recipes: List[str], manifest: Manifest) -> List[str]:
+    """Return ADEs that have at least one selected recipe to install.
+
+    ADE detection happens before recipe resolution is displayed, and a
+    workspace-only selection can therefore have an otherwise irrelevant ADE
+    list. Keep the plan and completion summary focused on actual ADE-scoped
+    installs, including when a recipe has no source for a selected ADE.
+    """
+    return [
+        ade
+        for ade in ades
+        if any(
+            not manifest.is_workspace_scoped(recipe_id)
+            and _has_installable_sources(manifest.get_sources(recipe_id, ade))
+            for recipe_id in recipes
+        )
+    ]
+
+
 def print_banner() -> None:
     print(C.cyan(C.bold("")))
     print(C.cyan("  " + "\u2554" + "\u2550" * 56 + "\u2557"))
@@ -2790,15 +2814,17 @@ def show_plan(
     manifest: Manifest,
     workspace: Optional[Path],
 ) -> None:
+    ade_targets = _ade_install_targets(ades, recipes, manifest)
     print(f"  {C.bold('Installation Plan')}")
     print("  " + "\u2500" * 54)
     print(f"  Profile:  {C.cyan(profile)}")
-    print(f"  ADEs:     {C.cyan(' '.join(ades))}")
+    if ade_targets:
+        print(f"  ADEs:     {C.cyan(' '.join(ade_targets))}")
     if workspace is not None:
         print(f"  Workspace:{C.cyan(' ' + str(workspace))}")
     print()
 
-    for ade in ades:
+    for ade in ade_targets:
         ade_home = get_ade_home(ade)
         print(f"  {C.bold(ade)} -> {ade_home}/")
 
@@ -2806,7 +2832,7 @@ def show_plan(
             if manifest.is_workspace_scoped(recipe_id):
                 continue
             sources = manifest.get_sources(recipe_id, ade)
-            if sources.get("files") or sources.get("config_merge") or sources.get("transforms"):
+            if _has_installable_sources(sources):
                 desc = manifest.recipes[recipe_id]["description"]
                 print(f"    * {C.green(recipe_id)}: {desc}")
         print()
@@ -2829,13 +2855,15 @@ def show_plan(
     print()
 
 
-def print_summary(ades: List[str], recipes: List[str], dry_run: bool) -> None:
+def print_summary(ades: List[str], recipes: List[str], dry_run: bool, manifest: Manifest) -> None:
+    ade_targets = _ade_install_targets(ades, recipes, manifest)
     status = "[DRY RUN] " if dry_run else ""
     print()
     print(f"  {C.bold(f'{status}Installation complete')}")
     print("  " + "\u2500" * 54)
     print(f"  Recipes: {len(recipes)}")
-    print(f"  ADEs:    {', '.join(ades)}")
+    if ade_targets:
+        print(f"  ADEs:    {', '.join(ade_targets)}")
     print()
 
 
@@ -3196,7 +3224,7 @@ def main() -> None:
         if not all_ok:
             print(f"\n  {C.yellow('Some verifications failed. Check output above.')}")
 
-    print_summary(ades, recipes, args.dry_run)
+    print_summary(ades, recipes, args.dry_run, manifest)
 
 
 if __name__ == "__main__":

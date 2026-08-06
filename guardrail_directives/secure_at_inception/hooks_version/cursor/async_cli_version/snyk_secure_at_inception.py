@@ -582,27 +582,24 @@ def handle_session_start(data: Dict[str, Any], workspace: str) -> None:
         output_response({"followup_message": " ".join(message_parts)})
         return
 
-    # 4. All checks passed -- clear stale state on fresh sessions
+    # Cursor has no source field -- sessionStart only fires for a genuinely
+    # new conversation, so always clear state and (re)capture the baseline.
     log_to_panel("[SAI] Snyk authenticated, CLI found")
     if _LOG_FILE:
         _shared_log(f"SessionStart: studio v{STUDIO_VERSION}", _LOG_FILE)
-    source = data.get("source", "startup")
-    if source in ("startup", "clear"):
-        clear_state(workspace)
-        clear_baseline(workspace)
+    clear_state(workspace)
+    clear_baseline(workspace)
+    if launch_background_sca_baseline_scan(workspace):
+        log_to_panel("[SAI] SCA baseline scan launched")
+        save_manifest_hash_baseline(workspace, MANIFEST_FILES, MANIFEST_SUFFIXES)
+    else:
+        debug_log("SCA baseline scan not launched (already running or complete)")
 
-    # 5. Launch cache-warming scans (non-blocking, dedup built-in).
+    # SAST has no baseline concept -- always safe to warm.
     if launch_background_scan(workspace):
         log_to_panel("[SAI] Cache-warming scan launched")
     else:
         debug_log("Cache-warm scan not launched (already running or complete)")
-
-    # The SCA baseline scan result persists across Stop cycles — regular scans compare against it.
-    if launch_background_sca_baseline_scan(workspace):
-        log_to_panel("[SAI] Cache-warming SCA scan launched")
-        save_manifest_hash_baseline(workspace, MANIFEST_FILES, MANIFEST_SUFFIXES)
-    else:
-        debug_log("Cache-warm SCA scan not launched (already running or complete)")
 
     output_response({"exit_code": 0})
 
@@ -743,7 +740,10 @@ def _check_stop_preconditions(workspace: str) -> Tuple[Optional[Dict[str, Any]],
         )
 
         if not has_pending_changes(state) and not hash_changed_from_baseline:
-            debug_log("No pending changes")
+            log_to_panel(
+                f"[SAI] Stop: no pending changes (tracked files: {len(state.get('code_files', {}))}, "
+                f"manifest hashes changed vs baseline: {len(hash_changed_from_baseline)})"
+            )
             return {}, ctx
 
         stop_cycles = state.get("stop_cycles", 0)

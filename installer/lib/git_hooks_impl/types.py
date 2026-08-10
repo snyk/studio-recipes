@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, Literal, NamedTuple, Optional, Tuple
 
-HookIntegrationKind = Literal["pre-commit", "husky", "git-native"]
+HookIntegrationKind = Literal["pre-commit", "husky", "git-native", "git-native-global"]
 
 
 class HookIntegrationSkipped(Exception):

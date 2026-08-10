@@ -586,11 +586,61 @@ class TestResolveInstallPath:
         assert p == (workspace / "subdir" / "file.py").resolve()
 
     def test_absolute_dest_is_rejected(self, workspace):
-        with pytest.raises(SystemExit):
+        with pytest.raises(installer.ManifestDestError):
             installer.resolve_install_path(workspace, "/etc/passwd")
 
     def test_dest_escaping_workspace_is_rejected(self, workspace):
         # `..` segments resolve through the workspace boundary; the
         # containment check rejects the result.
-        with pytest.raises(SystemExit):
+        with pytest.raises(installer.ManifestDestError):
             installer.resolve_install_path(workspace, "../sibling/file.py")
+
+
+class TestBadManifestDestSkipsOnlyThatFile:
+    """A bad manifest ``dest`` must not crash the whole install/verify run -
+    only the offending file is skipped (with an ERROR printed); everything
+    else in the same recipe still installs and verifies normally."""
+
+    def _corrupt_one_file_dest(self, manifest, bad_dest: str) -> None:
+        files = manifest.recipes["secure-at-commit"]["sources"]["workspace"]["files"]
+        files.insert(0, {"src": files[0]["src"], "dest": bad_dest})
+
+    def test_install_skips_the_bad_file_and_prints_error_without_crashing(
+        self, workspace, manifest, payload, capsys
+    ):
+        self._corrupt_one_file_dest(manifest, "../escape.py")
+
+        installer.install_workspace_recipe(
+            "secure-at-commit", manifest, payload, workspace, dry_run=False
+        )
+
+        assert "ERROR" in capsys.readouterr().out
+        assert (workspace / SAC_DEST).is_file()
+
+    def test_verify_reports_missing_for_the_bad_file_without_crashing(
+        self, workspace, manifest, payload, capsys
+    ):
+        installer.install_workspace_recipe(
+            "secure-at-commit", manifest, payload, workspace, dry_run=False
+        )
+        self._corrupt_one_file_dest(manifest, "/etc/passwd")
+        capsys.readouterr()
+
+        ok = installer.verify_workspace_recipe("secure-at-commit", manifest, payload, workspace)
+
+        out = capsys.readouterr().out
+        assert ok is False
+        assert "ERROR" in out
+
+    def test_has_installed_secrets_hook_files_still_finds_a_later_valid_file(
+        self, workspace, manifest, payload
+    ):
+        """A bad dest in the *first* file entry must not abort the check
+        before the rest of the (legitimately installed) files are seen."""
+        installer.install_workspace_recipe(
+            "secrets-precommit-hook", manifest, payload, workspace, dry_run=False
+        )
+        files = manifest.recipes["secrets-precommit-hook"]["sources"]["workspace"]["files"]
+        files.insert(0, {"src": files[0]["src"], "dest": "/etc/passwd"})
+
+        assert installer._has_installed_secrets_hook_files(manifest, workspace) is True

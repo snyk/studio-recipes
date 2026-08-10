@@ -221,6 +221,27 @@ class GitNativeStrategy(HookStrategy):
 
 _CONFIG_SAFE_PASSTHROUGH_RE = re.compile(r"[A-Za-z0-9-]")
 
+# Shared by the local and global declarative-hook strategies below.
+_GIT_CONFIG_HOOKS_MIN_VERSION = (2, 54, 0)
+
+
+def _config_safe_tag(tag: str) -> str:
+    """Return *tag* as a safe, collision-free git config subsection name."""
+    chars = []
+    for ch in tag:
+        if _CONFIG_SAFE_PASSTHROUGH_RE.match(ch):
+            chars.append(ch)
+        else:
+            chars.extend(f"_{byte:02x}" for byte in ch.encode("utf-8"))
+    safe = "".join(chars)
+    if not safe or not safe[0].isalnum():
+        safe = f"h{safe}"
+    return safe
+
+
+def _hook_config_section(spec: HookSpec) -> str:
+    return f"hook.{_config_safe_tag(spec.tag)}"
+
 
 class ConfigBasedHookStrategy(GitNativeStrategy):
     """Git >= 2.54 declarative ``hook.<tag>.event``/``hook.<tag>.command`` config."""
@@ -229,25 +250,16 @@ class ConfigBasedHookStrategy(GitNativeStrategy):
 
     def check_prerequisite(self, workspace: Path) -> bool:
         version = _git_version(workspace)
-        return version is not None and version >= (2, 54, 0)
+        return version is not None and version >= _GIT_CONFIG_HOOKS_MIN_VERSION
 
     @staticmethod
     def _config_safe_tag(tag: str) -> str:
         """Return *tag* as a safe, collision-free git config subsection name."""
-        chars = []
-        for ch in tag:
-            if _CONFIG_SAFE_PASSTHROUGH_RE.match(ch):
-                chars.append(ch)
-            else:
-                chars.extend(f"_{byte:02x}" for byte in ch.encode("utf-8"))
-        safe = "".join(chars)
-        if not safe or not safe[0].isalnum():
-            safe = f"h{safe}"
-        return safe
+        return _config_safe_tag(tag)
 
     @classmethod
     def _section(cls, spec: HookSpec) -> str:
-        return f"hook.{cls._config_safe_tag(spec.tag)}"
+        return _hook_config_section(spec)
 
     def is_installed(self, workspace: Path, spec: HookSpec) -> HookCheckResult:
         section = self._section(spec)
@@ -280,6 +292,89 @@ class ConfigBasedHookStrategy(GitNativeStrategy):
         path = f"{section} (git config)"
         result = _run_git_safe(workspace, ["config", "--local", "--remove-section", section])
         return result is not None, path
+
+
+class GlobalConfigBasedHookStrategy:
+    """Git >= 2.54 declarative hook config at ``--global`` scope. No
+    workspace: fires for every repo this user's git touches, immune to a
+    repo's local ``core.hooksPath`` override.
+
+    ``hook.<tag>.event`` is multivalued, ``hook.<tag>.command`` is not::
+
+        [hook "snyk-secrets-at-commit-example"]
+            event = pre-commit
+            event = post-checkout
+            command = uv run script.py
+    """
+
+    integration_kind: ClassVar[HookIntegrationKind] = "git-native-global"
+
+    def check_prerequisite(self) -> bool:
+        version = _git_version(Path.cwd())
+        return version is not None and version >= _GIT_CONFIG_HOOKS_MIN_VERSION
+
+    def unavailable_reason(self) -> str:
+        version = _git_version(Path.cwd())
+        installed = ".".join(map(str, version)) if version is not None else "unknown"
+        min_version = ".".join(map(str, _GIT_CONFIG_HOOKS_MIN_VERSION))
+        return (
+            f"installed git ({installed}) does not support the declarative hook config "
+            f"the global installation mechanism needs; please upgrade to "
+            f"at least git {min_version}"
+        )
+
+    def is_installed(self, spec: HookSpec) -> HookCheckResult:
+        section = _hook_config_section(spec)
+        path = f"{section} (global git config)"
+        events_result = _run_git_safe(
+            Path.cwd(), ["config", "--global", "--get-all", f"{section}.event"]
+        )
+        command_result = _run_git_safe(
+            Path.cwd(), ["config", "--global", "--get", f"{section}.command"]
+        )
+        events = events_result.stdout if events_result is not None else ""
+        command = command_result.stdout.strip() if command_result is not None else None
+        # .event is multivalued, ensure at least one is pre-commit
+        ok = (
+            any(line.strip() == "pre-commit" for line in events.splitlines())
+            and command == spec.command
+        )
+        return HookCheckResult(ok, path)
+
+    def install(self, spec: HookSpec) -> Tuple[bool, str]:
+        """Returns (changed, path): changed=True if this call wrote new config."""
+        section = _hook_config_section(spec)
+        path = f"{section} (global git config)"
+        if self.is_installed(spec).installed:
+            return False, path
+        try:
+            # .event is multivalued, collapse to just pre-commit
+            _run_git_throws(
+                Path.cwd(),
+                ["config", "--global", "--replace-all", f"{section}.event", "pre-commit"],
+            )
+            _run_git_throws(Path.cwd(), ["config", "--global", f"{section}.command", spec.command])
+        except (OSError, subprocess.SubprocessError):
+            _run_git_safe(Path.cwd(), ["config", "--global", "--remove-section", section])
+            raise
+        return True, path
+
+    def safe_uninstall(self, spec: HookSpec) -> Tuple[bool, str]:
+        section = _hook_config_section(spec)
+        path = f"{section} (global git config)"
+        result = _run_git_safe(Path.cwd(), ["config", "--global", "--remove-section", section])
+        return result is not None, path
+
+    def is_tag_active(self, tag: str) -> bool:
+        """Whether *tag* has a global declarative hook, ignoring command
+        (unlike ``is_installed``)."""
+        section = f"hook.{_config_safe_tag(tag)}"
+        events_result = _run_git_safe(
+            Path.cwd(), ["config", "--global", "--get-all", f"{section}.event"]
+        )
+        events = events_result.stdout if events_result is not None else ""
+        # .event is multivalued - see class docstring.
+        return any(line.strip() == "pre-commit" for line in events.splitlines())
 
 
 def _is_shim_installed_at(hook_path: Optional[Path], spec: HookSpec) -> Tuple[bool, str]:

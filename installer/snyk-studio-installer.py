@@ -51,7 +51,7 @@ import sys
 import tempfile
 from pathlib import Path
 from subprocess import run
-from typing import Any, Dict, Iterator, List, Optional, Set, Tuple, cast
+from typing import Any, Callable, Dict, Iterator, List, NamedTuple, Optional, Set, Tuple, cast
 
 _INSTALLER_LIB_DIR = Path(__file__).resolve().parent / "lib"
 if str(_INSTALLER_LIB_DIR) not in sys.path:
@@ -74,7 +74,10 @@ BUNDLE_ENV = "SNYK_STUDIO_BUNDLE_ROOT"
 
 GLOBAL = "global"
 WORKSPACE = "workspace"
+# Distinct from GLOBAL (ADE-global vs. workspace-local rules/skills).
+GIT_GLOBAL = "git-global"
 SECRETS_HOOK_RECIPE_ID = "secrets-precommit-hook"
+SECRETS_HOOK_GLOBAL_RECIPE_ID = "secrets-precommit-hook-global"
 # The only profile under which --recipes may name an explicit selection.
 RECIPE_SELECTION_PROFILE = "experimental"
 
@@ -491,16 +494,46 @@ class Manifest:
                     print(f"  {C.yellow('NOTE')} skipping {conflict}: incompatible with {rid}")
                 active.discard(conflict)
 
-        return [r for r in all_ids if r in active]
+        return self.sorted_by_scope([r for r in all_ids if r in active])
 
     def is_workspace_scoped(self, recipe_id: str) -> bool:
         return bool(self.recipes.get(recipe_id, {}).get("scope") == "workspace")
+
+    def is_git_global_scoped(self, recipe_id: str) -> bool:
+        return bool(self.recipes.get(recipe_id, {}).get("scope") == GIT_GLOBAL)
+
+    def is_ade_scoped(self, recipe_id: str) -> bool:
+        return not (self.is_workspace_scoped(recipe_id) or self.is_git_global_scoped(recipe_id))
+
+    def sorted_by_scope(self, recipe_ids: List[str]) -> List[str]:
+        """Order *recipe_ids* git-global -> ADE-scoped -> workspace-scoped
+        (stable within each group) - the fixed install/verify/uninstall
+        order every call site needs, enforced once here instead of
+        re-derived at each one."""
+
+        def scope_rank(recipe_id: str) -> int:
+            if self.is_git_global_scoped(recipe_id):
+                return 0
+            if self.is_workspace_scoped(recipe_id):
+                return 2
+            return 1
+
+        return sorted(recipe_ids, key=scope_rank)
+
+    def filter_git_global_scoped(self, recipe_ids: List[str]) -> List[str]:
+        return [r for r in recipe_ids if self.is_git_global_scoped(r)]
+
+    def filter_ade_scoped(self, recipe_ids: List[str]) -> List[str]:
+        return [r for r in recipe_ids if self.is_ade_scoped(r)]
+
+    def filter_workspace_scoped(self, recipe_ids: List[str]) -> List[str]:
+        return [r for r in recipe_ids if self.is_workspace_scoped(r)]
 
     def get_sources(self, recipe_id: str, ade: str) -> Dict[str, Any]:
         return cast(Dict[str, Any], self.recipes.get(recipe_id, {}).get("sources", {}).get(ade, {}))
 
     def all_recipe_ids(self) -> List[str]:
-        return list(self.recipes.keys())
+        return self.sorted_by_scope(list(self.recipes.keys()))
 
     def prerequisite_version(self, name: str) -> Optional[str]:
         """Return the pinned version string for a prerequisite, or None if unset."""
@@ -1746,6 +1779,10 @@ def resolve_workspace(workspace_arg: Optional[str]) -> Optional[Path]:
     return find_git_root(Path.cwd())
 
 
+class ManifestDestError(Exception):
+    """A manifest ``dest`` is absolute, or resolves outside its install root."""
+
+
 def resolve_install_path(workspace: Path, dest: str) -> Path:
     """Resolve a manifest ``dest`` path under *workspace* with a containment check.
 
@@ -1757,25 +1794,20 @@ def resolve_install_path(workspace: Path, dest: str) -> Path:
       2. acts as an explicit sanitizer for static analysis — *workspace* may
          have arrived via ``--workspace`` (CLI input), and the
          ``relative_to`` check launders the taint for downstream file ops.
+
+    Raises ``ManifestDestError`` rather than exiting - callers catch it so one
+    bad manifest entry skips only that file, not the whole install run.
     """
     rel = Path(dest)
     if rel.is_absolute():
-        print(
-            f"  {C.red('ERROR')} manifest dest must be workspace-relative: {dest!r}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        raise ManifestDestError(f"manifest dest must be workspace-relative: {dest!r}")
 
     base = workspace.resolve()
     candidate = (base / rel).resolve()
     try:
         candidate.relative_to(base)
     except ValueError:
-        print(
-            f"  {C.red('ERROR')} manifest dest escapes workspace: {dest!r}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        raise ManifestDestError(f"manifest dest escapes workspace: {dest!r}") from None
     return candidate
 
 
@@ -1791,15 +1823,51 @@ def _display_path(p: Path, workspace: Path) -> str:
         return str(p)
 
 
-def expand_install_tokens(s: str, workspace: Path) -> str:
-    """Replace ``$WORKSPACE`` with the absolute workspace path.
+def _reject_embedded_quote(label: str, value: str) -> str:
+    """*value* is spliced into a command string the manifest already wraps
+    in double quotes; a literal ``"`` in it would break out of that quoting."""
+    if '"' in value:
+        raise RuntimeError(f"{label} contains a literal '\"' character: {value!r}")
+    return value
+
+
+def expand_install_tokens(s: str, workspace: Optional[Path]) -> str:
+    """Replace ``$WORKSPACE``/``$HOME`` with their absolute paths.
 
     Used when materialising a ``pre_commit_integration.command`` string so the
-    shim doesn't depend on shell variable expansion at git-hook time. Recipes
-    can still use workspace-relative commands when generated hook files should
-    stay portable after being committed.
+    shim doesn't depend on shell variable expansion at git-hook time.
+    ``$WORKSPACE`` only expands when *workspace* is given (workspace-scoped
+    recipes); ``$HOME`` always expands, since a machine-wide git-global hook
+    is installed for this specific user regardless of workspace.
     """
-    return s.replace("$WORKSPACE", str(workspace.resolve()))
+    s = s.replace("$HOME", _reject_embedded_quote("$HOME", str(Path.home())))
+    if workspace is not None:
+        s = s.replace("$WORKSPACE", _reject_embedded_quote("$WORKSPACE", str(workspace.resolve())))
+    return s
+
+
+def studio_root() -> Path:
+    """The same ``~/.snyk-studio`` used by ``device_id_path``/``cli_path``."""
+    return Path.home() / ".snyk-studio"
+
+
+def resolve_studio_install_path(dest: str) -> Path:
+    """Resolve a manifest ``dest`` path under ``studio_root()``.
+
+    Raises ``ManifestDestError`` rather than exiting - same contract as
+    ``resolve_install_path``.
+    """
+    rel = Path(dest)
+    if rel.is_absolute():
+        raise ManifestDestError(f"manifest dest must be relative: {dest!r}")
+
+    base = studio_root().resolve()
+    candidate = (base / rel).resolve()
+    try:
+        candidate.relative_to(base)
+    except ValueError:
+        raise ManifestDestError(f"manifest dest escapes install root: {dest!r}") from None
+    return candidate
 
 
 def resolve_ade_path(ade: str, dest: str) -> Path:
@@ -1883,6 +1951,8 @@ def detect_ades() -> List[str]:
 def get_target_ades(
     target_ade: Optional[str],
     auto_yes: bool,
+    *,
+    required: bool = True,
 ) -> List[str]:
     if target_ade:
         return [target_ade]
@@ -1890,6 +1960,10 @@ def get_target_ades(
     detected = detect_ades()
     if detected:
         return detected
+
+    if not required:
+        print(f"  {C.yellow('NOTE')} no ADE detected; skipping ADE-scoped recipes for this run")
+        return []
 
     if auto_yes or not hasattr(sys.stdin, "isatty") or not sys.stdin.isatty():
         print(
@@ -2242,11 +2316,20 @@ def remove_legacy_workspace_files(sources: Dict[str, Any], workspace: Path, dry_
         return
 
     for f in legacy_files:
-        remove_file(resolve_install_path(workspace, f["dest"]), dry_run)
+        try:
+            dest = resolve_install_path(workspace, f["dest"])
+        except ManifestDestError as e:
+            print(f"    {C.red('ERROR')} {e}")
+            continue
+        remove_file(dest, dry_run)
 
     install_roots = set()
     for f in legacy_files:
-        dest = resolve_install_path(workspace, f["dest"])
+        try:
+            dest = resolve_install_path(workspace, f["dest"])
+        except ManifestDestError as e:
+            print(f"    {C.red('ERROR')} {e}")
+            continue
         try:
             rel = dest.relative_to(workspace.resolve())
         except ValueError:
@@ -2257,7 +2340,11 @@ def remove_legacy_workspace_files(sources: Dict[str, Any], workspace: Path, dry_
         if root.is_dir():
             remove_pycache_under(root, dry_run)
     for f in legacy_files:
-        dest = resolve_install_path(workspace, f["dest"])
+        try:
+            dest = resolve_install_path(workspace, f["dest"])
+        except ManifestDestError as e:
+            print(f"    {C.red('ERROR')} {e}")
+            continue
         remove_empty_parents(dest.parent, workspace, dry_run)
 
 
@@ -2293,31 +2380,70 @@ def _display_name_from_hook_tag(tag: str) -> str:
     return f"Snyk {words}" if tag.startswith("snyk-") else words
 
 
-def _pre_commit_integration_parts(pci: Dict[str, Any], workspace: Path) -> Tuple[str, str, str]:
-    """Build shared hook fields from a manifest pre-commit integration block.
+class PreCommitIntegrationParts(NamedTuple):
+    tag: str
+    command: str
+    name: str
 
-    The bundled manifest is tested to declare a display name for every hook,
-    but keep the installer tolerant of older/external manifests that predate
-    the field.
-    """
+
+def _pre_commit_integration_parts(
+    pci: Dict[str, Any], workspace: Optional[Path]
+) -> PreCommitIntegrationParts:
+    """Build shared hook fields from a manifest pre-commit integration block.
+    ``workspace=None`` means git-global scope: only ``$HOME`` expands."""
     tag = pci.get("tag", "snyk-secure-at-commit")
     command = expand_install_tokens(pci["command"], workspace)
     name = pci.get("name") or _display_name_from_hook_tag(tag)
-    return tag, command, name
+    return PreCommitIntegrationParts(tag, command, name)
 
 
-def _pre_commit_hook_spec(git_hooks: Any, pci: Dict[str, Any], workspace: Path) -> Any:
-    tag, command, name = _pre_commit_integration_parts(pci, workspace)
-    return git_hooks.HookSpec(tag=tag, command=command, name=name)
+def _pre_commit_hook_spec(git_hooks: Any, pci: Dict[str, Any], workspace: Optional[Path]) -> Any:
+    parts = _pre_commit_integration_parts(pci, workspace)
+    return git_hooks.HookSpec(tag=parts.tag, command=parts.command, name=parts.name)
+
+
+def _warn_if_local_install_double_fires_with_global(
+    git_hooks: Any, workspace: Path, spec: Any
+) -> None:
+    """Warn if *spec* installed locally would double-fire alongside an
+    active global hook of the same tag. Never blocks or skips the install."""
+    if git_hooks.local_install_double_fires_with_global(workspace, spec):
+        print(
+            f"    {C.yellow('WARNING')} a global hook for the same tag is also active - "
+            "commits will run the scan twice. Uninstall the local or global hook to avoid it."
+        )
 
 
 def _has_installed_secrets_hook_files(manifest: Manifest, workspace: Path) -> bool:
     sources = (
         manifest.recipes.get(SECRETS_HOOK_RECIPE_ID, {}).get("sources", {}).get("workspace", {})
     )
-    return any(
-        resolve_install_path(workspace, f["dest"]).exists() for f in sources.get("files", [])
+    for f in sources.get("files", []):
+        try:
+            dest = resolve_install_path(workspace, f["dest"])
+        except ManifestDestError as e:
+            print(f"    {C.red('ERROR')} {e}")
+            continue
+        if dest.exists():
+            return True
+    return False
+
+
+def _has_installed_git_global_hook_files(manifest: Manifest) -> bool:
+    sources = (
+        manifest.recipes.get(SECRETS_HOOK_GLOBAL_RECIPE_ID, {})
+        .get("sources", {})
+        .get("git-global", {})
     )
+    for f in sources.get("files", []):
+        try:
+            dest = resolve_studio_install_path(f["dest"])
+        except ManifestDestError as e:
+            print(f"    {C.red('ERROR')} {e}")
+            continue
+        if dest.exists():
+            return True
+    return False
 
 
 def _has_installed_workspace_hook_integration(
@@ -2330,6 +2456,18 @@ def _has_installed_workspace_hook_integration(
     git_hooks = _load_git_hooks(payload)
     spec = _pre_commit_hook_spec(git_hooks, pci, workspace)
     return bool(git_hooks.verify_hook(workspace, spec).found)
+
+
+def _has_installed_git_global_hook_integration(
+    manifest: Manifest, payload: PayloadContext, recipe_id: str
+) -> bool:
+    sources = manifest.recipes.get(recipe_id, {}).get("sources", {}).get("git-global", {})
+    pci = sources.get("pre_commit_integration")
+    if not pci:
+        return False
+    git_hooks = _load_git_hooks(payload)
+    spec = _pre_commit_hook_spec(git_hooks, pci, workspace=None)
+    return bool(git_hooks.verify_global_hook(spec).found)
 
 
 def resolve_verify_recipes(
@@ -2350,7 +2488,16 @@ def resolve_verify_recipes(
         )
     ):
         recipes.append(SECRETS_HOOK_RECIPE_ID)
-    return recipes
+    if SECRETS_HOOK_GLOBAL_RECIPE_ID not in recipes and (
+        _has_installed_git_global_hook_files(manifest)
+        or _has_installed_git_global_hook_integration(
+            manifest, payload, SECRETS_HOOK_GLOBAL_RECIPE_ID
+        )
+    ):
+        recipes.append(SECRETS_HOOK_GLOBAL_RECIPE_ID)
+    # The appends above land at the end regardless of scope; re-sort so the
+    # fixed group order still holds for the recipes they add.
+    return manifest.sorted_by_scope(recipes)
 
 
 def install_workspace_recipe(
@@ -2373,13 +2520,21 @@ def install_workspace_recipe(
     print(f"  {C.bold(f'[workspace] {recipe_id}')} -> {workspace}/")
 
     for f in sources.get("files", []):
+        try:
+            dest = resolve_install_path(workspace, f["dest"])
+        except ManifestDestError as e:
+            print(f"    {C.red('ERROR')} {e}")
+            continue
         src = payload.resolve_src(f["src"])
-        dest = resolve_install_path(workspace, f["dest"])
         copy_file(src, dest, dry_run)
 
     for t in sources.get("transforms", []):
+        try:
+            dest = resolve_install_path(workspace, t["dest"])
+        except ManifestDestError as e:
+            print(f"    {C.red('ERROR')} {e}")
+            continue
         src = payload.resolve_src(t["src"])
-        dest = resolve_install_path(workspace, t["dest"])
         apply_transform(t["type"], src, dest, payload, dry_run)
 
     pci = sources.get("pre_commit_integration")
@@ -2400,10 +2555,15 @@ def install_workspace_recipe(
                     print(f"    {C.green('hook installed')} {label}")
                 else:
                     print(f"    {C.dim('hook unchanged: ' + label)}")
+                _warn_if_local_install_double_fires_with_global(git_hooks, workspace, spec)
 
     # chmod +x on Python files (covers both workspace-local and user-data dests)
     for f in sources.get("files", []):
-        dest = resolve_install_path(workspace, f["dest"])
+        try:
+            dest = resolve_install_path(workspace, f["dest"])
+        except ManifestDestError as e:
+            print(f"    {C.red('ERROR')} {e}")
+            continue
         if dest.suffix == ".py" and dest.exists() and not _IS_WINDOWS and not dry_run:
             try:
                 dest.chmod(0o755)
@@ -2430,7 +2590,12 @@ def verify_workspace_recipe(
     ok = True
 
     for f in sources.get("files", []):
-        dest = resolve_install_path(workspace, f["dest"])
+        try:
+            dest = resolve_install_path(workspace, f["dest"])
+        except ManifestDestError as e:
+            print(f"    {C.red('ERROR')} {e}")
+            ok = False
+            continue
         label = _display_path(dest, workspace)
         if dest.exists():
             print(f"    {C.green('OK')} {label}")
@@ -2448,6 +2613,7 @@ def verify_workspace_recipe(
             print(
                 f"    {C.green('OK')} pre-commit shim present ({verification.kind}: {shim_label})"
             )
+            _warn_if_local_install_double_fires_with_global(git_hooks, workspace, spec)
         else:
             where = f" ({verification.path})" if verification.path else ""
             why = f" - {verification.reason}" if verification.reason else ""
@@ -2491,27 +2657,21 @@ def uninstall_workspace_recipe(
     transforms = sources.get("transforms", [])
 
     for f in files:
-        remove_file(resolve_install_path(workspace, f["dest"]), dry_run)
-    for t in transforms:
-        remove_file(resolve_install_path(workspace, t["dest"]), dry_run)
-
-    # Remove pycache + empty parents under each top-level install root within
-    # the workspace.
-    install_roots = set()
-    for f in files:
-        dest = resolve_install_path(workspace, f["dest"])
         try:
-            rel = dest.relative_to(workspace.resolve())
-        except ValueError:
+            dest = resolve_install_path(workspace, f["dest"])
+        except ManifestDestError as e:
+            print(f"    {C.red('ERROR')} {e}")
             continue
-        if rel.parts:
-            install_roots.add(workspace / rel.parts[0])
-    for root in install_roots:
-        if root.is_dir():
-            remove_pycache_under(root, dry_run)
-    for f in files:
-        dest = resolve_install_path(workspace, f["dest"])
-        remove_empty_parents(dest.parent, workspace, dry_run)
+        remove_file(dest, dry_run)
+    for t in transforms:
+        try:
+            dest = resolve_install_path(workspace, t["dest"])
+        except ManifestDestError as e:
+            print(f"    {C.red('ERROR')} {e}")
+            continue
+        remove_file(dest, dry_run)
+
+    _cleanup_install_tree(files, lambda d: resolve_install_path(workspace, d), workspace, dry_run)
 
     # Also clear any tree left by an older installer version (different dest).
     remove_legacy_workspace_files(sources, workspace, dry_run)
@@ -2523,6 +2683,170 @@ def _snyk_command_for_selection(selected_snyk_cli: Optional[SnykCliSelection]) -
         path: str = selected_snyk_cli.path
         return path
     return "snyk"
+
+
+def _cleanup_install_tree(
+    files: List[Dict[str, Any]], resolve_dest: Callable[[str], Path], root: Path, dry_run: bool
+) -> None:
+    """Remove ``__pycache__`` dirs and empty parent directories left behind
+    under *root* after removing *files*."""
+    install_roots = set()
+    for f in files:
+        try:
+            dest = resolve_dest(f["dest"])
+        except ManifestDestError as e:
+            print(f"    {C.red('ERROR')} {e}")
+            continue
+        try:
+            rel = dest.relative_to(root.resolve())
+        except ValueError:
+            continue
+        if rel.parts:
+            install_roots.add(root / rel.parts[0])
+    for install_root in install_roots:
+        if install_root.is_dir():
+            remove_pycache_under(install_root, dry_run)
+    for f in files:
+        try:
+            dest = resolve_dest(f["dest"])
+        except ManifestDestError as e:
+            print(f"    {C.red('ERROR')} {e}")
+            continue
+        remove_empty_parents(dest.parent, root, dry_run)
+
+
+def install_git_global_recipe(
+    recipe_id: str,
+    manifest: Manifest,
+    payload: PayloadContext,
+    dry_run: bool,
+) -> None:
+    """Install a recipe from its ``git-global`` sources: files go under
+    ``studio_root()``, and any ``pre_commit_integration`` is wired up
+    via ``git_hooks.install_global_hook`` (git >= 2.54, no fallback)."""
+    sources = manifest.recipes.get(recipe_id, {}).get("sources", {}).get("git-global", {})
+    if not sources:
+        return
+
+    print(f"  {C.bold(f'[git-global] {recipe_id}')} -> {studio_root()}/")
+
+    for f in sources.get("files", []):
+        try:
+            dest = resolve_studio_install_path(f["dest"])
+        except ManifestDestError as e:
+            print(f"    {C.red('ERROR')} {e}")
+            continue
+        src = payload.resolve_src(f["src"])
+        copy_file(src, dest, dry_run)
+        if dest.suffix == ".py" and dest.exists() and not _IS_WINDOWS and not dry_run:
+            try:
+                dest.chmod(0o755)
+            except OSError:
+                pass
+
+    pci = sources.get("pre_commit_integration")
+    if pci:
+        parts = _pre_commit_integration_parts(pci, workspace=None)
+        if dry_run:
+            git_hooks = _load_git_hooks(payload)
+            spec = _pre_commit_hook_spec(git_hooks, pci, workspace=None)
+            section = git_hooks.global_hook_config_section(spec)
+            message = f"would write global git config {section}.* ({parts.tag}): {parts.command}"
+            print(f"    {C.dim(f'[dry-run] {message}')}")
+        else:
+            git_hooks = _load_git_hooks(payload)
+            spec = _pre_commit_hook_spec(git_hooks, pci, workspace=None)
+            try:
+                integration_kind, installed, path = git_hooks.install_global_hook(spec)
+            except (FileNotFoundError, git_hooks.HookIntegrationSkipped) as e:
+                print(f"    {C.red('ERROR')} pre-commit integration skipped: {e}")
+            else:
+                label = f"{integration_kind} -> {path}"
+                if installed:
+                    print(f"    {C.green('hook installed')} {label}")
+                else:
+                    print(f"    {C.dim('hook unchanged: ' + label)}")
+
+
+def verify_git_global_recipe(
+    recipe_id: str,
+    manifest: Manifest,
+    payload: PayloadContext,
+) -> bool:
+    sources = manifest.recipes.get(recipe_id, {}).get("sources", {}).get("git-global", {})
+    if not sources:
+        return True
+
+    print(f"  {C.bold(f'[git-global] {recipe_id}')}")
+    ok = True
+    root = studio_root()
+
+    for f in sources.get("files", []):
+        try:
+            dest = resolve_studio_install_path(f["dest"])
+        except ManifestDestError as e:
+            print(f"    {C.red('ERROR')} {e}")
+            ok = False
+            continue
+        label = _display_path(dest, root)
+        if dest.exists():
+            print(f"    {C.green('OK')} {label}")
+        else:
+            print(f"    {C.red('MISSING')} {label}")
+            ok = False
+
+    pci = sources.get("pre_commit_integration")
+    if pci:
+        git_hooks = _load_git_hooks(payload)
+        spec = _pre_commit_hook_spec(git_hooks, pci, workspace=None)
+        verification = git_hooks.verify_global_hook(spec)
+        if verification.found:
+            shim_label = _display_path(Path(verification.path), root)
+            print(
+                f"    {C.green('OK')} pre-commit shim present ({verification.kind}: {shim_label})"
+            )
+        else:
+            where = f" ({verification.path})" if verification.path else ""
+            why = f" - {verification.reason}" if verification.reason else ""
+            print(f"    {C.red('MISSING')} pre-commit shim ({verification.kind}){where}{why}")
+            ok = False
+    return ok
+
+
+def uninstall_git_global_recipe(
+    recipe_id: str,
+    manifest: Manifest,
+    payload: PayloadContext,
+    dry_run: bool,
+) -> None:
+    """Mirrors ``uninstall_workspace_recipe``, for git-global scope."""
+    sources = manifest.recipes.get(recipe_id, {}).get("sources", {}).get("git-global", {})
+    if not sources:
+        return
+
+    print(f"  {C.bold(f'[git-global] {recipe_id}')}")
+
+    pci = sources.get("pre_commit_integration")
+    if pci:
+        parts = _pre_commit_integration_parts(pci, workspace=None)
+        if dry_run:
+            print(f"    {C.dim(f'[dry-run] pre-commit unintegrate ({parts.tag})')}")
+        else:
+            git_hooks = _load_git_hooks(payload)
+            spec = _pre_commit_hook_spec(git_hooks, pci, workspace=None)
+            integration_kind, removed, path = git_hooks.uninstall_global_hook(spec)
+            if removed:
+                print(f"    {C.green('hook removed:')} {integration_kind} -> {path}")
+
+    files = sources.get("files", [])
+    for f in files:
+        try:
+            dest = resolve_studio_install_path(f["dest"])
+        except ManifestDestError as e:
+            print(f"    {C.red('ERROR')} {e}")
+            continue
+        remove_file(dest, dry_run)
+    _cleanup_install_tree(files, resolve_studio_install_path, studio_root(), dry_run)
 
 
 def _resolve_mcp_snyk_selection(
@@ -2836,13 +3160,20 @@ def uninstall(
     print(f"  {C.bold('Uninstalling Snyk recipes...')}")
     print()
 
+    # Uninstall git-global recipes first, matching install-time ordering.
+    git_global_recipes = manifest.filter_git_global_scoped(manifest.all_recipe_ids())
+    if git_global_recipes:
+        print(f"  {C.bold('git-global')} ({studio_root()}/):")
+        for recipe_id in git_global_recipes:
+            uninstall_git_global_recipe(recipe_id, manifest, payload, dry_run)
+        print()
+
+    ade_scoped_recipes = manifest.filter_ade_scoped(manifest.all_recipe_ids())
     for ade in ades:
         ade_home = get_ade_home(ade)
         print(f"  {C.bold(ade)} ({ade_home}/):")
 
-        for recipe_id in manifest.all_recipe_ids():
-            if manifest.is_workspace_scoped(recipe_id):
-                continue
+        for recipe_id in ade_scoped_recipes:
             uninstall_ade_recipe(recipe_id, ade, manifest, payload, dry_run)
 
         print()
@@ -2850,9 +3181,7 @@ def uninstall(
     # Workspace-scoped recipes are installed once per workspace regardless of
     # how many ADEs were targeted, so uninstall them once too — after the
     # per-ADE pass so a single ADE picked at install time is enough to clean up.
-    workspace_recipes = [
-        rid for rid in manifest.all_recipe_ids() if manifest.is_workspace_scoped(rid)
-    ]
+    workspace_recipes = manifest.filter_workspace_scoped(manifest.all_recipe_ids())
     if workspace_recipes:
         if workspace is None:
             print(
@@ -2921,20 +3250,27 @@ def show_plan(
         print(f"  Workspace:{C.cyan(' ' + str(workspace))}")
     print()
 
+    git_global_recipes = manifest.filter_git_global_scoped(recipes)
+    if git_global_recipes:
+        print(f"  {C.bold('git-global')} -> {studio_root()}/")
+        for recipe_id in git_global_recipes:
+            desc = manifest.recipes[recipe_id]["description"]
+            print(f"    * {C.green(recipe_id)}: {desc}")
+        print()
+
+    ade_scoped_recipes = manifest.filter_ade_scoped(recipes)
     for ade in ade_targets:
         ade_home = get_ade_home(ade)
         print(f"  {C.bold(ade)} -> {ade_home}/")
 
-        for recipe_id in recipes:
-            if manifest.is_workspace_scoped(recipe_id):
-                continue
+        for recipe_id in ade_scoped_recipes:
             sources = manifest.get_sources(recipe_id, ade)
             if _has_installable_sources(sources):
                 desc = manifest.recipes[recipe_id]["description"]
                 print(f"    * {C.green(recipe_id)}: {desc}")
         print()
 
-    workspace_recipes = [r for r in recipes if manifest.is_workspace_scoped(r)]
+    workspace_recipes = manifest.filter_workspace_scoped(recipes)
     if not workspace_recipes:
         return
     if workspace is None:
@@ -3092,32 +3428,34 @@ def main() -> None:
                 cli_path=args.cli_path,
             )
         print()
-        ades = get_target_ades(args.ade, args.yes)
         workspace = resolve_workspace(args.workspace)
         recipes = resolve_verify_recipes(manifest, payload, args.profile, workspace)
+        git_global_recipes = manifest.filter_git_global_scoped(recipes)
+        ade_scoped_recipes = manifest.filter_ade_scoped(recipes)
+        workspace_recipes = manifest.filter_workspace_scoped(recipes)
+        # Require ADEs only if this is an ADE-only install.
+        ades = (
+            get_target_ades(args.ade, args.yes, required=len(ade_scoped_recipes) == len(recipes))
+            if ade_scoped_recipes
+            else []
+        )
         all_ok = True
+        for recipe_id in git_global_recipes:
+            if not verify_git_global_recipe(recipe_id, manifest, payload):
+                all_ok = False
         for ade in ades:
-            for recipe_id in recipes:
-                if manifest.is_workspace_scoped(recipe_id):
-                    continue
+            for recipe_id in ade_scoped_recipes:
                 if not verify_recipe(
-                    recipe_id,
-                    ade,
-                    manifest,
-                    payload,
-                    selected_snyk_cli=selected_snyk_cli,
+                    recipe_id, ade, manifest, payload, selected_snyk_cli=selected_snyk_cli
                 ):
                     all_ok = False
-        for recipe_id in recipes:
-            if not manifest.is_workspace_scoped(recipe_id):
-                continue
+        for recipe_id in workspace_recipes:
             if workspace is None:
                 print(
                     f"  {C.yellow('NOTE')} skipping workspace-scoped {recipe_id}: "
                     "no workspace (pass --workspace or run inside a git repo)"
                 )
-                continue
-            if not verify_workspace_recipe(recipe_id, manifest, payload, workspace):
+            elif not verify_workspace_recipe(recipe_id, manifest, payload, workspace):
                 all_ok = False
         if all_ok:
             print(f"\n  {C.green('All checks passed.')}")
@@ -3143,17 +3481,17 @@ def main() -> None:
         _sync_selected_snyk_cli_sidecars(selected_snyk_cli, args.dry_run)
     print()
 
-    # ADE detection
-    ades = get_target_ades(args.ade, args.yes)
-
     # Workspace resolution for workspace-scoped recipes.
     # Explicit --workspace overrides everything; otherwise walk up from cwd
     # looking for a git repo; otherwise None (we'll skip workspace recipes
     # with a visible notice rather than guessing).
     workspace = resolve_workspace(args.workspace)
 
-    # Uninstall mode
+    # Uninstall mode. required=False: git-global and workspace-scoped
+    # uninstall don't need an ADE at all, and the ADE-scoped loop already
+    # no-ops for an empty list - not detecting one must not block the rest.
     if args.uninstall:
+        ades = get_target_ades(args.ade, args.yes, required=False)
         uninstall(ades, manifest, payload, workspace, args.dry_run)
         print(f"  {C.green('Uninstall complete.')}")
         return
@@ -3206,6 +3544,14 @@ def main() -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+    # Require ADEs only if this is an ADE-only install.
+    ade_scoped_recipes = manifest.filter_ade_scoped(recipes)
+    ades = (
+        get_target_ades(args.ade, args.yes, required=len(ade_scoped_recipes) == len(recipes))
+        if ade_scoped_recipes
+        else []
+    )
 
     show_plan(ades, recipes, args.profile, manifest, workspace)
 
@@ -3294,51 +3640,41 @@ def main() -> None:
             print(f"  {C.yellow('WARNING')} Conflicting skill(s) found for: {ade}")
             resolve_directive_conflicts(ade, "skills", "skill(s)")
 
-    # Install
+    git_global_recipes = manifest.filter_git_global_scoped(recipes)
+    workspace_recipes = manifest.filter_workspace_scoped(recipes)
+
+    # Install git-global recipes first, so a workspace install run in the
+    # same pass can see the git-global hook's install state.
+    for recipe_id in git_global_recipes:
+        install_git_global_recipe(recipe_id, manifest, payload, args.dry_run)
     for ade in ades:
-        for recipe_id in recipes:
-            if manifest.is_workspace_scoped(recipe_id):
-                continue
+        for recipe_id in ade_scoped_recipes:
             install_recipe(
-                recipe_id,
-                ade,
-                manifest,
-                payload,
-                args.dry_run,
-                selected_snyk_cli=selected_snyk_cli,
+                recipe_id, ade, manifest, payload, args.dry_run, selected_snyk_cli=selected_snyk_cli
             )
-    for recipe_id in recipes:
-        if not manifest.is_workspace_scoped(recipe_id):
-            continue
-        if workspace is None:
-            # show_plan already printed the skip notice; don't repeat it here.
-            continue
-        install_workspace_recipe(recipe_id, manifest, payload, workspace, args.dry_run)
+    # show_plan already printed the skip notice when workspace is None.
+    if workspace is not None:
+        for recipe_id in workspace_recipes:
+            install_workspace_recipe(recipe_id, manifest, payload, workspace, args.dry_run)
 
     # Post-install verification
     if not args.dry_run:
         print()
         print(f"  {C.bold('Verification')}")
         all_ok = True
+        for recipe_id in git_global_recipes:
+            if not verify_git_global_recipe(recipe_id, manifest, payload):
+                all_ok = False
         for ade in ades:
-            for recipe_id in recipes:
-                if manifest.is_workspace_scoped(recipe_id):
-                    continue
+            for recipe_id in ade_scoped_recipes:
                 if not verify_recipe(
-                    recipe_id,
-                    ade,
-                    manifest,
-                    payload,
-                    selected_snyk_cli=selected_snyk_cli,
+                    recipe_id, ade, manifest, payload, selected_snyk_cli=selected_snyk_cli
                 ):
                     all_ok = False
-        for recipe_id in recipes:
-            if not manifest.is_workspace_scoped(recipe_id):
-                continue
-            if workspace is None:
-                continue
-            if not verify_workspace_recipe(recipe_id, manifest, payload, workspace):
-                all_ok = False
+        if workspace is not None:
+            for recipe_id in workspace_recipes:
+                if not verify_workspace_recipe(recipe_id, manifest, payload, workspace):
+                    all_ok = False
         if not all_ok:
             print(f"\n  {C.yellow('Some verifications failed. Check output above.')}")
 

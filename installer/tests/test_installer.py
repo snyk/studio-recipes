@@ -1993,6 +1993,12 @@ class TestGetTargetAdes:
             installer.get_target_ades(None, auto_yes=True)
         assert "no ADE detected" in capsys.readouterr().err
 
+    def test_not_required_returns_empty_list_instead_of_exiting(self, monkeypatch, capsys):
+        monkeypatch.setattr(installer, "detect_ades", lambda: [])
+
+        assert installer.get_target_ades(None, auto_yes=True, required=False) == []
+        assert "no ADE detected" in capsys.readouterr().out
+
     def test_non_tty_stdin_exits_even_without_auto_yes(self, monkeypatch, capsys):
         # Non-interactive stdin + no ADE detected/specified: must fail fast,
         # not block on input(), even when auto_yes is False (e.g. --verify
@@ -2049,6 +2055,25 @@ class TestManifest:
         )
         assert recipes == ["secure-at-commit", "secrets-precommit-hook"]
 
+    def test_sorted_by_scope_orders_git_global_before_ade_before_workspace(self, manifest):
+        result = manifest.sorted_by_scope(
+            ["secure-at-commit", "mcp-config", "secrets-precommit-hook-global"]
+        )
+        assert result == ["secrets-precommit-hook-global", "mcp-config", "secure-at-commit"]
+
+    def test_resolve_recipes_orders_by_scope_regardless_of_selection_order(self, manifest):
+        # Typed workspace, git-global, ADE - output must still come out
+        # git-global -> ADE -> workspace.
+        recipes = manifest.resolve_recipes(
+            "experimental",
+            ["secure-at-commit", "secrets-precommit-hook-global", "mcp-config"],
+        )
+        assert recipes == ["secrets-precommit-hook-global", "mcp-config", "secure-at-commit"]
+
+    def test_all_recipe_ids_orders_git_global_before_workspace(self, manifest):
+        ids = manifest.all_recipe_ids()
+        assert ids.index("secrets-precommit-hook-global") < ids.index("secure-at-commit")
+
     def test_selection_narrows_the_profile_to_one_member(self, manifest):
         assert manifest.resolve_recipes("experimental", ["secure-at-commit"]) == [
             "secure-at-commit"
@@ -2057,7 +2082,10 @@ class TestManifest:
     def test_unprofiled_recipes_is_pinned(self, manifest):
         # A recipe left out of every profile silently becomes user-selectable,
         # so adding one has to be a deliberate decision rather than an omission.
-        assert manifest.unprofiled_recipes() == ["secrets-precommit-hook"]
+        assert manifest.unprofiled_recipes() == [
+            "secrets-precommit-hook",
+            "secrets-precommit-hook-global",
+        ]
 
     def test_unprofiled_recipes_empty_when_a_profile_lists_everything(self, manifest, monkeypatch):
         monkeypatch.setitem(manifest.profiles, "everything", {"recipes": ["*"]})
@@ -2065,7 +2093,7 @@ class TestManifest:
 
     def test_nameable_recipes_under_experimental(self, manifest):
         # Every recipe but the Secure at Inception hooks: the profile's own
-        # members plus the unprofiled secrets hook.
+        # members plus the unprofiled secrets hooks (local + global).
         assert manifest.nameable_recipes("experimental") == [
             "snyk-fix-command",
             "snyk-batch-fix-command",
@@ -2073,6 +2101,7 @@ class TestManifest:
             "mcp-config",
             "secure-at-commit",
             "secrets-precommit-hook",
+            "secrets-precommit-hook-global",
             "secure-dependency-health-check-skill",
         ]
 
@@ -2650,6 +2679,24 @@ class TestRecipeSelectionInMain:
 
         assert "skipping workspace-scoped recipes: secure-at-commit" in capsys.readouterr().out
 
+    def test_git_global_only_selection_does_not_require_an_ade(self, monkeypatch, manifest, capsys):
+        """A pure git-global recipe selection must install even when this
+        machine has no ADE and none was passed - get_target_ades must never
+        even be called."""
+        args = self._args(recipes=["secrets-precommit-hook-global"], ade=None)
+        self._stub_main(monkeypatch, manifest, args)
+
+        def _must_not_be_called(*_a, **_kw):
+            raise AssertionError(
+                "get_target_ades must not be called for a git-global-only selection"
+            )
+
+        monkeypatch.setattr(installer, "get_target_ades", _must_not_be_called)
+        monkeypatch.setattr(installer, "install_git_global_recipe", lambda *a, **kw: None)
+        monkeypatch.setattr(installer, "verify_git_global_recipe", lambda *a, **kw: True)
+
+        installer.main()
+
     def test_verify_notes_the_unused_selection_without_validating_it(
         self, monkeypatch, manifest, capsys
     ):
@@ -2676,6 +2723,24 @@ class TestRecipeSelectionInMain:
         assert "--uninstall does not use --recipes" in out
         assert "Uninstall complete" in out
         assert len(swept) == 1
+
+    def test_uninstall_does_not_require_an_ade(self, monkeypatch, manifest, capsys):
+        """--uninstall must still run (git-global/workspace cleanup) when no
+        ADE is detected or passed - only the ADE-scoped part is skipped."""
+        real_get_target_ades = installer.get_target_ades
+        args = self._args(uninstall=True, ade=None)
+        self._stub_main(monkeypatch, manifest, args)
+        monkeypatch.setattr(installer, "get_target_ades", real_get_target_ades)
+        monkeypatch.setattr(installer, "detect_ades", lambda: [])
+        captured: dict = {}
+        monkeypatch.setattr(
+            installer, "uninstall", lambda ades, *a, **kw: captured.setdefault("ades", ades)
+        )
+
+        installer.main()
+
+        assert captured["ades"] == []
+        assert "Uninstall complete" in capsys.readouterr().out
 
     def test_list_notes_the_unused_selection(self, monkeypatch, manifest, capsys):
         args = self._args(list_mode=True, profile="default", recipes=["bogus"])
@@ -2734,6 +2799,28 @@ class TestCopyFile:
         assert not dest.exists()
         captured = capsys.readouterr()
         assert "dry-run" in captured.out
+
+
+# ===========================================================================
+# TestExpandInstallTokens — $HOME/$WORKSPACE substitution in command strings
+# ===========================================================================
+
+
+class TestExpandInstallTokens:
+    def test_expands_home_and_workspace(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(installer.Path, "home", lambda: tmp_path)
+        result = installer.expand_install_tokens('uv run "$HOME/a.py" "$WORKSPACE/b.py"', tmp_path)
+        assert result == f'uv run "{tmp_path}/a.py" "{tmp_path}/b.py"'
+
+    def test_rejects_home_with_embedded_quote(self, monkeypatch):
+        monkeypatch.setattr(installer.Path, "home", lambda: Path('"/evil"'))
+        with pytest.raises(RuntimeError, match="\\$HOME"):
+            installer.expand_install_tokens('uv run "$HOME/a.py"', None)
+
+    def test_rejects_workspace_with_embedded_quote(self, tmp_path):
+        evil = tmp_path / '"evil"'
+        with pytest.raises(RuntimeError, match="\\$WORKSPACE"):
+            installer.expand_install_tokens('uv run "$WORKSPACE/a.py"', evil)
 
 
 # ===========================================================================
@@ -3637,6 +3724,7 @@ class TestConflictPromptAutoYes:
         m.are_skills_conflicting.return_value = False
         m.get_conflicting_resource_scope.return_value = []
         m.is_workspace_scoped.return_value = False
+        m.is_git_global_scoped.return_value = False
         return m
 
     def test_rules_conflict_auto_accepts_under_yes(self, monkeypatch, capsys):
@@ -3746,6 +3834,7 @@ class TestConflictResolutionPolicy:
         m.are_skills_conflicting.return_value = False
         m.get_conflicting_resource_scope.return_value = []
         m.is_workspace_scoped.return_value = False
+        m.is_git_global_scoped.return_value = False
         return m
 
     def _stub_main(self, monkeypatch, manifest, prompt_answers, ade="cursor"):

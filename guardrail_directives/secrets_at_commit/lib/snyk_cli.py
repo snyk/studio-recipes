@@ -67,10 +67,10 @@ def _debug(message: str) -> None:
         print(f"  [debug] {message}", file=sys.stderr)
 
 
-# The installer writes this file when invoked with --cli-path, pinning a
-# standalone Snyk CLI that is deliberately not on PATH. It has to win over PATH
-# probing: after a standalone install there may be no `snyk` on PATH at all, and
-# any `snyk` that is there is the npm CLI the user opted out of.
+# The installer writes this file for npm-managed and user-specified Snyk CLI
+# selections. It has to win over PATH probing: after a user-specified install
+# there may be no `snyk` on PATH at all, and any `snyk` that is there is not
+# the binary the user asked Studio to use.
 def _cli_path_sidecar() -> str:
     """Resolved per call, not at import, so `~` follows the caller's HOME."""
     return os.path.join(os.path.expanduser("~"), ".snyk-studio", "cli-path")
@@ -95,13 +95,14 @@ def _pin_problem(pinned: str) -> Optional[str]:
     a message, or None when it is usable."""
     if not pinned:
         return "is empty or unreadable"
-    if not os.path.isabs(pinned):
+    expanded = os.path.expanduser(pinned)
+    if not os.path.isabs(expanded):
         # A relative pin would resolve against the scan workspace -- a
         # snapshot of the very content being committed -- at exec time.
         return f'pins "{pinned}", which is not an absolute path'
-    if not os.path.isfile(pinned):
+    if not os.path.isfile(expanded):
         return f'pins "{pinned}", which does not exist'
-    if not os.access(pinned, os.X_OK):
+    if not os.access(expanded, os.X_OK):
         return f'pins "{pinned}", which is not executable'
     return None
 
@@ -113,7 +114,7 @@ def _snyk_cli_from_sidecar() -> Optional[str]:
         return None
     problem = _pin_problem(pinned)
     if problem is None:
-        return pinned
+        return os.path.abspath(os.path.expanduser(pinned))
     _debug(f"{_cli_path_sidecar()} {problem}")
     return None
 
@@ -147,8 +148,9 @@ def _augment_path_for_snyk(env: Dict[str, str]) -> None:
     pinned = _snyk_cli_from_sidecar()
     if pinned:
         # The scan execs the pin by absolute path, so this isn't for discovery:
-        # it stops a `snyk` the CLI shells out to reaching the npm CLI the user
-        # opted out of -- so the pin must lead PATH, not merely appear on it.
+        # it stops a `snyk` the CLI shells out to from reaching a different CLI
+        # than the installer-selected one -- so the pin must lead PATH, not
+        # merely appear on it.
         _prepend_to_path(env, os.path.dirname(pinned))
         return
     if shutil.which("snyk", path=env.get("PATH", "")):

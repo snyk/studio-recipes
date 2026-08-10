@@ -24,9 +24,9 @@ Options:
     --list                                     List available recipes and profiles
     --no-latest-deps                           Install pinned manifest dependency versions,
                                                upgrading only if missing or older than the pin
-    --cli-path <path>                          Use the standalone Snyk CLI at <path>. Skips all
-                                               Node.js/npm/nvm checks. If omitted, falls back to
-                                               npx (the default).
+    --cli-path <path>                          Use the user-specified Snyk CLI at <path>. Skips all
+                                               Node.js/npm/nvm checks. If omitted, uses a suitable
+                                               PATH Snyk CLI or asks to manage Snyk via npm.
     --recipes <a,b,c>                          Install exactly these recipes instead of the
                                                profile's own list (requires
                                                --profile experimental)
@@ -53,6 +53,21 @@ from pathlib import Path
 from subprocess import run
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple, cast
 
+_INSTALLER_LIB_DIR = Path(__file__).resolve().parent / "lib"
+if str(_INSTALLER_LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(_INSTALLER_LIB_DIR))
+
+from snyk_cli_selection import (  # noqa: E402
+    SNYK_CLI_SOURCE_NPM,  # noqa: F401 - re-exported for tests and installer callers
+    SNYK_CLI_SOURCE_PATH,
+    SNYK_CLI_SOURCE_USER_SPECIFIED,
+    SnykCliResolver,
+    SnykCliSelection,
+    absolute_cli_path,
+    cli_path_sidecar,
+    cli_source_sidecar,
+)
+
 # When set (by generated install.sh / install.ps1 / install.py), manifest and recipe sources
 # live under this directory (flat layout from the release zip).
 BUNDLE_ENV = "SNYK_STUDIO_BUNDLE_ROOT"
@@ -64,6 +79,7 @@ SECRETS_HOOK_RECIPE_ID = "secrets-precommit-hook"
 RECIPE_SELECTION_PROFILE = "experimental"
 
 _IS_WINDOWS = sys.platform == "win32"
+_SNYK_VERSION_RE = re.compile(r"(\d+\.\d+\.\d+)")
 
 # Windows-only setup:
 # - CREATE_NO_WINDOW suppresses the console window that would otherwise pop up
@@ -228,10 +244,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         dest="cli_path",
         metavar="PATH",
         help=(
-            "Path to a standalone Snyk CLI binary. When provided, skips all "
+            "Path to a user-specified Snyk CLI binary. When provided, skips all "
             "Node.js/npm/nvm checks and points MCP configs at this absolute "
-            "path instead of `npx snyk`. When omitted, the installer uses "
-            "npx (the default behavior)."
+            "path. When omitted, the installer uses a suitable Snyk CLI from "
+            "PATH or asks to manage Snyk via npm."
         ),
     )
     parser.add_argument(
@@ -1178,6 +1194,29 @@ def _get_node_version() -> Optional[tuple[int, ...]]:
     return tuple(int(x) for x in match.groups())
 
 
+def _parse_version_tuple(version: str) -> tuple[int, ...]:
+    return tuple(map(int, version.split(".")))
+
+
+def _snyk_version_tuple(version_output: str) -> Optional[tuple[int, ...]]:
+    match = _SNYK_VERSION_RE.match(version_output)
+    if not match:
+        return None
+    return _parse_version_tuple(match.group(1))
+
+
+def _snyk_version_below_minimum(
+    version_output: str,
+    minimum_version: Optional[str],
+) -> bool:
+    if not minimum_version:
+        return False
+    current = _snyk_version_tuple(version_output)
+    if current is None:
+        return False
+    return current < _parse_version_tuple(minimum_version)
+
+
 def _warn_if_node_outdated(
     auto_yes: bool, node_version: Optional[str], nvm_version: Optional[str] = None
 ) -> None:
@@ -1189,7 +1228,7 @@ def _warn_if_node_outdated(
     if not node_version:
         return
     try:
-        minimum = tuple(map(int, node_version.split(".")))
+        minimum = _parse_version_tuple(node_version)
     except ValueError:
         return
     current = _get_node_version()
@@ -1236,7 +1275,7 @@ def ensure_node_installed(
             return True
         # macOS/Linux: only accept the existing Node when global installs don't
         # need root; otherwise fall through to install a per-user Node via nvm.
-        if _npm_global_prefix_writable():
+        if _snyk_cli_resolver().npm_global_prefix_writable():
             _warn_if_node_outdated(auto_yes, node_version, nvm_version)
             return True
         print(
@@ -1263,44 +1302,8 @@ def ensure_node_installed(
     return _run_node_install_with_fallback(auto_yes, cmds, node_version, nvm_version)
 
 
-def _npm_global_prefix_writable() -> bool:
-    """Return True if the current user can write to npm's global install prefix.
-
-    Node installed via nvm lives under the user's home, so its global prefix is
-    writable and ``npm install -g`` works directly. A pre-existing system-wide
-    Node (e.g. ``/usr/bin/node``) usually has a root-owned prefix where a global
-    install would fail with EACCES. Probing the prefix lets ensure_node_installed
-    decide whether the existing Node is usable or a per-user Node must be
-    installed via nvm — the installer never escalates privileges.
-
-    Errs on the side of "writable" when the prefix can't be determined, so a
-    transient ``npm`` hiccup never triggers an unnecessary nvm install.
-    """
-    try:
-        r = run(
-            ["npm", "prefix", "-g"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            shell=_IS_WINDOWS,
-            creationflags=_CREATE_NO_WINDOW,
-        )
-    except Exception:
-        return True
-    stdout = getattr(r, "stdout", None)
-    prefix = stdout.strip() if isinstance(stdout, str) else ""
-    if not prefix:
-        return True
-    # npm creates lib/node_modules and bin under the prefix on demand, so test
-    # write access at the nearest existing ancestor of the prefix.
-    path = Path(prefix)
-    while not path.exists() and path != path.parent:
-        path = path.parent
-    return os.access(path, os.W_OK)
-
-
 def run_command(cmd: list[str], warn: str) -> int:
-    """Run the given command and return the exit code (increments warning count in check_prerequisites)."""
+    """Run the given command, printing ``warn`` and returning 1 on failure."""
     try:
         run(cmd, check=True, shell=_IS_WINDOWS, creationflags=_CREATE_NO_WINDOW)
         return 0
@@ -1309,78 +1312,93 @@ def run_command(cmd: list[str], warn: str) -> int:
         return 1
 
 
-def _cli_path_sidecar() -> Path:
-    """Return the ``~/.snyk-studio/cli-path`` path.
+def _snyk_cli_resolver() -> SnykCliResolver:
+    return SnykCliResolver(
+        runner=run,
+        is_windows=_IS_WINDOWS,
+        creationflags=_CREATE_NO_WINDOW,
+        find_win_npm_executable=_find_win_npm_executable,
+        cli_path_sidecar=cli_path_sidecar,
+        cli_source_sidecar=cli_source_sidecar,
+    )
 
-    Wrapped in a function (rather than a module-level constant) so tests can
-    monkeypatch it without evaluating ``Path.home()`` at import time.
+
+def _sync_selected_snyk_cli_sidecars(
+    selected_snyk_cli: Optional[SnykCliSelection],
+    dry_run: bool,
+) -> None:
+    """Write or clear Snyk CLI sidecars to reflect the selected CLI.
+
+    Installed SAI hooks read ``cli-path`` via
+    ``platform_utils.snyk_cli_from_sidecar`` to locate the pinned CLI without
+    relying on ``PATH``. Called only from install/uninstall runs so
+    ``--verify``/``--diag-dump``/``--list`` don't mutate installer state.
     """
-    return Path.home() / ".snyk-studio" / "cli-path"
-
-
-def _sync_cli_path_sidecar(cli_path: Optional[str], dry_run: bool) -> None:
-    """Write or clear ``~/.snyk-studio/cli-path`` to reflect ``--cli-path``.
-
-    Installed SAI hooks read this file via ``platform_utils.snyk_cli_from_sidecar``
-    to locate the pinned CLI without relying on ``PATH``. Called only from
-    install/uninstall runs so ``--verify``/``--diag-dump``/``--list`` don't
-    mutate installer state.
-    """
-    sidecar = _cli_path_sidecar()
+    if selected_snyk_cli is None or selected_snyk_cli.source == SNYK_CLI_SOURCE_PATH:
+        cli_path, source = None, None
+    else:
+        cli_path, source = selected_snyk_cli.path, selected_snyk_cli.source
+    sidecar = cli_path_sidecar()
     if dry_run:
         action = "write" if cli_path else "clear"
         print(f"    {C.dim(f'[dry-run] {action} sidecar: {sidecar}')}")
         return
+    _snyk_cli_resolver().sync_cli_sidecars(cli_path, source)
+
+
+def _read_only_selected_snyk_cli(cli_path: Optional[str]) -> Optional[SnykCliSelection]:
+    """Resolve the Snyk CLI contract for read-only verification.
+
+    ``--verify --read-only`` must not install or update prerequisites, but it
+    should still verify MCP config against the CLI source the installer would
+    use: explicit ``--cli-path`` first, then a pinned sidecar, then dynamic
+    PATH. The PATH probe requires a readable version, matching
+    ``check_prerequisites``'s own probe — otherwise a broken PATH ``snyk``
+    that a real install would reject (and route to npm instead) could still
+    read here as a usable PATH selection.
+    """
     if cli_path:
-        sidecar.parent.mkdir(parents=True, exist_ok=True)
-        sidecar.write_text(cli_path, encoding="utf-8")
-    else:
-        with contextlib.suppress(FileNotFoundError):
-            sidecar.unlink()
+        return SnykCliSelection(
+            absolute_cli_path(cli_path),
+            None,
+            SNYK_CLI_SOURCE_USER_SPECIFIED,
+        )
+    resolver = _snyk_cli_resolver()
+    return resolver.selected_snyk_cli_from_sidecar() or resolver.selected_snyk_cli_from_path(
+        require_version=True
+    )
 
 
-def _check_native_snyk(cli_path: str, snyk_version: Optional[str]) -> None:
-    """Verify the standalone Snyk CLI exists at ``cli_path`` and print its version.
+def _check_user_specified_snyk(cli_path: str, snyk_version: Optional[str]) -> SnykCliSelection:
+    """Verify the user-specified Snyk CLI exists at ``cli_path`` and print its version.
 
     Exits non-zero if the binary is missing or not executable. Version below
     the pinned minimum is a warning only — the installer cannot upgrade a
-    standalone binary itself.
+    user-specified binary itself.
     """
     if not (os.path.isfile(cli_path) and os.access(cli_path, os.X_OK)):
         print(
             f"  {C.red('ERROR')} --cli-path {cli_path} is not an executable file. "
-            f"Point --cli-path at a standalone Snyk CLI binary, or omit the flag "
-            f"to use npx."
+            f"Point --cli-path at a Snyk CLI binary, or omit the flag "
+            f"to use a suitable PATH Snyk CLI or npm-managed Snyk."
         )
         sys.exit(1)
 
-    try:
-        r = run(
-            [cli_path, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        snyk_ver_str = r.stdout.strip().splitlines()[0] if r.stdout else None
-    except Exception:
-        snyk_ver_str = None
+    snyk_ver_str = _snyk_cli_resolver().read_snyk_version(cli_path)
 
     if not snyk_ver_str:
         print(f"  {C.yellow('WARNING')} Snyk CLI at {cli_path} did not report a version")
-        return
+        return SnykCliSelection(cli_path, None, SNYK_CLI_SOURCE_USER_SPECIFIED)
 
-    match = re.match(r"(\d+\.\d+\.\d+)", snyk_ver_str)
-    if snyk_version and match:
-        current = tuple(map(int, match.group(1).split(".")))
-        minimum = tuple(map(int, snyk_version.split(".")))
-        if current < minimum:
-            print(
-                f"  {C.yellow('WARNING')} Snyk CLI {snyk_ver_str} at {cli_path} "
-                f"is older than the pinned minimum {snyk_version}. Upgrade the "
-                f"standalone binary manually."
-            )
-            return
+    if _snyk_version_below_minimum(snyk_ver_str, snyk_version):
+        print(
+            f"  {C.yellow('WARNING')} Snyk CLI {snyk_ver_str} at {cli_path} "
+            f"is older than the pinned minimum {snyk_version}. Upgrade the "
+            f"user-specified binary manually."
+        )
+        return SnykCliSelection(cli_path, snyk_ver_str, SNYK_CLI_SOURCE_USER_SPECIFIED)
     print(f"  {C.green('OK')} Snyk CLI {snyk_ver_str} ({cli_path})")
+    return SnykCliSelection(cli_path, snyk_ver_str, SNYK_CLI_SOURCE_USER_SPECIFIED)
 
 
 def check_prerequisites(
@@ -1390,7 +1408,7 @@ def check_prerequisites(
     no_latest_deps: bool = False,
     nvm_version: Optional[str] = None,
     cli_path: Optional[str] = None,
-) -> None:
+) -> Optional[SnykCliSelection]:
     """Check that the required prerequisites are installed and configured. If not, attempt to install them.
 
     ``snyk_version`` is the pinned Snyk CLI version from the manifest
@@ -1399,15 +1417,19 @@ def check_prerequisites(
     missing or older.
 
     When ``cli_path`` is set, skip all Node.js/npm/nvm checks and instead
-    verify the standalone Snyk CLI exists at that path. Errors out if missing.
+    verify the user-specified Snyk CLI exists at that path. Errors out if missing.
     """
 
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
     print(f"  {C.green('OK')} Python {py_ver}")
 
     if cli_path:
-        _check_native_snyk(cli_path, snyk_version)
-        return
+        return _check_user_specified_snyk(cli_path, snyk_version)
+
+    snyk_resolver = _snyk_cli_resolver()
+    sidecar_snyk = snyk_resolver.selected_snyk_cli_from_sidecar()
+    if sidecar_snyk and sidecar_snyk.source == SNYK_CLI_SOURCE_USER_SPECIFIED:
+        return _check_user_specified_snyk(sidecar_snyk.path, snyk_version)
 
     warnings = 0
 
@@ -1421,62 +1443,69 @@ def check_prerequisites(
             return f"snyk@{snyk_version}"
         return latest_label
 
-    def get_snyk_path():
-        return shutil.which("snyk") or _find_win_npm_executable("snyk")
+    def run_npm_snyk_install(pkg: str, action: str, warn: str) -> bool:
+        nonlocal warnings
+        if not ensure_node_installed(auto_yes, node_version, nvm_version):
+            warnings += 1
+            print(f"  {C.yellow('WARNING')} Node.js/npm is required to {action} Snyk CLI via npm.")
+            return False
+        install_warnings = run_command(get_npm_install_cmd(pkg), warn)
+        warnings += install_warnings
+        return install_warnings == 0
 
-    if not ensure_node_installed(auto_yes, node_version, nvm_version) and get_snyk_path():
-        print(f"  {C.red('ERROR')} Node.js is required to install Snyk CLI.")
-        warnings += 1
+    def handle_outdated_snyk(selected_snyk: SnykCliSelection, snyk_ver_str: str) -> bool:
+        """Warn that ``selected_snyk`` is outdated and offer to upgrade via npm.
 
-    def parse_version(x):
-        return tuple(map(int, x.split(".")))
-
-    minimum_snyk_version = parse_version(snyk_version) if snyk_version else None
-
-    # Probe the installed Snyk version. get_snyk_path() only confirms that a
-    # `snyk` entry resolves on PATH; actually executing it can still fail (a
-    # stale/broken shim, or a bin dir that became invalid after the Node/PATH
-    # refresh) with FileNotFoundError. Treat any such failure as "Snyk not
-    # usable" and fall through to (re)install it, mirroring how _get_node_version
-    # guards its own probe — never let the exception crash the installer.
-    snyk_ver_str: Optional[str] = None
-    if get_snyk_path():
-        try:
-            r = run(
-                ["snyk", "--version"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                shell=_IS_WINDOWS,
-                creationflags=_CREATE_NO_WINDOW,
+        A PATH-managed CLI additionally offers to switch to npm management
+        instead, since the installer can't upgrade a plain PATH binary in place.
+        Returns whether the npm install succeeded.
+        """
+        nonlocal warnings
+        target = "pinned" if no_latest_deps else "latest"
+        if selected_snyk.source == SNYK_CLI_SOURCE_PATH:
+            print(
+                f"  {C.yellow('WARNING')} Snyk CLI {snyk_ver_str} at "
+                f"{selected_snyk.path} is outdated (min: {snyk_version}). "
+                "Update that PATH-managed CLI, or switch to npm management?"
             )
-            snyk_ver_str = r.stdout.strip().splitlines()[0] if r.stdout else "unknown"
-        except Exception:
-            snyk_ver_str = None
+            use_npm = auto_yes or input("  Use npm? (y/n) ").strip().lower() in ("y", "yes")
+            if not use_npm:
+                warnings += 1
+                return False
+        else:
+            print(
+                f"  {C.yellow('WARNING')} Snyk CLI {snyk_ver_str} is outdated "
+                f"(min: {snyk_version}). Upgrade to {target}?"
+            )
+            if not auto_yes and input("  (y/n) ").strip().lower() not in ("y", "yes"):
+                sys.exit(1)
+        return run_npm_snyk_install(
+            snyk_pkg("snyk@latest"),
+            "upgrade",
+            f"  {C.yellow('WARNING')} Failed to upgrade Snyk CLI to {target} via npm",
+        )
+
+    minimum_snyk_version = _parse_version_tuple(snyk_version) if snyk_version else None
+
+    # Probe the selected Snyk CLI. Resolving a path only proves that a command
+    # exists; actually executing it can still fail because of a stale shim or
+    # invalid Node/PATH refresh. Treat that as "Snyk not usable" and fall
+    # through to (re)install it, mirroring how _get_node_version guards its own
+    # probe.
+    selected_snyk = sidecar_snyk or snyk_resolver.selected_snyk_cli_from_path(require_version=True)
+    snyk_ver_str = selected_snyk.version if selected_snyk else None
+    npm_install_succeeded = False
 
     if snyk_ver_str is not None:
-        match = re.match(r"(\d+\.\d+\.\d+)", snyk_ver_str)
-        if match:
-            current_version = parse_version(match.group(1))
+        current_version = _snyk_version_tuple(snyk_ver_str)
+        if current_version is not None:
             # Only (re)install when the installed Snyk is older than the
             # pin/minimum; an equal-or-newer build is left untouched in both
             # global and default mode.
-            if minimum_snyk_version is not None and current_version < minimum_snyk_version:
-                target = "pinned" if no_latest_deps else "latest"
-                print(
-                    f"  {C.yellow('WARNING')} Snyk CLI {snyk_ver_str} is outdated "
-                    f"(min: {snyk_version}). Upgrade to {target}?"
-                )
-                if not auto_yes:
-                    reply = input("  (y/n) ").strip().lower()
-                    if reply not in ("y", "yes"):
-                        sys.exit(1)
-                warnings += run_command(
-                    get_npm_install_cmd(snyk_pkg("snyk@latest")),
-                    f"  {C.yellow('WARNING')} Failed to upgrade Snyk CLI to {target} via npm",
-                )
-            else:
+            if minimum_snyk_version is None or current_version >= minimum_snyk_version:
                 print(f"  {C.green('OK')} Snyk CLI {snyk_ver_str}")
+            else:
+                npm_install_succeeded = handle_outdated_snyk(selected_snyk, snyk_ver_str)
     else:
         target = "pinned" if no_latest_deps and snyk_version else "latest"
         print(f"  {C.yellow('WARNING')} Snyk CLI not found, install {target} version?")
@@ -1484,15 +1513,46 @@ def check_prerequisites(
             reply = input("  (y/n) ").strip().lower()
             if reply not in ("y", "yes"):
                 sys.exit(1)
-        warnings += run_command(
-            get_npm_install_cmd(snyk_pkg("snyk")),
+        npm_install_succeeded = run_npm_snyk_install(
+            snyk_pkg("snyk"),
+            "install",
             f"  {C.yellow('WARNING')} Failed to install Snyk CLI via npm",
         )
+
+    if npm_install_succeeded:
+        # No require_version here: npm already reported success, so a binary
+        # exists at the expected path. Requiring a readable version too would
+        # drop this selection (and clear the sidecar pin) on a transient
+        # `--version` hiccup right after install, even though the CLI is
+        # genuinely there and npm-managed.
+        selected_snyk = snyk_resolver.selected_snyk_cli_from_npm_global()
+        if selected_snyk and selected_snyk.version:
+            print(f"  {C.green('OK')} Snyk CLI {selected_snyk.version} ({selected_snyk.path})")
+        elif selected_snyk:
+            print(
+                f"  {C.yellow('WARNING')} Snyk CLI installed via npm ({selected_snyk.path}) "
+                "but did not report a version"
+            )
+        else:
+            warnings += 1
+            print(f"  {C.yellow('WARNING')} Snyk CLI was installed but could not be resolved")
 
     if warnings > 0 and not auto_yes:
         reply = input("\n  Continue with warnings? (y/n) ").strip().lower()
         if reply not in ("y", "yes"):
             sys.exit(1)
+
+    return selected_snyk
+
+
+def _print_snyk_version_status(
+    snyk_ver_str: str, snyk_version: Optional[str], cli_path: Optional[str] = None
+) -> None:
+    if _snyk_version_below_minimum(snyk_ver_str, snyk_version):
+        print(f"  {C.yellow('WARNING')} Snyk CLI {snyk_ver_str} is outdated (min: {snyk_version})")
+    else:
+        suffix = f" ({cli_path})" if cli_path else ""
+        print(f"  {C.green('OK')} Snyk CLI {snyk_ver_str}{suffix}")
 
 
 def print_prerequisite_versions(
@@ -1510,9 +1570,6 @@ def print_prerequisite_versions(
     probed at that path instead of via PATH.
     """
 
-    def parse_version(x: str) -> tuple[int, ...]:
-        return tuple(map(int, x.split(".")))
-
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
     print(f"  {C.green('OK')} Python {py_ver}")
 
@@ -1520,32 +1577,17 @@ def print_prerequisite_versions(
         if not (os.path.isfile(cli_path) and os.access(cli_path, os.X_OK)):
             print(f"  {C.yellow('WARNING')} Snyk CLI not found at {cli_path}")
             return
-        try:
-            r = run(
-                [cli_path, "--version"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            snyk_ver_str = r.stdout.strip().splitlines()[0] if r.stdout else None
-        except Exception:
-            snyk_ver_str = None
+        snyk_ver_str = _snyk_cli_resolver().read_snyk_version(cli_path)
         if not snyk_ver_str:
             print(f"  {C.yellow('WARNING')} Snyk CLI at {cli_path} did not report a version")
             return
-        match = re.match(r"(\d+\.\d+\.\d+)", snyk_ver_str)
-        if snyk_version and match and parse_version(match.group(1)) < parse_version(snyk_version):
-            print(
-                f"  {C.yellow('WARNING')} Snyk CLI {snyk_ver_str} is outdated (min: {snyk_version})"
-            )
-        else:
-            print(f"  {C.green('OK')} Snyk CLI {snyk_ver_str} ({cli_path})")
+        _print_snyk_version_status(snyk_ver_str, snyk_version, cli_path)
         return
 
     node_ver = _get_node_version()
     if node_ver is None:
         print(f"  {C.yellow('WARNING')} Node.js not found")
-    elif node_version and node_ver < parse_version(node_version):
+    elif node_version and node_ver < _parse_version_tuple(node_version):
         print(
             f"  {C.yellow('WARNING')} Node.js {'.'.join(map(str, node_ver))} "
             f"is outdated (min: {node_version})"
@@ -1553,31 +1595,15 @@ def print_prerequisite_versions(
     else:
         print(f"  {C.green('OK')} Node.js {'.'.join(map(str, node_ver))}")
 
-    snyk_path = shutil.which("snyk") or _find_win_npm_executable("snyk")
-    snyk_ver_str = None
-    if snyk_path:
-        try:
-            r = run(
-                ["snyk", "--version"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                shell=_IS_WINDOWS,
-                creationflags=_CREATE_NO_WINDOW,
-            )
-            snyk_ver_str = r.stdout.strip().splitlines()[0] if r.stdout else None
-        except Exception:
-            snyk_ver_str = None
+    snyk_resolver = _snyk_cli_resolver()
+    snyk_path = snyk_resolver.snyk_cli_from_path()
+    snyk_ver_str = snyk_resolver.read_snyk_version(snyk_path) if snyk_path else None
 
     if not snyk_ver_str:
         print(f"  {C.yellow('WARNING')} Snyk CLI not found")
         return
 
-    match = re.match(r"(\d+\.\d+\.\d+)", snyk_ver_str)
-    if snyk_version and match and parse_version(match.group(1)) < parse_version(snyk_version):
-        print(f"  {C.yellow('WARNING')} Snyk CLI {snyk_ver_str} is outdated (min: {snyk_version})")
-    else:
-        print(f"  {C.green('OK')} Snyk CLI {snyk_ver_str}")
+    _print_snyk_version_status(snyk_ver_str, snyk_version)
 
 
 # =============================================================================
@@ -2491,21 +2517,72 @@ def uninstall_workspace_recipe(
     remove_legacy_workspace_files(sources, workspace, dry_run)
 
 
-@contextlib.contextmanager
-def _native_mcp_source(cli_path: str) -> Iterator[Path]:
-    """Yield a temp .mcp.json-shaped source with the Snyk server pointing at ``cli_path``.
+def _snyk_command_for_selection(selected_snyk_cli: Optional[SnykCliSelection]) -> str:
+    """Return the command installer-managed subprocesses should use for Snyk."""
+    if selected_snyk_cli and selected_snyk_cli.source != SNYK_CLI_SOURCE_PATH:
+        path: str = selected_snyk_cli.path
+        return path
+    return "snyk"
 
-    Used when ``--cli-path`` is set: the merge layer still expects an on-disk
-    file, so we materialize one with the user-supplied command substituted for
-    the default ``npx -y snyk@latest`` invocation. The filename ends in
-    ``.mcp.json`` so downstream ``source.name == ".mcp.json"`` checks (e.g. in
-    the merge strategies) still match.
+
+def _resolve_mcp_snyk_selection(
+    selected_snyk_cli: Optional[SnykCliSelection],
+    cli_path: Optional[str],
+) -> Optional[SnykCliSelection]:
+    """Return the Snyk selection that should be reflected in MCP config.
+
+    ``cli_path`` is kept as a backwards-compatible direct-call seam for tests
+    and callers that bypass ``main()``. In normal installer runs,
+    ``selected_snyk_cli`` is the result of prerequisite resolution.
+    """
+    if selected_snyk_cli:
+        return selected_snyk_cli
+    if cli_path:
+        return SnykCliSelection(
+            absolute_cli_path(cli_path),
+            None,
+            SNYK_CLI_SOURCE_USER_SPECIFIED,
+        )
+    return None
+
+
+_MCP_SOURCE_NAMES = frozenset({".mcp.json", ".mcp-codex.toml"})
+
+
+def _mcp_server_command_for_selection(
+    selected_snyk_cli: Optional[SnykCliSelection],
+    ade: str,
+    source_name: str,
+) -> Optional[Tuple[str, List[str]]]:
+    """Return the MCP server command/args for the selected Snyk CLI contract.
+
+    Returns ``None`` for anything that isn't an MCP config source (e.g. a
+    SAI hooks recipe's ``hooks.json``/``settings.json`` config_merge) so
+    callers never substitute a Snyk command into an unrelated file.
+    """
+    if selected_snyk_cli is None or source_name not in _MCP_SOURCE_NAMES:
+        return None
+    if selected_snyk_cli.source == SNYK_CLI_SOURCE_PATH:
+        if sys.platform == "darwin" and ade not in CLI_ADES and source_name == ".mcp.json":
+            return "sh", ["-l", "-c", "snyk mcp -t stdio"]
+        return "snyk", ["mcp", "-t", "stdio"]
+    return selected_snyk_cli.path, ["mcp", "-t", "stdio"]
+
+
+@contextlib.contextmanager
+def _mcp_json_source(command: str, args: List[str]) -> Iterator[Path]:
+    """Yield a temp .mcp.json-shaped source with the selected Snyk command.
+
+    The merge layer expects an on-disk file, so we materialize one with the
+    installer-selected command substituted for the payload default. The filename
+    ends in ``.mcp.json`` so downstream ``source.name == ".mcp.json"`` checks
+    still match.
     """
     body = {
         "mcpServers": {
             "Snyk": {
-                "command": cli_path,
-                "args": ["mcp", "-t", "stdio"],
+                "command": command,
+                "args": args,
             }
         }
     }
@@ -2522,16 +2599,16 @@ def _native_mcp_source(cli_path: str) -> Iterator[Path]:
 
 
 @contextlib.contextmanager
-def _native_mcp_codex_source(cli_path: str) -> Iterator[Path]:
-    """Yield a temp .mcp-codex.toml with the Snyk server pointing at ``cli_path``.
+def _mcp_codex_source(command: str, args: List[str]) -> Iterator[Path]:
+    """Yield a temp .mcp-codex.toml with the selected Snyk command.
 
-    Codex-specific parallel to ``_native_mcp_source``: ``merge_codex_config``
+    Codex-specific parallel to ``_mcp_json_source``: ``merge_codex_config``
     reads a TOML source, so we materialize a temp TOML with only the
     ``[mcp_servers.Snyk]`` table populated. The suffix ``.mcp-codex.toml``
     keeps the ``source.name`` gates in ``install_recipe`` / ``verify_recipe``
     matching on the substituted file too.
     """
-    body = f'[mcp_servers.Snyk]\ncommand = {json.dumps(cli_path)}\nargs = ["mcp", "-t", "stdio"]\n'
+    body = f"[mcp_servers.Snyk]\ncommand = {json.dumps(command)}\nargs = {json.dumps(args)}\n"
     fd, name = tempfile.mkstemp(suffix=".mcp-codex.toml")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -2544,6 +2621,29 @@ def _native_mcp_codex_source(cli_path: str) -> Iterator[Path]:
             pass
 
 
+@contextlib.contextmanager
+def _mcp_source_for_selection(
+    source: Path,
+    ade: str,
+    selected_snyk_cli: Optional[SnykCliSelection],
+) -> Iterator[Path]:
+    """Yield an MCP config source matching the selected Snyk CLI, if needed."""
+    command = _mcp_server_command_for_selection(selected_snyk_cli, ade, source.name)
+    if command is None:
+        yield source
+        return
+
+    # command is only ever non-None for names in _MCP_SOURCE_NAMES (enforced
+    # by _mcp_server_command_for_selection), so exactly one of these matches.
+    mcp_command, mcp_args = command
+    if source.name == ".mcp.json":
+        with _mcp_json_source(mcp_command, mcp_args) as selected_source:
+            yield selected_source
+    else:
+        with _mcp_codex_source(mcp_command, mcp_args) as selected_source:
+            yield selected_source
+
+
 def install_recipe(
     recipe_id: str,
     ade: str,
@@ -2551,6 +2651,7 @@ def install_recipe(
     payload: PayloadContext,
     dry_run: bool,
     cli_path: Optional[str] = None,
+    selected_snyk_cli: Optional[SnykCliSelection] = None,
 ) -> None:
     sources = manifest.get_sources(recipe_id, ade)
     if not sources:
@@ -2576,19 +2677,16 @@ def install_recipe(
     if cm:
         target = resolve_ade_path(ade, cm["target"])
         source = payload.resolve_src(cm["source"])
-        if cli_path and source.name == ".mcp.json":
-            # --cli-path wins over the darwin shell-wrapper swap: with an
-            # absolute binary path there is no npx-on-login-shell-PATH problem
-            # to work around.
-            with _native_mcp_source(cli_path) as native_src:
-                merge_config(cm["strategy"], target, native_src, payload, dry_run)
-        elif cli_path and source.name == ".mcp-codex.toml":
-            with _native_mcp_codex_source(cli_path) as native_src:
-                merge_config(cm["strategy"], target, native_src, payload, dry_run)
-        else:
-            if sys.platform == "darwin" and ade not in CLI_ADES and source.name == ".mcp.json":
-                source = payload.resolve_src("mcp/.mcp.mac.json")
-            merge_config(cm["strategy"], target, source, payload, dry_run)
+        selected_mcp_cli = _resolve_mcp_snyk_selection(selected_snyk_cli, cli_path)
+        with _mcp_source_for_selection(source, ade, selected_mcp_cli) as selected_source:
+            if (
+                selected_mcp_cli is None
+                and sys.platform == "darwin"
+                and ade not in CLI_ADES
+                and selected_source.name == ".mcp.json"
+            ):
+                selected_source = payload.resolve_src("mcp/.mcp.mac.json")
+            merge_config(cm["strategy"], target, selected_source, payload, dry_run)
         cleanup_legacy_config_merge(cm, ade, payload, dry_run)
 
     # chmod +x on Python files
@@ -2601,6 +2699,7 @@ def verify_recipe(
     manifest: Manifest,
     payload: PayloadContext,
     cli_path: Optional[str] = None,
+    selected_snyk_cli: Optional[SnykCliSelection] = None,
 ) -> bool:
     sources = manifest.get_sources(recipe_id, ade)
     if not sources:
@@ -2633,13 +2732,8 @@ def verify_recipe(
         strategy = cm["strategy"].replace("merge_", "verify_", 1)
         target = resolve_ade_path(ade, cm["target"])
         raw_source = payload.resolve_src(cm["source"])
-        src_ctx: contextlib.AbstractContextManager[Path]
-        if cli_path and raw_source.name == ".mcp.json":
-            src_ctx = _native_mcp_source(cli_path)
-        elif cli_path and raw_source.name == ".mcp-codex.toml":
-            src_ctx = _native_mcp_codex_source(cli_path)
-        else:
-            src_ctx = contextlib.nullcontext(raw_source)
+        selected_mcp_cli = _resolve_mcp_snyk_selection(selected_snyk_cli, cli_path)
+        src_ctx = _mcp_source_for_selection(raw_source, ade, selected_mcp_cli)
         with src_ctx as raw:
             with _expand_source(strategy, raw) as resolved_path:
                 lib_dir = str(payload.payload_dir / "lib")
@@ -2649,7 +2743,7 @@ def verify_recipe(
 
                 try:
                     if (
-                        not cli_path
+                        selected_mcp_cli is None
                         and sys.platform == "darwin"
                         and ade not in CLI_ADES
                         and resolved_path.name == ".mcp.json"
@@ -2917,7 +3011,7 @@ def main() -> None:
         # hook resolver) all see the same absolute path — a relative
         # `--cli-path` would validate against the installer's cwd but fail at
         # scan time when the IDE-spawned hook runs in a different cwd.
-        args.cli_path = os.path.abspath(os.path.expanduser(args.cli_path))
+        args.cli_path = absolute_cli_path(args.cli_path)
 
     notify_unused_recipe_selection(args)
 
@@ -2987,8 +3081,9 @@ def main() -> None:
                 node_version=manifest.prerequisite_version("node"),
                 cli_path=args.cli_path,
             )
+            selected_snyk_cli = _read_only_selected_snyk_cli(args.cli_path)
         else:
-            check_prerequisites(
+            selected_snyk_cli = check_prerequisites(
                 args.yes,
                 snyk_version=manifest.prerequisite_version("snyk"),
                 node_version=manifest.prerequisite_version("node"),
@@ -3005,7 +3100,13 @@ def main() -> None:
             for recipe_id in recipes:
                 if manifest.is_workspace_scoped(recipe_id):
                     continue
-                if not verify_recipe(recipe_id, ade, manifest, payload, cli_path=args.cli_path):
+                if not verify_recipe(
+                    recipe_id,
+                    ade,
+                    manifest,
+                    payload,
+                    selected_snyk_cli=selected_snyk_cli,
+                ):
                     all_ok = False
         for recipe_id in recipes:
             if not manifest.is_workspace_scoped(recipe_id):
@@ -3027,7 +3128,7 @@ def main() -> None:
 
     # Prerequisites
     print(f"  {C.bold('Prerequisites')}")
-    check_prerequisites(
+    selected_snyk_cli = check_prerequisites(
         args.yes,
         snyk_version=manifest.prerequisite_version("snyk"),
         node_version=manifest.prerequisite_version("node"),
@@ -3039,7 +3140,7 @@ def main() -> None:
         # Uninstall is per-ADE and must not clear the sidecar: other ADEs'
         # installed hooks still depend on it. Users who want to fully purge
         # can remove ~/.snyk-studio/ manually.
-        _sync_cli_path_sidecar(args.cli_path, args.dry_run)
+        _sync_selected_snyk_cli_sidecars(selected_snyk_cli, args.dry_run)
     print()
 
     # ADE detection
@@ -3060,10 +3161,11 @@ def main() -> None:
     # if auto configure is turned on and manual, need to remove rules
     def remove_legacy_SAI_directives(ade: str, scope: str) -> None:
         mcp_tool_name = SNYK_MCP_TOOL_NAMES[ade]
+        snyk_command = _snyk_command_for_selection(selected_snyk_cli)
         print(f"    Cleaning up {scope} skills for {ade}...")
         run(
             [
-                "snyk",
+                snyk_command,
                 "mcp",
                 "configure",
                 "--tool",
@@ -3197,7 +3299,14 @@ def main() -> None:
         for recipe_id in recipes:
             if manifest.is_workspace_scoped(recipe_id):
                 continue
-            install_recipe(recipe_id, ade, manifest, payload, args.dry_run, cli_path=args.cli_path)
+            install_recipe(
+                recipe_id,
+                ade,
+                manifest,
+                payload,
+                args.dry_run,
+                selected_snyk_cli=selected_snyk_cli,
+            )
     for recipe_id in recipes:
         if not manifest.is_workspace_scoped(recipe_id):
             continue
@@ -3215,7 +3324,13 @@ def main() -> None:
             for recipe_id in recipes:
                 if manifest.is_workspace_scoped(recipe_id):
                     continue
-                if not verify_recipe(recipe_id, ade, manifest, payload, cli_path=args.cli_path):
+                if not verify_recipe(
+                    recipe_id,
+                    ade,
+                    manifest,
+                    payload,
+                    selected_snyk_cli=selected_snyk_cli,
+                ):
                     all_ok = False
         for recipe_id in recipes:
             if not manifest.is_workspace_scoped(recipe_id):

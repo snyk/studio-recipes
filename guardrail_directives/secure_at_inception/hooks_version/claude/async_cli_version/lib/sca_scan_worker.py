@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from platform_utils import STUDIO_VERSION as SNYK_STUDIO_VERSION
 from platform_utils import log as _platform_log
-from platform_utils import snyk_cli_from_sidecar
+from platform_utils import prepend_to_path, snyk_cli_from_sidecar
 
 WORKSPACE = ""
 CACHE_DIR = ""
@@ -186,6 +186,9 @@ def main() -> None:
         return
 
     env = os.environ.copy()
+    snyk_bin_dir = os.path.dirname(snyk_bin)
+    if snyk_bin_dir:
+        prepend_to_path(env, snyk_bin_dir)
     env["SNYK_INTEGRATION_NAME"] = "STUDIO"
     env["SNYK_INTEGRATION_VERSION"] = SNYK_STUDIO_VERSION
     env["SNYK_INTEGRATION_ENVIRONMENT"] = "claude_code"

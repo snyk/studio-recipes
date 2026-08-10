@@ -32,6 +32,7 @@ from platform_utils import (
     get_snyk_config_path,
     get_snyk_search_paths,
     is_pid_alive,
+    prepend_to_path,
     resolve_log_file,
     snyk_cli_from_sidecar,
 )
@@ -128,16 +129,16 @@ def parse_sarif_results(json_output: str) -> List[Dict[str, Any]]:
 def _augment_path_for_snyk(env: Dict[str, str]) -> None:
     """Ensure the snyk binary is discoverable on PATH.
 
-    Consults the installer sidecar first (set by ``--cli-path``); if pinned,
-    prepends the containing directory to ``env["PATH"]`` and returns. Falls
-    back to the original probe: current ``PATH``, then common install
-    locations (nvm, Volta, Homebrew, Scoop, etc.) via platform_utils helpers.
+    Consults the installer sidecar first; if pinned, prepends the containing
+    directory to ``env["PATH"]`` and returns. Falls back to the original probe:
+    current ``PATH``, then common install locations (nvm, Volta, Homebrew,
+    Scoop, etc.) via platform_utils helpers.
     """
     pinned: Optional[str] = snyk_cli_from_sidecar()
     if pinned:
         bin_dir = os.path.dirname(pinned)
-        if bin_dir and bin_dir not in env.get("PATH", "").split(os.pathsep):
-            env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+        if bin_dir:
+            prepend_to_path(env, bin_dir)
         return
 
     if shutil.which("snyk", path=env.get("PATH", "")):
@@ -149,7 +150,7 @@ def _augment_path_for_snyk(env: Dict[str, str]) -> None:
     for bin_dir in candidates:
         for name in binary_names:
             if os.path.isfile(os.path.join(bin_dir, name)):
-                env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+                prepend_to_path(env, bin_dir)
                 return
 
 
@@ -186,9 +187,9 @@ def check_snyk_auth() -> Optional[str]:
 def check_snyk_cli() -> Optional[str]:
     """Check if the Snyk CLI binary is discoverable, sidecar or PATH.
 
-    Returns the sidecar-pinned path first (set by the installer's
-    ``--cli-path``); otherwise probes the current PATH and common install
-    locations (nvm, Volta, Homebrew, Scoop, etc.) via platform_utils helpers.
+    Returns the sidecar-pinned path first; otherwise probes the current PATH
+    and common install locations (nvm, Volta, Homebrew, Scoop, etc.) via
+    platform_utils helpers.
 
     Returns the path to the binary if found, None otherwise.
     """

@@ -18,6 +18,7 @@ if LIB_DIR not in sys.path:
     sys.path.insert(0, LIB_DIR)
 
 import diag  # noqa: E402
+import snyk_cli_selection  # noqa: E402
 
 _FAR_PAST = datetime(2000, 1, 1, tzinfo=timezone.utc)
 _NOW = datetime.now(timezone.utc)
@@ -664,13 +665,13 @@ class TestCollectDependencyVersions:
         with zipfile.ZipFile(buf, "r") as zf:
             return json.loads(zf.read("dependency_versions.json"))
 
-    def test_has_all_four_keys(self):
+    def test_has_dependency_and_snyk_cli_keys(self):
         with patch("subprocess.run") as mock_run:
             mock_run.return_value.stdout = ""
             mock_run.return_value.returncode = 1
             data = self._run()
 
-        assert set(data.keys()) == {"node", "uv", "snyk", "nvm"}
+        assert set(data.keys()) == {"node", "uv", "snyk", "snyk_cli", "nvm"}
 
     def test_node_version_parsed(self):
         def fake_run(cmd, **kwargs):
@@ -705,6 +706,98 @@ class TestCollectDependencyVersions:
             data = self._run()
 
         assert data["nvm"] is None
+
+    def test_snyk_cli_info_reports_sidecar_and_user_path(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        sidecar_cli = tmp_path / "sidecar" / "snyk"
+        path_cli = tmp_path / "path" / "snyk"
+        for cli in (sidecar_cli, path_cli):
+            cli.parent.mkdir(parents=True)
+            cli.write_text("#!/bin/sh\n")
+            cli.chmod(0o755)
+        snyk_studio = home / ".snyk-studio"
+        snyk_studio.mkdir(parents=True)
+        (snyk_studio / "cli-path").write_text(str(sidecar_cli))
+        (snyk_studio / "cli-source").write_text("npm")
+
+        def fake_run(cmd, **kwargs):
+            class R:
+                returncode = 0
+
+                def __init__(self, stdout=""):
+                    self.stdout = stdout
+
+            if cmd == [str(sidecar_cli), "--version"]:
+                return R("1.1200.0\n")
+            if cmd == [str(path_cli), "--version"]:
+                return R("1.1300.0\n")
+            return R()
+
+        monkeypatch.setattr(diag.Path, "home", staticmethod(lambda: home))
+        monkeypatch.setattr(
+            snyk_cli_selection.shutil,
+            "which",
+            lambda cmd: str(path_cli) if cmd == "snyk" else None,
+        )
+
+        with patch("subprocess.run", side_effect=fake_run):
+            data = self._run()
+
+        assert data["snyk"] == "1.1300.0"
+        assert data["snyk_cli"]["used"] == {
+            "path": str(sidecar_cli),
+            "source": "npm",
+            "version": "1.1200.0",
+        }
+        assert data["snyk_cli"]["from_user_path"] == {
+            "path": str(path_cli),
+            "version": "1.1300.0",
+        }
+        assert data["snyk_cli"]["sidecar"]["valid"] is True
+
+    def test_snyk_cli_info_ignores_path_source_sidecar_for_used_cli(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        sidecar_cli = tmp_path / "sidecar" / "snyk"
+        path_cli = tmp_path / "path" / "snyk"
+        for cli in (sidecar_cli, path_cli):
+            cli.parent.mkdir(parents=True)
+            cli.write_text("#!/bin/sh\n")
+            cli.chmod(0o755)
+        snyk_studio = home / ".snyk-studio"
+        snyk_studio.mkdir(parents=True)
+        (snyk_studio / "cli-path").write_text(str(sidecar_cli))
+        (snyk_studio / "cli-source").write_text("path")
+
+        def fake_run(cmd, **kwargs):
+            class R:
+                returncode = 0
+
+                def __init__(self, stdout=""):
+                    self.stdout = stdout
+
+            if cmd == [str(sidecar_cli), "--version"]:
+                return R("1.1200.0\n")
+            if cmd == [str(path_cli), "--version"]:
+                return R("1.1300.0\n")
+            return R()
+
+        monkeypatch.setattr(diag.Path, "home", staticmethod(lambda: home))
+        monkeypatch.setattr(
+            snyk_cli_selection.shutil,
+            "which",
+            lambda cmd: str(path_cli) if cmd == "snyk" else None,
+        )
+
+        with patch("subprocess.run", side_effect=fake_run):
+            data = self._run()
+
+        assert data["snyk_cli"]["used"] == {
+            "path": str(path_cli),
+            "source": "path",
+            "version": "1.1300.0",
+        }
+        assert data["snyk_cli"]["sidecar"]["valid"] is True
+        assert data["snyk_cli"]["sidecar"]["source"] == "path"
 
 
 # ---------------------------------------------------------------------------

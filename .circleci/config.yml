@@ -18,7 +18,7 @@ executors:
 
   installer_linux:
     docker:
-      - image: cimg/go:1.21
+      - image: cimg/go:1.26.5
     resource_class: medium
 
 parameters:
@@ -46,7 +46,7 @@ workflows:
           filters:
             branches:
               ignore:
-                - main  
+                - main
 
       - security-scans:
           name: Security Scans
@@ -54,7 +54,6 @@ workflows:
 
       - installer-build:
           name: Build Installer Binaries
-
 
   release-installer:
     when: << pipeline.parameters.create_release >>
@@ -104,7 +103,7 @@ jobs:
   security-scans:
     resource_class: small
     docker:
-      - image: cimg/go:1.21
+      - image: cimg/go:1.26.5
     steps:
       - checkout
       - prodsec/security_scans:

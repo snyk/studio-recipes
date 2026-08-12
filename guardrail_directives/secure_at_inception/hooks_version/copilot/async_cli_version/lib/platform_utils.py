@@ -166,22 +166,31 @@ _CLI_PATH_SIDECAR = os.path.join(os.path.expanduser("~"), ".snyk-studio", "cli-p
 
 
 def snyk_cli_from_sidecar() -> Optional[str]:
-    """Return the absolute Snyk CLI path pinned by the installer's ``--cli-path``.
+    """Return the absolute Snyk CLI path pinned by the installer.
 
-    Reads ``~/.snyk-studio/cli-path`` (written by the installer). Returns
-    ``None`` if the sidecar is missing or the recorded path is not an
-    executable file. Callers use this before falling back to ``PATH``
-    resolution so a standalone-CLI install works even when ``snyk`` isn't
-    on the IDE-inherited PATH.
+    Reads ``~/.snyk-studio/cli-path`` (written for npm-managed and
+    user-specified installs). Returns ``None`` if the sidecar is missing or the
+    recorded path is not executable. Callers use this before falling back to
+    ``PATH`` so installer-managed Snyk works even when ``snyk`` isn't on the
+    IDE-inherited PATH.
     """
     try:
-        with open(_CLI_PATH_SIDECAR, encoding="utf-8") as f:
+        with open(_CLI_PATH_SIDECAR, encoding="utf-8-sig") as f:
             pinned = f.read().strip()
-    except (FileNotFoundError, OSError):
+    except (FileNotFoundError, OSError, UnicodeDecodeError):
         return None
-    if pinned and os.path.isfile(pinned) and os.access(pinned, os.X_OK):
-        return pinned
+    if not pinned:
+        return None
+    expanded = os.path.expanduser(pinned)
+    if os.path.isabs(expanded) and os.path.isfile(expanded) and os.access(expanded, os.X_OK):
+        return os.path.abspath(expanded)
     return None
+
+
+def prepend_to_path(env: Dict[str, str], bin_dir: str) -> None:
+    """Put ``bin_dir`` first on PATH, removing duplicates and empty entries."""
+    entries = [p for p in env.get("PATH", "").split(os.pathsep) if p and p != bin_dir]
+    env["PATH"] = os.pathsep.join([bin_dir, *entries])
 
 
 # =============================================================================

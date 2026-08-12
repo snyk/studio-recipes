@@ -83,7 +83,7 @@ DEBUG = os.environ.get("CURSOR_HOOK_DEBUG", "0") == "1"
 
 # Resolved per-invocation in main() once the workspace is known (the hook is a
 # short-lived process and the workspace comes from parsed stdin). Until then it
-# is None and log_to_panel/debug_log degrade to stderr-only.
+# is None: log_to_panel/debug_log degrade to stderr-only, and write_log is a no-op.
 _LOG_FILE: Optional[str] = None
 
 CODE_EXTENSIONS = {
@@ -256,6 +256,15 @@ def debug_log(message: str) -> None:
 
 def log_to_panel(message: str) -> None:
     print(message, file=sys.stderr)
+    if _LOG_FILE:
+        _shared_log(message, _LOG_FILE, debug=False)
+
+
+def write_log(message: str) -> None:
+    """Persist routine, decision-level detail to the log file, same as
+    log_to_panel, but never print to stderr -- for normal-flow operation that
+    should have a full history in log.txt without tripping Cursor's
+    stderr-based hook-error indicator."""
     if _LOG_FILE:
         _shared_log(message, _LOG_FILE, debug=False)
 
@@ -582,27 +591,24 @@ def handle_session_start(data: Dict[str, Any], workspace: str) -> None:
         output_response({"followup_message": " ".join(message_parts)})
         return
 
-    # 4. All checks passed -- clear stale state on fresh sessions
-    log_to_panel("[SAI] Snyk authenticated, CLI found")
+    # Cursor has no source field -- sessionStart only fires for a genuinely
+    # new conversation, so always clear state and (re)capture the baseline.
+    write_log("[SAI] Snyk authenticated, CLI found")
     if _LOG_FILE:
         _shared_log(f"SessionStart: studio v{STUDIO_VERSION}", _LOG_FILE)
-    source = data.get("source", "startup")
-    if source in ("startup", "clear"):
-        clear_state(workspace)
-        clear_baseline(workspace)
-
-    # 5. Launch cache-warming scans (non-blocking, dedup built-in).
-    if launch_background_scan(workspace):
-        log_to_panel("[SAI] Cache-warming scan launched")
-    else:
-        debug_log("Cache-warm scan not launched (already running or complete)")
-
-    # The SCA baseline scan result persists across Stop cycles — regular scans compare against it.
+    clear_state(workspace)
+    clear_baseline(workspace)
     if launch_background_sca_baseline_scan(workspace):
-        log_to_panel("[SAI] Cache-warming SCA scan launched")
+        write_log("[SAI] SCA baseline scan launched")
         save_manifest_hash_baseline(workspace, MANIFEST_FILES, MANIFEST_SUFFIXES)
     else:
-        debug_log("Cache-warm SCA scan not launched (already running or complete)")
+        debug_log("SCA baseline scan not launched (already running or complete)")
+
+    # SAST has no baseline concept -- always safe to warm.
+    if launch_background_scan(workspace):
+        write_log("[SAI] Cache-warming scan launched")
+    else:
+        debug_log("Cache-warm scan not launched (already running or complete)")
 
     output_response({"exit_code": 0})
 
@@ -610,7 +616,7 @@ def handle_session_start(data: Dict[str, Any], workspace: str) -> None:
 def _trigger_sca_and_save(workspace: str, snapshot: Dict[str, str]) -> None:
     """Trigger an SCA scan and record snapshot as the new last-scan reference."""
     if trigger_sca_scan(workspace):
-        log_to_panel("[SAI] Background SCA scan launched")
+        write_log("[SAI] Background SCA scan launched")
         save_manifest_hash_last_scan(workspace, MANIFEST_FILES, MANIFEST_SUFFIXES, hashes=snapshot)
 
 
@@ -647,7 +653,7 @@ def handle_after_file_edit(data: Dict[str, Any], workspace: str) -> None:
             write_state(workspace, state)
             range_count = len(code_files[file_path]["modified_ranges"])
 
-        log_to_panel(f"[SAI] Tracked: {Path(file_path).name} ({range_count} range(s))")
+        write_log(f"[SAI] Tracked: {Path(file_path).name} ({range_count} range(s))")
 
         # Peek at cached scan status for early error detection.
         # If sessionStart or a prior scan_worker wrote an error status,
@@ -676,13 +682,13 @@ def handle_after_file_edit(data: Dict[str, Any], workspace: str) -> None:
                 return
 
         if launch_background_scan(workspace):
-            log_to_panel("[SAI] Background scan launched")
+            write_log("[SAI] Background scan launched")
 
     # NOTE: keeping is_manifest for now. But SCA scans usually need
     # the package manager to have actually installed packages. So an agent
     # file edit will not result in an SCA-detectable vuln.
     if is_manifest:
-        log_to_panel(f"[SAI] Manifest edit tracked: {Path(file_path).name}")
+        write_log(f"[SAI] Manifest edit tracked: {Path(file_path).name}")
         snapshot = snapshot_manifest_hashes(workspace, MANIFEST_FILES, MANIFEST_SUFFIXES)
         _trigger_sca_and_save(workspace, snapshot)
 
@@ -697,7 +703,7 @@ def _detect_manifest_mutation_from_shell(workspace: str) -> None:
     afterFileEdit path. Detect them by checking whether any manifest file
     actually changed on disk after the command ran.
     """
-    log_to_panel("[SAI] Shell command executed. Checking if manifests changed.")
+    write_log("[SAI] Shell command executed. Checking if manifests changed.")
     hashes = load_manifest_hashes(workspace) or {}
     # Before any scan has run this session, the only thing to compare against
     # is the session-start baseline; once last_scan is populated it's the
@@ -706,7 +712,7 @@ def _detect_manifest_mutation_from_shell(workspace: str) -> None:
     snapshot = snapshot_manifest_hashes(workspace, MANIFEST_FILES, MANIFEST_SUFFIXES)
     changed = diff_manifest_hashes(snapshot, compare_against)
     if changed:
-        log_to_panel(f"[SAI] Manifest change detected: {', '.join(Path(f).name for f in changed)}")
+        write_log(f"[SAI] Manifest change detected: {', '.join(Path(f).name for f in changed)}")
         _trigger_sca_and_save(workspace, snapshot)
 
 
@@ -743,12 +749,17 @@ def _check_stop_preconditions(workspace: str) -> Tuple[Optional[Dict[str, Any]],
         )
 
         if not has_pending_changes(state) and not hash_changed_from_baseline:
-            debug_log("No pending changes")
+            write_log(
+                f"[SAI] Stop: no pending changes (tracked files: {len(state.get('code_files', {}))}, "
+                f"manifest hashes changed vs baseline: {len(hash_changed_from_baseline)})"
+            )
             return {}, ctx
 
         stop_cycles = state.get("stop_cycles", 0)
         if stop_cycles >= MAX_STOP_CYCLES:
-            log_to_panel(f"[SAI] Max cycles ({MAX_STOP_CYCLES}) reached, allowing stop")
+            # Intentional: giving up enforcement after MAX_STOP_CYCLES is expected
+            # behavior, not a hook failure, so this stays off stderr.
+            write_log(f"[SAI] Max cycles ({MAX_STOP_CYCLES}) reached, allowing stop")
             clear_state(workspace)
             # Clear and reset the SCA baseline to accept the current state.
             clear_baseline(workspace)
@@ -772,7 +783,7 @@ def _evaluate_sast(
     if not code_files:
         return SastResult()
 
-    scan_status = wait_for_scan(workspace, log_fn=log_to_panel)
+    scan_status = wait_for_scan(workspace, log_fn=write_log)
     scan_succeeded = scan_status == "success"
     scan_info: Optional[Dict[str, Any]] = None
 
@@ -785,10 +796,10 @@ def _evaluate_sast(
         )
 
         if last_edit_ts and started_at and last_edit_ts > started_at:
-            log_to_panel("[SAI] Edits after scan started, re-scanning...")
+            write_log("[SAI] Edits after scan started, re-scanning...")
             clear_scan_state(workspace)
             launch_background_scan(workspace)
-            scan_status = wait_for_scan(workspace, log_fn=log_to_panel)
+            scan_status = wait_for_scan(workspace, log_fn=write_log)
             scan_succeeded = scan_status == "success"
             scan_info = None
 
@@ -890,15 +901,15 @@ def _evaluate_sca(
 
         # Re-run SCA only if manifests changed since the last scan
         if hash_changed_from_last_scan:
-            log_to_panel("[SAI] Manifest changes detected — re-running SCA scan")
+            write_log("[SAI] Manifest changes detected — re-running SCA scan")
             if trigger_sca_scan(workspace):
-                log_to_panel("[SAI] Background SCA scan launched")
+                write_log("[SAI] Background SCA scan launched")
                 save_manifest_hash_last_scan(
                     workspace, MANIFEST_FILES, MANIFEST_SUFFIXES, hashes=current_hashes
                 )
 
     # Ensure the session-start baseline is complete before comparing
-    wait_for_sca_baseline_scan(workspace, log_fn=log_to_panel)
+    wait_for_sca_baseline_scan(workspace, log_fn=write_log)
     baseline_info = get_sca_baseline_completion_info(workspace)
     if baseline_info and baseline_info.get("status") == "success" and baseline_hashes:
         baseline_vulns = baseline_info.get("vulnerabilities", [])
@@ -907,12 +918,31 @@ def _evaluate_sca(
             for v in baseline_vulns
         )
     elif baseline_info and baseline_info.get("status") == "success":
-        log_to_panel(
+        # baseline_keys stays None here, so downstream: manifests_changed reports
+        # every current finding as new, otherwise new_sca_vulns is forced to [].
+        write_log(
             "[SAI] SCA baseline result present without a manifest-hash baseline; "
-            "treating current manifest findings as newly introduced"
+            + (
+                "treating current dependency findings as newly introduced"
+                if manifests_changed
+                else "no manifest changes this cycle, so nothing will be reported as new"
+            )
+        )
+    else:
+        # A real hook-execution issue (baseline scan crashed, hung, or errored) --
+        # not a benign case, so it belongs on stderr like other scan failures.
+        # baseline_keys stays None here too, so the same downstream note applies.
+        log_to_panel(
+            f"[SAI] SCA baseline scan did not complete successfully "
+            f"(status={baseline_info.get('status') if baseline_info else None}); "
+            + (
+                "treating current dependency findings as newly introduced"
+                if manifests_changed
+                else "no manifest changes this cycle, so nothing will be reported as new"
+            )
         )
 
-    sca_status = wait_for_sca_scan(workspace, log_fn=log_to_panel)
+    sca_status = wait_for_sca_scan(workspace, log_fn=write_log)
 
     # Stale detection: re-scan if the result predates our last trigger.
     # Guards against scans that completed before npm install updated the lockfile.
@@ -927,16 +957,16 @@ def _evaluate_sca(
             and last_triggered_dt is not None
             and sca_started_dt < last_triggered_dt
         ):
-            log_to_panel("[SAI] SCA result predates last manifest trigger, re-scanning...")
+            write_log("[SAI] SCA result predates last manifest trigger, re-scanning...")
             if trigger_sca_scan(workspace):
                 save_manifest_hash_last_scan(workspace, MANIFEST_FILES, MANIFEST_SUFFIXES)
-            sca_status = wait_for_sca_scan(workspace, log_fn=log_to_panel)
+            sca_status = wait_for_sca_scan(workspace, log_fn=write_log)
 
     if sca_status == "success":
         sca_info = get_sca_completion_info(workspace)
         sca_duration = scan_duration_secs(sca_info) if sca_info else None
         sca_vulns = sca_info.get("vulnerabilities", []) if sca_info else []
-        log_to_panel(f"[SAI] SCA: {len(sca_vulns)} dependency vuln(s)")
+        write_log(f"[SAI] SCA: {len(sca_vulns)} dependency vuln(s)")
         new_sca_vulns: List[Any]
         if not manifests_changed:
             new_sca_vulns = []
@@ -1021,7 +1051,7 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
         output_response({"followup_message": fallback})
         return
 
-    log_to_panel(
+    write_log(
         f"[SAI] {len(sast.new_vulns)} new vuln(s), "
         f"{len(sca.new_sca_vulns)} SCA vuln(s), "
         f"{len(sast.clean_file_paths)} clean file(s), "
@@ -1126,17 +1156,17 @@ def _build_followup_message(
 
 def _log_stop_allow(sast: SastResult, sca: ScaResult) -> None:
     if sast.unevaluated_file_paths:
-        log_to_panel("=" * 70)
-        log_to_panel(
+        write_log("=" * 70)
+        write_log(
             "[Secure at Inception] Some files not yet evaluated. "
             "They will be checked on the next stop."
         )
-        log_to_panel("=" * 70)
+        write_log("=" * 70)
         return
 
-    log_to_panel("=" * 70)
-    log_to_panel("[Secure at Inception] No new security issues found.")
-    log_to_panel("=" * 70)
+    write_log("=" * 70)
+    write_log("[Secure at Inception] No new security issues found.")
+    write_log("=" * 70)
     duration_parts = []
     sast_dur = scan_duration_secs(sast.scan_info)
     if sast_dur is not None:
@@ -1146,35 +1176,35 @@ def _log_stop_allow(sast: SastResult, sca: ScaResult) -> None:
     log_line = "Stop: ALLOW"
     if duration_parts:
         log_line += " — scans: " + " ".join(duration_parts)
-    log_to_panel(log_line)
+    write_log(log_line)
 
 
 def _log_stop_block(sast: SastResult, sca: ScaResult) -> None:
-    log_to_panel("=" * 70)
-    log_to_panel("[Secure at Inception] New security issues detected")
-    log_to_panel("=" * 70)
+    write_log("=" * 70)
+    write_log("[Secure at Inception] New security issues detected")
+    write_log("=" * 70)
     if sast.new_vulns:
-        log_to_panel(f"  Code vulnerabilities: {len(sast.new_vulns)}")
+        write_log(f"  Code vulnerabilities: {len(sast.new_vulns)}")
         for v in sast.new_vulns:
-            log_to_panel(
+            write_log(
                 f"    - {v['severity'].upper()}: {v['title']} at {v['file_path']}:{v['start_line']}"
             )
     if sca.new_sca_vulns:
-        log_to_panel(f"  Dependency vulnerabilities: {len(sca.new_sca_vulns)}")
+        write_log(f"  Dependency vulnerabilities: {len(sca.new_sca_vulns)}")
     if sca.fallback:
-        log_to_panel("  SCA scan unavailable; MCP fallback included")
+        write_log("  SCA scan unavailable; MCP fallback included")
     if sast.dirty_file_paths:
-        log_to_panel(
+        write_log(
             f"  Files with vulns (kept in state): {[Path(f).name for f in sast.dirty_file_paths]}"
         )
     if sast.unevaluated_file_paths:
-        log_to_panel(
+        write_log(
             f"  Unevaluated files (kept in state): "
             f"{[Path(f).name for f in sast.unevaluated_file_paths]}"
         )
     if sca.changed_manifests:
-        log_to_panel(f"  Manifest files changed: {len(sca.changed_manifests)}")
-    log_to_panel("=" * 70)
+        write_log(f"  Manifest files changed: {len(sca.changed_manifests)}")
+    write_log("=" * 70)
 
     threshold = os.environ.get("SAI_MIN_BLOCK_SEVERITY", "medium")
     sast_dur = scan_duration_secs(sast.scan_info)
@@ -1200,7 +1230,7 @@ def _log_stop_block(sast: SastResult, sca: ScaResult) -> None:
     top_ids = _top_vuln_ids(list(sast.new_vulns) + list(sca.new_sca_vulns))
     if top_ids:
         block_parts.append(f"top vulns: {top_ids}")
-    log_to_panel("Stop: BLOCK — " + " | ".join(block_parts))
+    write_log("Stop: BLOCK — " + " | ".join(block_parts))
 
 
 # =============================================================================

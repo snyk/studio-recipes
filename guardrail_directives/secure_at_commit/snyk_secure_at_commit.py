@@ -332,10 +332,59 @@ def filter_sca_vulns(
 # When git is invoked from a GUI tool (GitHub Desktop, SourceTree, JetBrains
 # IDEs) the inherited PATH may not include the directory holding the snyk
 # binary (e.g. an nvm-managed node, ~/.volta/bin, /opt/homebrew/bin). We probe
-# the usual install locations and prepend the first hit to PATH so the
-# subsequent ``snyk`` invocations resolve.
+# the installer sidecar first, then the usual install locations, and prepend
+# the selected directory to PATH so the subsequent Snyk invocation and anything
+# it shells out to resolve consistently.
 
 _SNYK_BINARY_NAMES = ["snyk.cmd", "snyk.exe", "snyk"] if _IS_WINDOWS else ["snyk"]
+
+
+def _cli_path_sidecar() -> str:
+    """Resolved per call, not at import, so ``~`` follows the caller's HOME."""
+    return os.path.join(os.path.expanduser("~"), ".snyk-studio", "cli-path")
+
+
+def _read_sidecar() -> Optional[str]:
+    """Return the sidecar's stripped contents, or None if it can't be read."""
+    sidecar = _cli_path_sidecar()
+    try:
+        with open(sidecar, encoding="utf-8-sig") as f:
+            return f.read().strip()
+    except (OSError, UnicodeDecodeError):
+        if os.path.exists(sidecar):
+            debug(f"pinned Snyk CLI file {sidecar} could not be read")
+        return None
+
+
+def _pin_problem(pinned: str) -> Optional[str]:
+    """Return why ``pinned`` is unusable, or None when it is usable."""
+    if not pinned:
+        return "is empty or unreadable"
+    expanded = os.path.expanduser(pinned)
+    if not os.path.isabs(expanded):
+        return f'pins "{pinned}", which is not an absolute path'
+    if not os.path.isfile(expanded):
+        return f'pins "{pinned}", which does not exist'
+    if not os.access(expanded, os.X_OK):
+        return f'pins "{pinned}", which is not executable'
+    return None
+
+
+def _snyk_cli_from_sidecar() -> Optional[str]:
+    """Return the installer-selected CLI path, or None if unpinned/stale."""
+    pinned = _read_sidecar()
+    if pinned is None:
+        return None
+    problem = _pin_problem(pinned)
+    if problem is None:
+        return os.path.abspath(os.path.expanduser(pinned))
+    debug(f"{_cli_path_sidecar()} {problem}")
+    return None
+
+
+def _prepend_to_path(env: Dict[str, str], bin_dir: str) -> None:
+    entries = [p for p in env.get("PATH", "").split(os.pathsep) if p and p != bin_dir]
+    env["PATH"] = os.pathsep.join([bin_dir, *entries])
 
 
 def _snyk_search_paths_unix(env: Dict[str, str]) -> List[str]:
@@ -375,17 +424,24 @@ def _snyk_search_paths_windows(env: Dict[str, str]) -> List[str]:
 
 
 def _augment_path_for_snyk(env: Dict[str, str]) -> None:
+    pinned = _snyk_cli_from_sidecar()
+    if pinned:
+        _prepend_to_path(env, os.path.dirname(pinned))
+        return
     if shutil.which("snyk", path=env.get("PATH", "")):
         return
     search = _snyk_search_paths_windows(env) if _IS_WINDOWS else _snyk_search_paths_unix(env)
     for bin_dir in search:
         for name in _SNYK_BINARY_NAMES:
             if os.path.isfile(os.path.join(bin_dir, name)):
-                env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+                _prepend_to_path(env, bin_dir)
                 return
 
 
 def find_snyk_binary() -> Optional[str]:
+    pinned = _snyk_cli_from_sidecar()
+    if pinned:
+        return pinned
     env = os.environ.copy()
     _augment_path_for_snyk(env)
     for name in _SNYK_BINARY_NAMES:
@@ -393,6 +449,18 @@ def find_snyk_binary() -> Optional[str]:
         if found:
             return str(found)
     return None
+
+
+def _shell_quoted(path: str) -> str:
+    return f'"{path}"' if any(c.isspace() for c in path) else path
+
+
+def _snyk_hint(snyk_bin: str, *args: str) -> str:
+    return " ".join([_shell_quoted(snyk_bin), *args])
+
+
+def _snyk_not_found_message() -> str:
+    return "Snyk CLI not found — re-run the Snyk Studio installer, or make Snyk available on PATH."
 
 
 def _snyk_config_path() -> str:
@@ -940,10 +1008,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     snyk_bin = find_snyk_binary()
     if snyk_bin is None:
-        log("Snyk CLI not found on PATH — install with `npm install -g snyk`")
+        log(_snyk_not_found_message())
         return EXIT_PREREQ
     if check_snyk_auth() is None:
-        log("Snyk CLI not authenticated — run `snyk auth`")
+        log(f"Snyk CLI not authenticated — run `{_snyk_hint(snyk_bin, 'auth')}`")
         return EXIT_PREREQ
 
     if args.staged:
@@ -981,9 +1049,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                 sast_vulns = filter_sast_vulns(all_vulns, staged_code)
                 log(f"SAST: {len(sast_vulns)} issue(s)")
             elif status == "auth_required":
-                sast_fallback = "Snyk CLI is not authenticated. Run `snyk auth` and re-run."
+                sast_fallback = (
+                    f"Snyk CLI is not authenticated. Run `{_snyk_hint(snyk_bin, 'auth')}` "
+                    "and re-run."
+                )
             else:
-                sast_fallback = "Snyk Code scan did not complete. Run `snyk code test` manually."
+                sast_fallback = (
+                    "Snyk Code scan did not complete. "
+                    f"Run `{_snyk_hint(snyk_bin, 'code', 'test')}` manually."
+                )
 
         if sca_future is not None:
             status, all_vulns = sca_future.result()
@@ -991,9 +1065,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                 sca_vulns = filter_sca_vulns(all_vulns, staged_manifests)
                 log(f"SCA: {len(sca_vulns)} issue(s)")
             elif status == "auth_required":
-                sca_fallback = "Snyk CLI is not authenticated. Run `snyk auth` and re-run."
+                sca_fallback = (
+                    f"Snyk CLI is not authenticated. Run `{_snyk_hint(snyk_bin, 'auth')}` "
+                    "and re-run."
+                )
             else:
-                sca_fallback = "Snyk Open Source scan did not complete. Run `snyk test` manually."
+                sca_fallback = (
+                    "Snyk Open Source scan did not complete. "
+                    f"Run `{_snyk_hint(snyk_bin, 'test')}` manually."
+                )
 
     if not (sast_vulns or sca_vulns or sast_fallback or sca_fallback):
         log("no vulnerabilities found")

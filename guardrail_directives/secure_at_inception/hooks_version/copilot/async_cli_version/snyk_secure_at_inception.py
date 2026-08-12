@@ -160,6 +160,9 @@ MANIFEST_SUFFIXES = {".csproj", ".lock", ".fsproj", ".vbproj"}
 
 MAX_STOP_CYCLES = 3
 
+# Per Copilot's hooks docs: startup, resume, new.
+KNOWN_SESSION_START_SOURCES = {"startup", "resume", "new"}
+
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 
@@ -595,7 +598,10 @@ def handle_session_start(data: Dict[str, Any], workspace: str) -> None:
     Copilot delivers `source` as one of startup/resume/new. On startup/new we
     clear any stale state so a previous session's pending vulns don't carry
     over; on resume we keep state intact."""
-    source = data.get("source") or data.get("Source") or "startup"
+    source = data.get("source") or data.get("Source") or ""
+    log_to_panel(f"[SAI] SessionStart source={source!r}")
+    if source not in KNOWN_SESSION_START_SOURCES:
+        log_to_panel(f"[SAI] Unrecognized SessionStart source {source!r}, treating as resume")
     if source in ("startup", "new"):
         clear_state(workspace)
         clear_baseline(workspace)
@@ -798,7 +804,10 @@ def _check_stop_preconditions(workspace: str) -> Tuple[Optional[Dict[str, Any]],
         )
 
         if not has_pending_changes(state) and not hash_changed_from_baseline:
-            debug_log("No pending changes")
+            log_to_panel(
+                f"[SAI] Stop: no pending changes (tracked files: {len(state.get('code_files', {}))}, "
+                f"manifest hashes changed vs baseline: {len(hash_changed_from_baseline)})"
+            )
             return {}, ctx
 
         stop_cycles = state.get("stop_cycles", 0)

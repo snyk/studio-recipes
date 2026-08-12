@@ -155,18 +155,18 @@ def _cli_not_found_message() -> str:
     stale = stale_sidecar_pin()
     if stale:
         # PATH was already probed and came up empty before we got here, so
-        # repairing the pin is the only fix -- and don't send a standalone-CLI
-        # user to `npm install -g snyk`, the install they opted out of.
+        # repairing the pin is the only fix -- and don't send a user-specified
+        # CLI user to `npm install -g snyk`, the install they opted out of.
         return (
             f"Snyk CLI not found -- {stale.path} {stale.problem}, and no snyk on "
-            "PATH either; re-run the installer with --cli-path pointing at a "
-            "valid standalone CLI"
+            "PATH either; re-run the installer to repair the selected Snyk CLI "
+            "(or pass --cli-path pointing at a valid Snyk CLI)"
         )
     return "Snyk CLI not found on PATH -- install with `npm install -g snyk`"
 
 
 def _handle_scan_failure(status: ScanStatus, snyk_bin: str) -> int:
-    """`snyk_bin` is interpolated into the hints: after a standalone install
+    """`snyk_bin` is interpolated into the hints: after a user-specified install
     there may be no `snyk` on PATH to suggest running."""
     if status == "auth_required":
         return _fail_open_or_block(_auth_hint(snyk_bin), indent=True)

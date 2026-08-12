@@ -22,6 +22,7 @@ from tests.sac.conftest import (
     marked_files,
     pre_commit,
     requires_git,
+    requires_hooks_path_support,
 )
 
 
@@ -38,6 +39,7 @@ class TestHookStrategySelection:
         assert self._selected_integration_kind(workspace) == "pre-commit"
 
     @requires_git
+    @requires_hooks_path_support
     def test_detects_husky(self, workspace):
         subprocess.run(
             ["git", "-C", str(workspace), "config", "core.hooksPath", ".husky"],
@@ -48,6 +50,7 @@ class TestHookStrategySelection:
         assert self._selected_integration_kind(workspace) == "husky"
 
     @requires_git
+    @requires_hooks_path_support
     def test_detects_husky_v9_hooks_path(self, workspace):
         subprocess.run(
             ["git", "-C", str(workspace), "config", "core.hooksPath", ".husky/_"],
@@ -58,6 +61,7 @@ class TestHookStrategySelection:
         assert self._selected_integration_kind(workspace) == "husky"
 
     @requires_git
+    @requires_hooks_path_support
     def test_detects_husky_with_normalized_hooks_path(self, workspace):
         (workspace / ".husky").mkdir()
         (workspace / ".husky" / "pre-commit").write_text("#!/usr/bin/env sh\n")
@@ -355,10 +359,10 @@ class TestGitNative:
         assert SPEC.begin_marker not in text
 
     def test_verify_reflects_installed_state(self, workspace):
-        _, ok, _ = git_hooks.verify_hook(workspace, SPEC)
+        _, ok, _, _ = git_hooks.verify_hook(workspace, SPEC)
         assert ok is False
         git_hooks.install_hook(workspace, SPEC)
-        _, ok, _ = git_hooks.verify_hook(workspace, SPEC)
+        _, ok, _, _ = git_hooks.verify_hook(workspace, SPEC)
         assert ok is True
 
     def test_verify_and_uninstall_ignore_non_utf8_existing_hook(self, workspace):
@@ -366,7 +370,7 @@ class TestGitNative:
         original = b"\xff\xfe\x00"
         hook.write_bytes(original)
 
-        _, ok, _ = git_hooks.verify_hook(workspace, SPEC)
+        _, ok, _, _ = git_hooks.verify_hook(workspace, SPEC)
         assert ok is False
         _, removed, _ = git_hooks.uninstall_hook(workspace, SPEC)
         assert removed is False
@@ -396,6 +400,7 @@ class TestGitNative:
         assert (workspace / ".native-snyk").read_text(encoding="utf-8") == "ok"
 
     @requires_git
+    @requires_hooks_path_support
     @pytest.mark.skipif(os.name == "nt", reason="POSIX git hooks only")
     def test_hooks_path_existing_hook_runs_with_installed_block(self, workspace):
         _configure_git_identity(workspace)
@@ -540,12 +545,12 @@ class TestConfigBasedHookStrategy:
         assert installed is True
         assert "hook." in path
 
-        ok, _ = strategy.is_installed(workspace, SPEC)
+        ok, _, _ = strategy.is_installed(workspace, SPEC)
         assert ok is True
 
         removed, _ = strategy.safe_uninstall(workspace, SPEC)
         assert removed is True
-        ok, _ = strategy.is_installed(workspace, SPEC)
+        ok, _, _ = strategy.is_installed(workspace, SPEC)
         assert ok is False
 
     def test_reinstall_after_git_upgrade_replaces_file_shim_with_config_hook(
@@ -561,7 +566,7 @@ class TestConfigBasedHookStrategy:
         manager, installed, path = git_hooks.install_hook(workspace, SPEC)
 
         strategy = git_native.ConfigBasedHookStrategy()
-        config_ok, _ = strategy.is_installed(workspace, SPEC)
+        config_ok, _, _ = strategy.is_installed(workspace, SPEC)
         assert manager == "git-native"
         assert installed is True
         assert path == f"{strategy._section(SPEC)} (git config)"
@@ -583,7 +588,7 @@ class TestConfigBasedHookStrategy:
 
         manager, installed, path = git_hooks.install_hook(workspace, SPEC)
 
-        config_ok, _ = strategy.is_installed(workspace, SPEC)
+        config_ok, _, _ = strategy.is_installed(workspace, SPEC)
         assert manager == "git-native"
         assert installed is True
         assert path == f"{strategy._section(SPEC)} (git config)"
@@ -602,7 +607,7 @@ class TestConfigBasedHookStrategy:
 
         manager, installed, path = git_hooks.install_hook(workspace, SPEC)
 
-        config_ok, _ = strategy.is_installed(workspace, SPEC)
+        config_ok, _, _ = strategy.is_installed(workspace, SPEC)
         file_hook = workspace / ".git" / "hooks" / "pre-commit"
         assert manager == "git-native"
         assert installed is True
@@ -764,7 +769,7 @@ class TestConfigBasedHookStrategy:
             git_native.ConfigBasedHookStrategy, "check_prerequisite", lambda self, ws: True
         )
 
-        manager, ok, path = git_hooks.verify_hook(workspace, SPEC)
+        manager, ok, path, _reason = git_hooks.verify_hook(workspace, SPEC)
 
         assert manager == "git-native"
         assert ok is True
@@ -782,7 +787,7 @@ class TestConfigBasedHookStrategy:
         git_native.FileShimStrategy().install(workspace, SPEC)
         (workspace / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
 
-        manager, ok, path = git_hooks.verify_hook(workspace, SPEC)
+        manager, ok, path, _reason = git_hooks.verify_hook(workspace, SPEC)
 
         assert manager == "git-native"
         assert ok is True
@@ -882,6 +887,127 @@ class TestFileShimStrategyFallbackSafety:
 
         assert not (workspace / ".git" / "hooks" / "pre-commit").exists()
         assert list(override.iterdir()) == []
+
+
+@requires_git
+class TestHooksPathVersionGate:
+    """``core.hooksPath`` itself was only added in Git 2.9.0 - older git
+    stores the config value but never reads it when looking for hooks.
+    Confirmed against a real, from-source Git 2.5.3 build (see
+    conftest.py's ``_installed_git_version`` docstring for how to
+    reproduce)."""
+
+    @pytest.mark.parametrize(
+        ("version", "expected"),
+        [((2, 9, 0), True), ((2, 8, 9), False), ((1, 7, 12), False), ((3, 0, 0), True)],
+    )
+    def test_hooks_path_supported_gates_at_2_9_0(self, workspace, monkeypatch, version, expected):
+        monkeypatch.setattr(git_native, "_git_version", lambda ws: version)
+        assert git_native._hooks_path_supported(workspace) is expected
+
+    def test_unknown_version_is_treated_as_unsupported(self, workspace, monkeypatch):
+        monkeypatch.setattr(git_native, "_git_version", lambda ws: None)
+        assert git_native._hooks_path_supported(workspace) is False
+
+    def test_resolve_ignores_override_when_this_git_cannot_honor_it(self, workspace, monkeypatch):
+        monkeypatch.setattr(git_native, "_git_version", lambda ws: (2, 8, 0))
+        subprocess.run(
+            ["git", "-C", str(workspace), "config", "core.hooksPath", "custom-hooks"],
+            check=True,
+        )
+        assert git_native.resolve_core_hooks_path(workspace) is None
+
+    def test_resolve_honors_override_once_supported(self, workspace, monkeypatch):
+        monkeypatch.setattr(git_native, "_git_version", lambda ws: (2, 9, 0))
+        override = workspace / "custom-hooks"
+        override.mkdir()
+        subprocess.run(
+            ["git", "-C", str(workspace), "config", "core.hooksPath", "custom-hooks"],
+            check=True,
+        )
+        assert git_native.resolve_core_hooks_path(workspace) == override.resolve()
+
+    def test_matches_real_git_ground_truth(self, workspace):
+        """No shim - cross-checks against what the real, installed git on
+        this machine actually reports."""
+        real_version = git_native._git_version(workspace)
+        assert real_version is not None
+        assert git_native._hooks_path_supported(workspace) is (real_version >= (2, 9, 0))
+
+
+@requires_git
+@requires_hooks_path_support
+class TestResolveCoreHooksPathLocalOnly:
+    """``core.hooksPath`` resolves system -> global -> local -> worktree by
+    default, so a machine-wide value has nothing to do with *workspace*.
+    ``local_only=True`` must see only what this repo's own config says."""
+
+    def test_local_only_ignores_a_global_override(self, workspace, monkeypatch, tmp_path_factory):
+        global_config = tmp_path_factory.mktemp("global") / "gitconfig"
+        global_config.write_text("[core]\n\thooksPath = /shared/hooks\n", encoding="utf-8")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+
+        assert git_native.resolve_core_hooks_path(workspace) == Path("/shared/hooks")
+        assert git_native.resolve_core_hooks_path(workspace, local_only=True) is None
+
+    def test_local_only_honors_a_local_override(self, workspace):
+        override = workspace / "custom-hooks"
+        override.mkdir()
+        subprocess.run(
+            ["git", "-C", str(workspace), "config", "--local", "core.hooksPath", "custom-hooks"],
+            check=True,
+        )
+
+        assert git_native.resolve_core_hooks_path(workspace, local_only=True) == override.resolve()
+
+    def test_local_only_never_shells_out_to_show_scope(self, workspace, monkeypatch):
+        """``--show-scope`` needs git >= 2.26, well above core.hooksPath's
+        own 2.9.0 floor - a local override set on git 2.9-2.25 must still
+        be honored. Resolution goes through ``--local``/``--worktree``
+        directly instead, which need only git >= 1.7.10 / 2.20
+        respectively, so this must never invoke ``--show-scope`` at all."""
+        override = workspace / "custom-hooks"
+        override.mkdir()
+        subprocess.run(
+            ["git", "-C", str(workspace), "config", "--local", "core.hooksPath", "custom-hooks"],
+            check=True,
+        )
+        real_run_git_safe = git_native._run_git_safe
+
+        def _spy(ws, args):
+            assert "--show-scope" not in args, f"must not shell out with --show-scope: {args}"
+            return real_run_git_safe(ws, args)
+
+        monkeypatch.setattr(git_native, "_run_git_safe", _spy)
+
+        assert git_native.resolve_core_hooks_path(workspace, local_only=True) == override.resolve()
+
+    def test_file_shim_ignores_global_override_and_uses_repo_default(
+        self, workspace, monkeypatch, tmp_path_factory
+    ):
+        shared_global_hooks = tmp_path_factory.mktemp("shared-global-hooks")
+        global_config = tmp_path_factory.mktemp("global-config") / "gitconfig"
+        global_config.write_text(
+            f"[core]\n\thooksPath = {shared_global_hooks.as_posix()}\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+
+        hook_path = git_native.FileShimStrategy()._hook_path(workspace)
+
+        assert hook_path == workspace / ".git" / "hooks" / "pre-commit"
+        assert list(shared_global_hooks.iterdir()) == []
+
+    def test_file_shim_still_honors_a_genuine_local_override(self, workspace):
+        override = workspace / "custom-hooks"
+        override.mkdir()
+        subprocess.run(
+            ["git", "-C", str(workspace), "config", "--local", "core.hooksPath", "custom-hooks"],
+            check=True,
+        )
+
+        hook_path = git_native.FileShimStrategy()._hook_path(workspace)
+
+        assert hook_path == override / "pre-commit"
 
 
 class TestWorktreeAndSubmoduleGitdirFile:

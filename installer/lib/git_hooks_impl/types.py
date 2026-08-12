@@ -1,12 +1,42 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar, Literal, Optional, Tuple
+from typing import ClassVar, Literal, NamedTuple, Optional, Tuple
 
-HookIntegrationKind = Literal["pre-commit", "husky", "git-native"]
+HookIntegrationKind = Literal["pre-commit", "husky", "git-native", "git-native-global"]
 
 
 class HookIntegrationSkipped(Exception):
     """Raised when an existing hook config cannot be safely edited."""
+
+
+class HookCheckResult(NamedTuple):
+    """Result of checking whether a hook strategy is genuinely installed.
+
+    A plain tuple works but invites exactly the bug this type exists to
+    prevent: a positional slot silently changing what it means. Named
+    fields make that impossible, and adding a field later is backward
+    compatible for any caller using attribute access instead of
+    positional unpacking.
+
+    - `installed`: whether git will actually execute this right now.
+    - `path`: always just the location checked - never prose.
+    - `reason`: ``None`` unless `installed` is False *and* there's a
+      specific explanation. Plain "not there" carries no reason.
+    """
+
+    installed: bool
+    path: str
+    reason: Optional[str] = None
+
+
+class HookVerification(NamedTuple):
+    """Result of ``git_hooks.verify_hook`` - the dispatcher-level version
+    of ``HookCheckResult``, adding which integration mechanism answered."""
+
+    kind: HookIntegrationKind
+    found: bool
+    path: str
+    reason: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -63,7 +93,7 @@ class HookStrategy:
     def install(self, workspace: Path, spec: HookSpec) -> Tuple[bool, str]:
         raise NotImplementedError
 
-    def is_installed(self, workspace: Path, spec: HookSpec) -> Tuple[bool, str]:
+    def is_installed(self, workspace: Path, spec: HookSpec) -> HookCheckResult:
         raise NotImplementedError
 
     def safe_uninstall(self, workspace: Path, spec: HookSpec) -> Tuple[bool, str]:

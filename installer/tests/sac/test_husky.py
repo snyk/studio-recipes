@@ -15,10 +15,12 @@ from tests.sac.conftest import (
     git_hooks,
     git_native,
     requires_git,
+    requires_hooks_path_support,
 )
 
 
 @requires_git
+@requires_hooks_path_support
 class TestHusky:
     @pytest.fixture
     def husky_workspace(self, workspace):
@@ -51,7 +53,7 @@ class TestHusky:
         original = b"\xff\xfe\x00"
         hook.write_bytes(original)
 
-        _, ok, _ = git_hooks.verify_hook(husky_workspace, SPEC)
+        _, ok, _, _ = git_hooks.verify_hook(husky_workspace, SPEC)
         assert ok is False
         _, removed, _ = git_hooks.uninstall_hook(husky_workspace, SPEC)
         assert removed is False
@@ -71,7 +73,7 @@ class TestHusky:
 
         manager, installed, _ = git_hooks.install_hook(workspace, SPEC)
 
-        config_ok, _ = config_strategy.is_installed(workspace, SPEC)
+        config_ok, _, _ = config_strategy.is_installed(workspace, SPEC)
         text = hook.read_text(encoding="utf-8")
         assert manager == "husky"
         assert installed is True
@@ -133,7 +135,7 @@ class TestHusky:
         assert installed is True
         assert Path(path) == workspace / "custom-hooks" / "pre-commit"
         assert SPEC.begin_marker not in stale_husky_hook.read_text(encoding="utf-8")
-        verify_manager, ok, verify_path = git_hooks.verify_hook(
+        verify_manager, ok, verify_path, _reason = git_hooks.verify_hook(
             workspace, _runtime_hook_spec(workspace, ".native-snyk")
         )
         assert verify_manager == "git-native"

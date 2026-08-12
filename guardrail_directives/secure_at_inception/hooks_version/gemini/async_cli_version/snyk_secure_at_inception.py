@@ -156,6 +156,9 @@ MANIFEST_SUFFIXES = {".csproj", ".lock", ".fsproj", ".vbproj"}
 
 MAX_STOP_CYCLES = 3
 
+# Per Gemini CLI's hooks docs: startup, resume, clear.
+KNOWN_SESSION_START_SOURCES = {"startup", "resume", "clear"}
+
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 
@@ -565,7 +568,10 @@ def handle_session_start(data: Dict[str, Any], workspace: str) -> None:
     additionalContext so Gemini can inform the user. If all checks pass,
     launches a background scan to warm Snyk's internal analysis cache.
     """
-    source = data.get("source", "startup")
+    source = data.get("source", "")
+    log_to_panel(f"[SAI] SessionStart source={source!r}")
+    if source not in KNOWN_SESSION_START_SOURCES:
+        log_to_panel(f"[SAI] Unrecognized SessionStart source {source!r}, treating as resume")
     issues: List[str] = []
 
     # 1. Check Snyk auth
@@ -617,26 +623,25 @@ def handle_session_start(data: Dict[str, Any], workspace: str) -> None:
         )
         return
 
-    # 4. All checks passed -- clear stale state on fresh sessions
+    # (Re)capture the SCA baseline only on a new session -- doing it on
+    # resume would fold pre-existing changes in, hiding them from Stop.
     log_to_panel("[SAI] Snyk authenticated, CLI found")
     if _LOG_FILE:
         _shared_log(f"SessionStart: studio v{STUDIO_VERSION}", _LOG_FILE)
     if source in ("startup", "clear"):
         clear_state(workspace)
         clear_baseline(workspace)
+        if launch_background_sca_baseline_scan(workspace):
+            log_to_panel("[SAI] SCA baseline scan launched")
+            save_manifest_hash_baseline(workspace, MANIFEST_FILES, MANIFEST_SUFFIXES)
+        else:
+            debug_log("SCA baseline scan not launched (already running or complete)")
 
-    # 5. Launch cache-warming scans (non-blocking, dedup built-in)
+    # SAST has no baseline concept -- always safe to warm.
     if launch_background_scan(workspace):
         log_to_panel("[SAI] Cache-warming scan launched")
     else:
         debug_log("Cache-warm scan not launched (already running or complete)")
-
-    # The SCA baseline scan result persists across Stop cycles — regular scans compare against it.
-    if launch_background_sca_baseline_scan(workspace):
-        log_to_panel("[SAI] Cache-warming SCA scan launched")
-        save_manifest_hash_baseline(workspace, MANIFEST_FILES, MANIFEST_SUFFIXES)
-    else:
-        debug_log("Cache-warm SCA scan not launched (already running or complete)")
 
     output_response({})
 
@@ -767,7 +772,10 @@ def _check_stop_preconditions(workspace: str) -> Tuple[Optional[Dict[str, Any]],
         )
 
         if not has_pending_changes(state) and not hash_changed_from_baseline:
-            debug_log("No pending changes")
+            log_to_panel(
+                f"[SAI] Stop: no pending changes (tracked files: {len(state.get('code_files', {}))}, "
+                f"manifest hashes changed vs baseline: {len(hash_changed_from_baseline)})"
+            )
             return {}, ctx
 
         stop_cycles = state.get("stop_cycles", 0)

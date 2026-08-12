@@ -12,6 +12,13 @@ import pytest
 from tests.sac.conftest import _set_home, sac_hook
 
 
+def _make_executable(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
 class TestVulnPathMatching:
     def test_exact_match(self):
         assert sac_hook._vuln_path_matches("pkg/api/main.go", {"pkg/api/main.go"})
@@ -304,6 +311,68 @@ class TestSnykEnv:
         monkeypatch.setattr("builtins.open", mock_open)
         env = sac_hook._snyk_env()
         assert "INTERNAL_SNYK_CLIENT_MACHINE_ID" not in env
+
+
+class TestSnykCliDiscovery:
+    def test_find_snyk_binary_prefers_sidecar_over_path(self, monkeypatch, tmp_path):
+        home = tmp_path / "home"
+        _set_home(monkeypatch, home)
+        pinned = _make_executable(tmp_path / "pin" / "snyk")
+        path_cli = _make_executable(tmp_path / "path" / "snyk")
+        sidecar = home / ".snyk-studio" / "cli-path"
+        sidecar.parent.mkdir(parents=True)
+        sidecar.write_text(str(pinned), encoding="utf-8")
+
+        monkeypatch.setattr(
+            sac_hook.shutil,
+            "which",
+            lambda cmd, path=None: str(path_cli) if cmd == "snyk" else None,
+        )
+
+        assert sac_hook.find_snyk_binary() == str(pinned)
+
+    def test_find_snyk_binary_falls_back_to_path_when_sidecar_missing(self, monkeypatch, tmp_path):
+        home = tmp_path / "home"
+        _set_home(monkeypatch, home)
+        path_cli = _make_executable(tmp_path / "path" / "snyk")
+        monkeypatch.setattr(
+            sac_hook.shutil,
+            "which",
+            lambda cmd, path=None: str(path_cli) if cmd == "snyk" else None,
+        )
+
+        assert sac_hook.find_snyk_binary() == str(path_cli)
+
+    def test_snyk_env_prepends_sidecar_dir(self, monkeypatch, tmp_path):
+        home = tmp_path / "home"
+        _set_home(monkeypatch, home)
+        pinned = _make_executable(tmp_path / "pin" / "snyk")
+        sidecar = home / ".snyk-studio" / "cli-path"
+        sidecar.parent.mkdir(parents=True)
+        sidecar.write_text(str(pinned), encoding="utf-8")
+        monkeypatch.setenv("PATH", str(tmp_path / "path"))
+
+        env = sac_hook._snyk_env()
+
+        assert env["PATH"].split(os.pathsep)[0] == str(pinned.parent)
+
+    def test_auth_failure_hint_names_resolved_binary(self, monkeypatch, tmp_path, capsys):
+        home = tmp_path / "home"
+        _set_home(monkeypatch, home)
+        pinned = _make_executable(tmp_path / "pin" / "snyk")
+        sidecar = home / ".snyk-studio" / "cli-path"
+        sidecar.parent.mkdir(parents=True)
+        sidecar.write_text(str(pinned), encoding="utf-8")
+        (tmp_path / ".git").mkdir()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sac_hook, "find_repo_root", lambda _: tmp_path)
+        monkeypatch.setattr(sac_hook, "get_staged_files", lambda _: ["app.py"])
+        monkeypatch.setattr(sac_hook, "classify_staged", lambda _: (["app.py"], []))
+        monkeypatch.setattr(sac_hook, "check_snyk_auth", lambda: None)
+
+        assert sac_hook.main(["--staged"]) == sac_hook.EXIT_PREREQ
+
+        assert f"run `{pinned} auth`" in capsys.readouterr().err
 
 
 class TestParseCliArgs:

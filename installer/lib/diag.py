@@ -11,6 +11,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+_INSTALLER_LIB_DIR = Path(__file__).resolve().parent
+if str(_INSTALLER_LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(_INSTALLER_LIB_DIR))
+
+from snyk_cli_selection import SnykCliResolver  # noqa: E402
+
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 _VERSION_RE = re.compile(r"(\d+\.\d[\d.]*)")
 
@@ -280,42 +286,32 @@ def _collect_ade_versions(zf: zipfile.ZipFile, ade_homes: dict[str, Path] | None
 
 
 def _collect_dependency_versions(zf: zipfile.ZipFile) -> None:
-    deps: dict[str, str | None] = {"node": None, "uv": None, "snyk": None, "nvm": None}
+    snyk_cli_resolver = SnykCliResolver(runner=subprocess.run)
+    snyk_cli = snyk_cli_resolver.collect_cli_info()
+    deps: dict[str, Any] = {
+        "node": None,
+        "uv": None,
+        "snyk": snyk_cli["from_user_path"]["version"],
+        "snyk_cli": snyk_cli,
+        "nvm": None,
+    }
 
     for dep, cmd in [
         ("node", ["node", "--version"]),
         ("uv", ["uv", "--version"]),
-        ("snyk", ["snyk", "--version"]),
     ]:
-        try:
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=5).stdout.strip()
-            m = _VERSION_RE.search(out)
-            if m:
-                deps[dep] = m.group(1)
-        except Exception:
-            pass
+        deps[dep] = snyk_cli_resolver.command_version(cmd)
 
     # nvm is a shell function on Unix; use bash sourcing. On Windows, nvm-windows is a real binary.
-    try:
-        if _IS_WINDOWS:
-            out = subprocess.run(
-                ["nvm", "version"], capture_output=True, text=True, timeout=5
-            ).stdout.strip()
-        else:
-            nvm_dir = os.environ.get("NVM_DIR", str(Path.home() / ".nvm"))
-            out = subprocess.run(
-                f"source {shlex.quote(nvm_dir + '/nvm.sh')} 2>/dev/null && nvm --version",
-                shell=True,
-                executable="/bin/bash",
-                capture_output=True,
-                text=True,
-                timeout=5,
-            ).stdout.strip()
-        m = _VERSION_RE.search(out)
-        if m:
-            deps["nvm"] = m.group(1)
-    except Exception:
-        pass
+    if _IS_WINDOWS:
+        deps["nvm"] = snyk_cli_resolver.command_version(["nvm", "version"])
+    else:
+        nvm_dir = os.environ.get("NVM_DIR", str(Path.home() / ".nvm"))
+        deps["nvm"] = snyk_cli_resolver.command_version(
+            f"source {shlex.quote(nvm_dir + '/nvm.sh')} 2>/dev/null && nvm --version",
+            shell=True,
+            executable="/bin/bash",
+        )
 
     zf.writestr("dependency_versions.json", json.dumps(deps))
 

@@ -10,7 +10,7 @@ Runs targeted Snyk scans using the CLI:
 Parses JSON output to extract vulnerability details.
 
 Requirements:
-- Snyk CLI must be installed globally: npm install -g snyk
+- Snyk CLI must be selected by the installer sidecar or discoverable on PATH
 - Must be authenticated: snyk auth
 
 Usage:
@@ -26,6 +26,9 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 SNYK_STUDIO_VERSION = "1.0.6"
+SNYK_CLI_NOT_FOUND_MESSAGE = (
+    "Snyk CLI not found. Re-run the Snyk Studio installer, or make Snyk available on PATH."
+)
 
 _IS_WINDOWS = sys.platform == "win32"
 # Console apps (snyk / the cmd.exe shim) spawned from this windowless background
@@ -75,9 +78,44 @@ def check_snyk_auth() -> Optional[str]:
     return None
 
 
+def _cli_path_sidecar() -> str:
+    """Resolved per call, not at import, so ``~`` follows the caller's HOME."""
+    return os.path.join(os.path.expanduser("~"), ".snyk-studio", "cli-path")
+
+
+def _debug(message: str) -> None:
+    if os.environ.get("SNYK_HOOK_DEBUG") == "1":
+        print(f"  [debug] {message}", file=sys.stderr)
+
+
+def _snyk_cli_from_sidecar() -> Optional[str]:
+    """Return the installer-selected CLI path, or None if unpinned/stale."""
+    sidecar = _cli_path_sidecar()
+    try:
+        with open(sidecar, encoding="utf-8-sig") as f:
+            pinned = f.read().strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not pinned:
+        return None
+    expanded = os.path.expanduser(pinned)
+    if not os.path.isabs(expanded):
+        _debug(f'{sidecar} pins "{pinned}", which is not an absolute path')
+        return None
+    if os.path.isfile(expanded) and os.access(expanded, os.X_OK):
+        return os.path.abspath(expanded)
+    _debug(f'{sidecar} pins "{pinned}", which does not exist or is not executable')
+    return None
+
+
+def _prepend_to_path(env: Dict[str, str], bin_dir: str) -> None:
+    entries = [p for p in env.get("PATH", "").split(os.pathsep) if p and p != bin_dir]
+    env["PATH"] = os.pathsep.join([bin_dir, *entries])
+
+
 def check_snyk_cli() -> Optional[str]:
-    """Return the path to the snyk binary if discoverable on PATH, else None."""
-    return shutil.which("snyk")
+    """Return the installer-selected Snyk CLI or the current PATH binary."""
+    return _snyk_cli_from_sidecar() or shutil.which("snyk")
 
 
 @dataclass
@@ -213,7 +251,14 @@ def run_snyk_cli(args: List[str], timeout: int = 300) -> tuple[int, str, str]:
     Returns:
         Tuple of (exit_code, stdout, stderr)
     """
+    snyk_bin = check_snyk_cli()
+    if snyk_bin is None:
+        return -1, "", SNYK_CLI_NOT_FOUND_MESSAGE
+
     env = os.environ.copy()
+    bin_dir = os.path.dirname(snyk_bin)
+    if bin_dir:
+        _prepend_to_path(env, bin_dir)
     env["SNYK_INTEGRATION_NAME"] = "STUDIO"
     env["SNYK_INTEGRATION_VERSION"] = SNYK_STUDIO_VERSION
     env["SNYK_INTEGRATION_ENVIRONMENT"] = "kiro"
@@ -228,7 +273,7 @@ def run_snyk_cli(args: List[str], timeout: int = 300) -> tuple[int, str, str]:
 
     try:
         result = subprocess.run(
-            ["snyk"] + args,
+            [snyk_bin] + args,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -240,7 +285,7 @@ def run_snyk_cli(args: List[str], timeout: int = 300) -> tuple[int, str, str]:
     except subprocess.TimeoutExpired:
         return -1, "", "Snyk scan timed out"
     except FileNotFoundError:
-        return -1, "", "Snyk CLI not found. Please install: npm install -g snyk"
+        return -1, "", SNYK_CLI_NOT_FOUND_MESSAGE
 
 
 def parse_sast_json(output: str) -> List[CodeVulnerability]:

@@ -312,6 +312,35 @@
         }
       }
     },
+    "secrets-precommit-hook-global": {
+      "type": "hooks",
+      "scope": "git-global",
+      "description": "Secrets At Commit pre-commit hook (secrets-only), machine-wide (global git config). Requires git >= 2.54.",
+      "enabled": true,
+      "sources": {
+        "git-global": {
+          "files": [
+            { "src": "guardrail_directives/secrets_at_commit/snyk_secrets_at_commit.py", "dest": "secrets_at_commit/snyk_secrets_at_commit.py" },
+            { "src": "guardrail_directives/secrets_at_commit/lib/__init__.py", "dest": "secrets_at_commit/lib/__init__.py" },
+            { "src": "guardrail_directives/secrets_at_commit/lib/findings.py", "dest": "secrets_at_commit/lib/findings.py" },
+            { "src": "guardrail_directives/secrets_at_commit/lib/diff_scope.py", "dest": "secrets_at_commit/lib/diff_scope.py" },
+            { "src": "guardrail_directives/secrets_at_commit/lib/baseline.py", "dest": "secrets_at_commit/lib/baseline.py" },
+            { "src": "guardrail_directives/secrets_at_commit/lib/git_ops.py", "dest": "secrets_at_commit/lib/git_ops.py" },
+            { "src": "guardrail_directives/secrets_at_commit/lib/index_snapshot.py", "dest": "secrets_at_commit/lib/index_snapshot.py" },
+            { "src": "guardrail_directives/secrets_at_commit/lib/proc.py", "dest": "secrets_at_commit/lib/proc.py" },
+            { "src": "guardrail_directives/secrets_at_commit/lib/snyk_cli.py", "dest": "secrets_at_commit/lib/snyk_cli.py" },
+            { "src": "guardrail_directives/secrets_at_commit/lib/report.py", "dest": "secrets_at_commit/lib/report.py" },
+            { "src": "guardrail_directives/secrets_at_commit/lib/timing.py", "dest": "secrets_at_commit/lib/timing.py" },
+            { "src": "guardrail_directives/secrets_at_commit/lib/persistent_log.py", "dest": "secrets_at_commit/lib/persistent_log.py" }
+          ],
+          "pre_commit_integration": {
+            "tag": "snyk-secrets-at-commit",
+            "command": "uv run \"$HOME/.snyk-studio/secrets_at_commit/snyk_secrets_at_commit.py\"",
+            "name": "Snyk Secrets At Commit"
+          }
+        }
+      }
+    },
     "secure-dependency-health-check-skill": {
       "type": "skill",
       "description": "Secure dependency health check skill",

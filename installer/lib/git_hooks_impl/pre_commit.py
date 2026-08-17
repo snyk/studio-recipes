@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 import io
 from pathlib import Path
-from typing import Any, ClassVar, List, Optional, Tuple, cast
+from typing import Any, ClassVar, cast
 
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
@@ -25,7 +27,7 @@ from .types import (
 PRE_COMMIT_YAML_NAMES = (".pre-commit-config.yaml", ".pre-commit-config.yml")
 
 
-def _precommit_yaml_path(workspace: Path) -> Optional[Path]:
+def _precommit_yaml_path(workspace: Path) -> Path | None:
     for name in PRE_COMMIT_YAML_NAMES:
         candidate = workspace / name
         if candidate.is_file():
@@ -68,7 +70,7 @@ def _ensure_repos_seq(data: CommentedMap) -> CommentedSeq:
     return repos
 
 
-def _load_precommit_yaml_ruamel(yaml_path: Path) -> Tuple[str, YAML, CommentedMap]:
+def _load_precommit_yaml_ruamel(yaml_path: Path) -> tuple[str, YAML, CommentedMap]:
     raw_text = _normalize_existing(_read_hook_text_for_update(yaml_path, ".pre-commit-config.yaml"))
     yaml = _new_yaml()
     try:
@@ -110,7 +112,7 @@ def _new_precommit_repo_entry(spec: HookSpec) -> CommentedMap:
     return repo
 
 
-def _ruamel_comment_marker_lines(value: Any, marker: str) -> List[int]:
+def _ruamel_comment_marker_lines(value: Any, marker: str) -> list[int]:
     token_value = getattr(value, "value", None)
     if isinstance(token_value, str) and marker in token_value:
         line = getattr(getattr(value, "start_mark", None), "line", None)
@@ -124,7 +126,7 @@ def _ruamel_comment_marker_lines(value: Any, marker: str) -> List[int]:
     return []
 
 
-def _node_marker_lines(node: Any, marker: str) -> List[int]:
+def _node_marker_lines(node: Any, marker: str) -> list[int]:
     comments = getattr(node, "ca", None)
     if comments is None:
         return []
@@ -135,7 +137,7 @@ def _node_marker_lines(node: Any, marker: str) -> List[int]:
     )
 
 
-def _collect_marker_lines(node: Any, marker: str, seen: Optional[set[int]] = None) -> List[int]:
+def _collect_marker_lines(node: Any, marker: str, seen: set[int] | None = None) -> list[int]:
     if seen is None:
         seen = set()
     if id(node) in seen:
@@ -152,9 +154,9 @@ def _collect_marker_lines(node: Any, marker: str, seen: Optional[set[int]] = Non
     return lines
 
 
-def _marker_line_spans(begin_lines: List[int], end_lines: List[int]) -> List[Tuple[int, int]]:
-    open_begin: Optional[int] = None
-    spans: List[Tuple[int, int]] = []
+def _marker_line_spans(begin_lines: list[int], end_lines: list[int]) -> list[tuple[int, int]]:
+    open_begin: int | None = None
+    spans: list[tuple[int, int]] = []
     events = sorted(
         [(line, "begin") for line in set(begin_lines)] + [(line, "end") for line in set(end_lines)]
     )
@@ -203,9 +205,7 @@ def _clean_positional_comment(value: Any, spec: HookSpec) -> Any:
     return None if _empty_comment(cleaned) else cleaned
 
 
-def _clear_managed_marker_comments(
-    node: Any, spec: HookSpec, seen: Optional[set[int]] = None
-) -> None:
+def _clear_managed_marker_comments(node: Any, spec: HookSpec, seen: set[int] | None = None) -> None:
     if seen is None:
         seen = set()
     if id(node) in seen:
@@ -231,14 +231,14 @@ def _clear_managed_marker_comments(
             _clear_managed_marker_comments(value, spec, seen)
 
 
-def _node_start_line(node: Any) -> Optional[int]:
+def _node_start_line(node: Any) -> int | None:
     line = getattr(getattr(node, "lc", None), "line", None)
     return line if isinstance(line, int) else None
 
 
 def _repo_in_marker_span(
     repo: Any,
-    marker_spans: List[Tuple[int, int]],
+    marker_spans: list[tuple[int, int]],
 ) -> bool:
     repo_line = _node_start_line(repo)
     if repo_line is None:
@@ -246,7 +246,7 @@ def _repo_in_marker_span(
     return any(begin_line < repo_line < end_line for begin_line, end_line in marker_spans)
 
 
-def _managed_precommit_repo_indexes(repos: Any, spec: HookSpec) -> List[int]:
+def _managed_precommit_repo_indexes(repos: Any, spec: HookSpec) -> list[int]:
     if not isinstance(repos, list):
         return []
     begin_lines = _collect_marker_lines(repos, spec.begin_marker)
@@ -255,7 +255,7 @@ def _managed_precommit_repo_indexes(repos: Any, spec: HookSpec) -> List[int]:
     return [index for index, repo in enumerate(repos) if _repo_in_marker_span(repo, marker_spans)]
 
 
-def _managed_precommit_repos(repos: Any, spec: HookSpec) -> List[CommentedMap]:
+def _managed_precommit_repos(repos: Any, spec: HookSpec) -> list[CommentedMap]:
     if not isinstance(repos, list):
         return []
     return [
@@ -265,7 +265,7 @@ def _managed_precommit_repos(repos: Any, spec: HookSpec) -> List[CommentedMap]:
     ]
 
 
-def _managed_precommit_hook(repo: Any, spec: HookSpec) -> Optional[CommentedMap]:
+def _managed_precommit_hook(repo: Any, spec: HookSpec) -> CommentedMap | None:
     if not isinstance(repo, dict):
         return None
     hooks = repo.get("hooks")
@@ -277,7 +277,7 @@ def _managed_precommit_hook(repo: Any, spec: HookSpec) -> Optional[CommentedMap]
     return None
 
 
-def _managed_precommit_hooks(repos: Any, spec: HookSpec) -> List[CommentedMap]:
+def _managed_precommit_hooks(repos: Any, spec: HookSpec) -> list[CommentedMap]:
     return [
         hook
         for repo in _managed_precommit_repos(repos, spec)
@@ -311,7 +311,7 @@ def _remove_managed_precommit_entries(
     return removed
 
 
-def install_precommit_framework(workspace: Path, spec: HookSpec) -> Tuple[bool, str]:
+def install_precommit_framework(workspace: Path, spec: HookSpec) -> tuple[bool, str]:
     yaml_path = _precommit_yaml_path(workspace)
     if yaml_path is None:
         raise FileNotFoundError(".pre-commit-config.yaml not found")
@@ -339,7 +339,7 @@ def install_precommit_framework(workspace: Path, spec: HookSpec) -> Tuple[bool, 
     return final_text != original_text, str(yaml_path)
 
 
-def uninstall_precommit_framework(workspace: Path, spec: HookSpec) -> Tuple[bool, str]:
+def uninstall_precommit_framework(workspace: Path, spec: HookSpec) -> tuple[bool, str]:
     yaml_path = _precommit_yaml_path(workspace)
     if yaml_path is None or not yaml_path.is_file():
         return False, ""
@@ -360,7 +360,7 @@ def uninstall_precommit_framework(workspace: Path, spec: HookSpec) -> Tuple[bool
     return True, str(yaml_path)
 
 
-def verify_precommit_framework(workspace: Path, spec: HookSpec) -> Tuple[bool, str]:
+def verify_precommit_framework(workspace: Path, spec: HookSpec) -> tuple[bool, str]:
     yaml_path = _precommit_yaml_path(workspace)
     if yaml_path is None or not yaml_path.is_file():
         return False, ""
@@ -380,15 +380,15 @@ class PreCommitFrameworkStrategy(HookStrategy):
     def check_prerequisite(self, workspace: Path) -> bool:
         return _precommit_yaml_path(workspace) is not None
 
-    def install(self, workspace: Path, spec: HookSpec) -> Tuple[bool, str]:
+    def install(self, workspace: Path, spec: HookSpec) -> tuple[bool, str]:
         return install_precommit_framework(workspace, spec)
 
     def is_installed(self, workspace: Path, spec: HookSpec) -> HookCheckResult:
         ok, path = verify_precommit_framework(workspace, spec)
         return HookCheckResult(ok, path)
 
-    def safe_uninstall(self, workspace: Path, spec: HookSpec) -> Tuple[bool, str]:
+    def safe_uninstall(self, workspace: Path, spec: HookSpec) -> tuple[bool, str]:
         return uninstall_precommit_framework(workspace, spec)
 
-    def file_hook_path(self, workspace: Path) -> Optional[Path]:
+    def file_hook_path(self, workspace: Path) -> Path | None:
         return _precommit_yaml_path(workspace)

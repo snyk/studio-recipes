@@ -302,7 +302,7 @@ def get_scan_completion_info(workspace: str) -> Optional[Dict[str, Any]]:
     done_file = get_scan_done_file(workspace)
     try:
         with open(done_file) as f:
-            return cast(dict[str, Any], json.load(f))
+            return cast(Dict[str, Any], json.load(f))
     except (OSError, json.JSONDecodeError, FileNotFoundError):
         return None
 

@@ -2,6 +2,8 @@
 the pure-Python diff/finding logic in `secrets_at_commit/lib/`, and the
 entry script's fail-open/fail-closed contract."""
 
+from __future__ import annotations
+
 import importlib
 import json
 import os
@@ -15,7 +17,6 @@ import textwrap
 from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 import pytest
 
@@ -430,7 +431,7 @@ class TestStagedSnapshot:
 
     def test_temp_dir_cleaned_up_even_on_exception(self, repo):
         _stage(repo, "app.py", "one\n")
-        captured: List[Path] = []
+        captured: list[Path] = []
 
         def _raise_inside_snapshot():
             with staged_snapshot(repo, ["app.py"]) as snap:
@@ -468,7 +469,7 @@ class TestWorkingTreeSnapshot:
 
     def test_temp_dir_cleaned_up_even_on_exception(self, repo):
         _stage(repo, "app.py", "one\n")
-        captured: List[Path] = []
+        captured: list[Path] = []
 
         def _raise_inside_snapshot():
             with working_tree_snapshot(repo, ["app.py"]) as snap:
@@ -537,7 +538,7 @@ class TestRefSnapshot:
     def test_temp_dir_cleaned_up_even_on_exception(self, repo):
         _stage(repo, "app.py", "one\n")
         subprocess.run(["git", "commit", "-q", "-m", "add app"], cwd=repo, check=True)
-        captured: List[Path] = []
+        captured: list[Path] = []
 
         def _raise_inside_snapshot():
             with ref_snapshot(repo, "HEAD", ["app.py"]) as (snap, _existing):
@@ -553,7 +554,7 @@ class TestExtractDefensively:
     """Exercised directly, regardless of which Python runs these tests."""
 
     @staticmethod
-    def _make_tar(members: List[Tuple[tarfile.TarInfo, Optional[bytes]]]) -> tarfile.TarFile:
+    def _make_tar(members: list[tuple[tarfile.TarInfo, bytes | None]]) -> tarfile.TarFile:
         buf = BytesIO()
         with tarfile.open(fileobj=buf, mode="w") as tar:
             for info, data in members:
@@ -617,7 +618,7 @@ class TestExtractDefensively:
         file_member.size = 5
 
         class _FakeTar:
-            def getmembers(self) -> List[tarfile.TarInfo]:
+            def getmembers(self) -> list[tarfile.TarInfo]:
                 return [pax_member, file_member]
 
             def extract(self, member: tarfile.TarInfo, path: Path) -> None:
@@ -1640,7 +1641,8 @@ class TestBlocksOnlyOnAddedFindings:
         snapshot_dir = tmp_path / "staged-snapshot"
         snapshot_dir.mkdir()
 
-        @staticmethod
+        # Plain local helper: `staticmethod` objects aren't directly callable
+        # until Python 3.10, and this isn't a class attribute anyway.
         def _fake_snapshot(repo_root, files):
             from contextlib import contextmanager
 
@@ -1695,7 +1697,7 @@ class TestParseCliArgs:
 # ============================================================================
 
 
-def _write_lines(path: Path, lines: List[str]) -> None:
+def _write_lines(path: Path, lines: list[str]) -> None:
     path.write_text("\n".join(lines) + "\n")
 
 
@@ -2144,7 +2146,7 @@ class TestOutputScenarios:
 
             monkeypatch.setattr(secrets_hook, "run_concurrent_scans", _fake_concurrent)
 
-    def _run(self, capsys, header: str, argv: List[str]):
+    def _run(self, capsys, header: str, argv: list[str]):
         rc = secrets_hook.main(argv)
         err = capsys.readouterr().err
         with capsys.disabled():
@@ -2800,7 +2802,7 @@ class TestContentStrategyEndToEnd:
             end_column=19,
         )
 
-        def _workspace_files(workspace: Path) -> List[str]:
+        def _workspace_files(workspace: Path) -> list[str]:
             return sorted(
                 p.relative_to(workspace).as_posix() for p in workspace.rglob("*") if p.is_file()
             )

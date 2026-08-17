@@ -19,7 +19,7 @@ import sys
 import tarfile
 import zipfile
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 # Installer flavors this script can build.
 ALL_FLAVORS = ["sh", "ps1", "py", "go"]
@@ -150,7 +150,7 @@ def collect_bundle_info(
     with open(manifest_path) as f:
         manifest = json.load(f)
 
-    src_paths: set[str] = set()
+    src_paths: Set[str] = set()
     for recipe in manifest["recipes"].values():
         for ade_sources in recipe.get("sources", {}).values():
             for file_entry in ade_sources.get("files", []):

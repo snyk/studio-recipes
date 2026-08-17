@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.8"
+# ///
 """
 Snyk Studio Recipes Installer
 ==============================
@@ -38,6 +41,8 @@ Options:
     -h, --help                                 Show this help message
 """
 
+from __future__ import annotations
+
 import argparse
 import contextlib
 import filecmp
@@ -51,7 +56,7 @@ import sys
 import tempfile
 from pathlib import Path
 from subprocess import run
-from typing import Any, Callable, Dict, Iterator, List, NamedTuple, Optional, Set, Tuple, cast
+from typing import Any, Callable, Dict, Iterator, NamedTuple, cast
 
 _INSTALLER_LIB_DIR = Path(__file__).resolve().parent / "lib"
 if str(_INSTALLER_LIB_DIR) not in sys.path:
@@ -121,7 +126,7 @@ class Color:
     """
 
     def __init__(self):
-        self._enabled: Optional[bool] = None
+        self._enabled: bool | None = None
 
     @property
     def enabled(self) -> bool:
@@ -183,7 +188,7 @@ C = Color()
 # =============================================================================
 
 
-def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="snyk-studio-installer",
         description="Snyk Studio Recipes Installer",
@@ -306,8 +311,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 
 def _parse_recipe_selection(
-    parser: argparse.ArgumentParser, values: Optional[List[str]]
-) -> Optional[List[str]]:
+    parser: argparse.ArgumentParser, values: list[str] | None
+) -> list[str] | None:
     """Normalise ``--recipes`` values into an ordered list of unique names.
 
     ``--recipes`` is registered with ``action="append"`` only so a repeated flag
@@ -321,7 +326,7 @@ def _parse_recipe_selection(
     if len(values) > 1:
         parser.error("--recipes may be given only once; pass one comma-separated list")
 
-    selection: List[str] = []
+    selection: list[str] = []
     for element in values[0].split(","):
         name = element.strip()
         if not name:
@@ -435,30 +440,30 @@ class Manifest:
     def __init__(self, path: Path):
         with open(path) as f:
             self.data = json.load(f)
-        self.recipes: Dict[str, Any] = self.data["recipes"]
-        self.profiles: Dict[str, Any] = self.data.get("profiles", {})
-        self.conflicting_resources: Dict[str, Any] = self.data.get("conflicting-resources", {})
+        self.recipes: dict[str, Any] = self.data["recipes"]
+        self.profiles: dict[str, Any] = self.data.get("profiles", {})
+        self.conflicting_resources: dict[str, Any] = self.data.get("conflicting-resources", {})
 
-    def profile_recipes(self, profile: str) -> List[str]:
+    def profile_recipes(self, profile: str) -> list[str]:
         """Return the recipe ids a profile's list names, expanding ``"*"``."""
         listed = self.profiles.get(profile, {}).get("recipes", [])
         if "*" in listed:
             return list(self.recipes.keys())
         return list(listed)
 
-    def unprofiled_recipes(self) -> List[str]:
+    def unprofiled_recipes(self) -> list[str]:
         """Return the recipes that appear in no profile's recipe list.
 
         These are the opt-in extras: never installed by a bare profile, always
         nameable by ``--recipes``. A profile listing ``"*"`` covers every
         recipe, so it empties this set rather than making ``"*"`` a name.
         """
-        profiled: Set[str] = set()
+        profiled: set[str] = set()
         for profile in self.profiles:
             profiled.update(self.profile_recipes(profile))
         return [r for r in self.recipes if r not in profiled]
 
-    def nameable_recipes(self, profile: str) -> List[str]:
+    def nameable_recipes(self, profile: str) -> list[str]:
         """Return the identifiers ``--recipes`` accepts under *profile*.
 
         Disabled recipes are excluded, so a name rejected for being disabled is
@@ -467,7 +472,7 @@ class Manifest:
         candidates = set(self.profile_recipes(profile)) | set(self.unprofiled_recipes())
         return [r for r in self.recipes if r in candidates and self.recipes[r].get("enabled", True)]
 
-    def resolve_recipes(self, profile: str, selection: Optional[List[str]] = None) -> List[str]:
+    def resolve_recipes(self, profile: str, selection: list[str] | None = None) -> list[str]:
         if profile not in self.profiles:
             print(f"Unknown profile: {profile}", file=sys.stderr)
             print(f"Available: {list(self.profiles.keys())}", file=sys.stderr)
@@ -505,7 +510,7 @@ class Manifest:
     def is_ade_scoped(self, recipe_id: str) -> bool:
         return not (self.is_workspace_scoped(recipe_id) or self.is_git_global_scoped(recipe_id))
 
-    def sorted_by_scope(self, recipe_ids: List[str]) -> List[str]:
+    def sorted_by_scope(self, recipe_ids: list[str]) -> list[str]:
         """Order *recipe_ids* git-global -> ADE-scoped -> workspace-scoped
         (stable within each group) - the fixed install/verify/uninstall
         order every call site needs, enforced once here instead of
@@ -520,27 +525,27 @@ class Manifest:
 
         return sorted(recipe_ids, key=scope_rank)
 
-    def filter_git_global_scoped(self, recipe_ids: List[str]) -> List[str]:
+    def filter_git_global_scoped(self, recipe_ids: list[str]) -> list[str]:
         return [r for r in recipe_ids if self.is_git_global_scoped(r)]
 
-    def filter_ade_scoped(self, recipe_ids: List[str]) -> List[str]:
+    def filter_ade_scoped(self, recipe_ids: list[str]) -> list[str]:
         return [r for r in recipe_ids if self.is_ade_scoped(r)]
 
-    def filter_workspace_scoped(self, recipe_ids: List[str]) -> List[str]:
+    def filter_workspace_scoped(self, recipe_ids: list[str]) -> list[str]:
         return [r for r in recipe_ids if self.is_workspace_scoped(r)]
 
-    def get_sources(self, recipe_id: str, ade: str) -> Dict[str, Any]:
+    def get_sources(self, recipe_id: str, ade: str) -> dict[str, Any]:
         return cast(Dict[str, Any], self.recipes.get(recipe_id, {}).get("sources", {}).get(ade, {}))
 
-    def all_recipe_ids(self) -> List[str]:
+    def all_recipe_ids(self) -> list[str]:
         return self.sorted_by_scope(list(self.recipes.keys()))
 
-    def prerequisite_version(self, name: str) -> Optional[str]:
+    def prerequisite_version(self, name: str) -> str | None:
         """Return the pinned version string for a prerequisite, or None if unset."""
         value = self.data.get("prerequisites", {}).get(name)
         return str(value) if value else None
 
-    def detect_stale_conflicts(self, active_recipes: List[str]) -> List[Tuple[str, str, str]]:
+    def detect_stale_conflicts(self, active_recipes: list[str]) -> list[tuple[str, str, str]]:
         """Return ``(active, conflicted, ade)`` triples for stale on-disk installs.
 
         ``conflicts_with`` is normally a build-time concern: it just keeps a
@@ -553,7 +558,7 @@ class Manifest:
         actually present, so the installer can surface a warning + offer to
         clean up before the new install proceeds.
         """
-        stale: List[Tuple[str, str, str]] = []
+        stale: list[tuple[str, str, str]] = []
         for active_rid in active_recipes:
             conflicts = self.recipes.get(active_rid, {}).get("conflicts_with", [])
             for conflicted_rid in conflicts:
@@ -590,7 +595,7 @@ class Manifest:
             label = "all recipes" if "*" in recipes else f"{len(recipes)} recipes"
             print(f"  * {pid:<15} {label}")
 
-    def conflicting_rule_scopes(self, ade: str) -> List[str]:
+    def conflicting_rule_scopes(self, ade: str) -> list[str]:
         """Return the scopes (``global``/``workspace``) that actually contain
         conflicting Snyk rule directives for ``ade``.
 
@@ -601,7 +606,7 @@ class Manifest:
 
         rule_start_tag = "<!--# BEGIN SNYK GLOBAL RULE -->"
         rule_end_tag = "<!--# END SNYK GLOBAL RULE -->"
-        scopes: List[str] = []
+        scopes: list[str] = []
 
         for rule in self.conflicting_resources.get(ade, {}).get("rules", []):
             rule_location = _safe_conflict_path(ade, rule)
@@ -621,11 +626,11 @@ class Manifest:
 
         return scopes
 
-    def conflicting_skill_scopes(self, ade: str) -> List[str]:
+    def conflicting_skill_scopes(self, ade: str) -> list[str]:
         """Return the scopes (``global``/``workspace``) that actually contain
         conflicting Snyk skills for ``ade`` (only locations whose file exists)."""
 
-        scopes: List[str] = []
+        scopes: list[str] = []
 
         for skill in self.conflicting_resources.get(ade, {}).get("skills", []):
             skill_location = _safe_conflict_path(ade, skill)
@@ -645,7 +650,7 @@ class Manifest:
         """Whether any existing skills would conflict when adding the SAI hooks."""
         return bool(self.conflicting_skill_scopes(ade))
 
-    def get_conflicting_resource_scope(self, ade: str, resource_type: str) -> List[str]:
+    def get_conflicting_resource_scope(self, ade: str, resource_type: str) -> list[str]:
         """Return the scopes where ``resource_type`` (``rules``/``skills``) actually
         conflicts for ``ade`` — only scopes with a real conflict, so callers never
         act on a scope that has none."""
@@ -655,7 +660,7 @@ class Manifest:
             return self.conflicting_skill_scopes(ade)
         return []
 
-    def get_extension_settings_path(self, ade: str) -> List[Path]:
+    def get_extension_settings_path(self, ade: str) -> list[Path]:
         """Get the paths to the extension settings files for the given ADE based on OS"""
         home = Path.home()
         path_prefix: Path
@@ -677,7 +682,7 @@ class Manifest:
 
         return settings_paths
 
-    def are_extension_settings_conflicting(self, ade: str) -> List[str]:
+    def are_extension_settings_conflicting(self, ade: str) -> list[str]:
         """Return every settings file (across all scopes) whose Snyk extension SAI
         configuration conflicts with installing the hooks.
 
@@ -744,7 +749,7 @@ class Manifest:
 
         return conflicting_paths
 
-    def resolve_extension_conflicts(self, settings_paths: List[str]) -> List[str]:
+    def resolve_extension_conflicts(self, settings_paths: list[str]) -> list[str]:
         """Resolve conflicting extension settings in each of the given paths and
         return the list of paths that were successfully updated.
 
@@ -756,7 +761,7 @@ class Manifest:
         """
 
         home = Path.home()
-        updated_paths: List[str] = []
+        updated_paths: list[str] = []
 
         for raw_path in settings_paths:
             try:
@@ -815,7 +820,7 @@ class Manifest:
 
 
 def validate_recipe_selection(
-    manifest: Manifest, profile: str, selection: Optional[List[str]]
+    manifest: Manifest, profile: str, selection: list[str] | None
 ) -> None:
     """Reject an explicit ``--recipes`` selection the manifest cannot satisfy.
 
@@ -866,7 +871,7 @@ def validate_recipe_selection(
 # =============================================================================
 
 
-def _find_win_npm_executable(name: str) -> Optional[str]:
+def _find_win_npm_executable(name: str) -> str | None:
     """Search nvm-windows npm global paths for an executable not found by shutil.which.
 
     nvm-windows stores global npm packages (snyk, npm, etc.) in %APPDATA%\\npm by default.
@@ -874,7 +879,7 @@ def _find_win_npm_executable(name: str) -> Optional[str]:
     """
     if not _IS_WINDOWS:
         return None
-    search_dirs: List[Path] = []
+    search_dirs: list[Path] = []
     appdata = os.environ.get("APPDATA", "")
     if appdata:
         search_dirs.append(Path(appdata) / "npm")
@@ -903,7 +908,7 @@ def _find_win_npm_executable(name: str) -> Optional[str]:
 # ``_nvm_install_tag`` / ``_nvm_install_url``.
 
 
-def _nvm_install_tag(nvm_version: Optional[str]) -> str:
+def _nvm_install_tag(nvm_version: str | None) -> str:
     """Return the git tag for the nvm release to install.
 
     The manifest stores a bare version (e.g. ``0.40.3``) for consistency with
@@ -914,7 +919,7 @@ def _nvm_install_tag(nvm_version: Optional[str]) -> str:
     return version if version.startswith("v") else f"v{version}"
 
 
-def _nvm_install_url(nvm_version: Optional[str]) -> str:
+def _nvm_install_url(nvm_version: str | None) -> str:
     """Return the install.sh URL for the pinned nvm release."""
     tag = _nvm_install_tag(nvm_version)
     return f"https://raw.githubusercontent.com/nvm-sh/nvm/{tag}/install.sh"
@@ -926,7 +931,7 @@ def _nvm_dir() -> Path:
     return Path(nvm_dir) if nvm_dir else Path.home() / ".nvm"
 
 
-def _nvm_latest_node_bin_dir() -> Optional[str]:
+def _nvm_latest_node_bin_dir() -> str | None:
     """Return the ``bin`` dir of the newest Node version nvm has installed, or None.
 
     nvm places each installed Node under ``$NVM_DIR/versions/node/v<X.Y.Z>/bin``.
@@ -939,8 +944,8 @@ def _nvm_latest_node_bin_dir() -> Optional[str]:
     if not versions.is_dir():
         return None
 
-    best_dir: Optional[Path] = None
-    best_key: Tuple[int, ...] = (-1, -1, -1)
+    best_dir: Path | None = None
+    best_key: tuple[int, ...] = (-1, -1, -1)
     for d in versions.iterdir():
         if not (d / "bin").is_dir():
             continue
@@ -958,8 +963,8 @@ def _nvm_latest_node_bin_dir() -> Optional[str]:
 
 
 def _get_node_install_cmds_nvm(
-    node_version: Optional[str] = None, nvm_version: Optional[str] = None
-) -> List[List[str]]:
+    node_version: str | None = None, nvm_version: str | None = None
+) -> list[list[str]]:
     """Return the Node.js install command for macOS/Linux via nvm.
 
     The returned command is a single ``sh -c`` invocation that installs nvm
@@ -1013,8 +1018,8 @@ def _get_node_install_cmds_nvm(
 
 
 def _get_node_install_cmds_windows(
-    auto_yes: bool, node_version: Optional[str] = None
-) -> List[List[str]]:
+    auto_yes: bool, node_version: str | None = None
+) -> list[list[str]]:
     """Return the Node.js install command(s) for Windows, closest to ``node_version``.
 
     winget and choco both support pinning an exact version, so when a target is
@@ -1084,7 +1089,7 @@ def _get_node_install_cmds_windows(
         return []
 
 
-def _update_process_path_for_nodejs(base_paths: Optional[List[str]] = None) -> None:
+def _update_process_path_for_nodejs(base_paths: list[str] | None = None) -> None:
     """Add standard Node.js and npm installation paths to the current process's PATH.
 
     This enables the installer to use node/npm immediately after installation
@@ -1129,8 +1134,8 @@ def _update_process_path_for_nodejs(base_paths: Optional[List[str]] = None) -> N
 
 
 def _build_node_install_cmds(
-    auto_yes: bool, node_version: Optional[str] = None, nvm_version: Optional[str] = None
-) -> List[List[str]]:
+    auto_yes: bool, node_version: str | None = None, nvm_version: str | None = None
+) -> list[list[str]]:
     """Return the platform-appropriate Node.js install command(s), or [] if none can be built.
 
     Shared by the missing-Node install path and the outdated-Node upgrade path.
@@ -1147,7 +1152,7 @@ def _build_node_install_cmds(
     return _get_node_install_cmds_nvm(node_version, nvm_version)
 
 
-def _run_node_install(cmds: List[List[str]]) -> bool:
+def _run_node_install(cmds: list[list[str]]) -> bool:
     """Run the given Node.js install command(s) and refresh PATH for the current process."""
     print(f"  {C.cyan('INFO')} Installing Node.js...")
     try:
@@ -1173,9 +1178,9 @@ def _run_node_install(cmds: List[List[str]]) -> bool:
 
 def _run_node_install_with_fallback(
     auto_yes: bool,
-    primary: List[List[str]],
-    node_version: Optional[str],
-    nvm_version: Optional[str] = None,
+    primary: list[list[str]],
+    node_version: str | None,
+    nvm_version: str | None = None,
 ) -> bool:
     """Run the version-pinned install; on failure, retry with the unpinned default build.
 
@@ -1198,7 +1203,7 @@ def _run_node_install_with_fallback(
     return _run_node_install(fallback)
 
 
-def _get_node_version() -> Optional[tuple[int, ...]]:
+def _get_node_version() -> tuple[int, ...] | None:
     """Return the installed Node.js version as a (major, minor, patch) tuple, or None if undetectable."""
     # Presence guard only: never pass the resolved (env-derived) path into run().
     # Invoke the literal "node" — mirrors the Snyk version probe below.
@@ -1231,7 +1236,7 @@ def _parse_version_tuple(version: str) -> tuple[int, ...]:
     return tuple(map(int, version.split(".")))
 
 
-def _snyk_version_tuple(version_output: str) -> Optional[tuple[int, ...]]:
+def _snyk_version_tuple(version_output: str) -> tuple[int, ...] | None:
     match = _SNYK_VERSION_RE.match(version_output)
     if not match:
         return None
@@ -1240,7 +1245,7 @@ def _snyk_version_tuple(version_output: str) -> Optional[tuple[int, ...]]:
 
 def _snyk_version_below_minimum(
     version_output: str,
-    minimum_version: Optional[str],
+    minimum_version: str | None,
 ) -> bool:
     if not minimum_version:
         return False
@@ -1251,7 +1256,7 @@ def _snyk_version_below_minimum(
 
 
 def _warn_if_node_outdated(
-    auto_yes: bool, node_version: Optional[str], nvm_version: Optional[str] = None
+    auto_yes: bool, node_version: str | None, nvm_version: str | None = None
 ) -> None:
     """When Node is present but older than the manifest minimum, warn and offer to upgrade.
 
@@ -1282,7 +1287,7 @@ def _warn_if_node_outdated(
 
 
 def ensure_node_installed(
-    auto_yes: bool, node_version: Optional[str] = None, nvm_version: Optional[str] = None
+    auto_yes: bool, node_version: str | None = None, nvm_version: str | None = None
 ) -> bool:
     """Confirm that Node.js and npm are installed and configured.
 
@@ -1357,7 +1362,7 @@ def _snyk_cli_resolver() -> SnykCliResolver:
 
 
 def _sync_selected_snyk_cli_sidecars(
-    selected_snyk_cli: Optional[SnykCliSelection],
+    selected_snyk_cli: SnykCliSelection | None,
     dry_run: bool,
 ) -> None:
     """Write or clear Snyk CLI sidecars to reflect the selected CLI.
@@ -1379,7 +1384,7 @@ def _sync_selected_snyk_cli_sidecars(
     _snyk_cli_resolver().sync_cli_sidecars(cli_path, source)
 
 
-def _read_only_selected_snyk_cli(cli_path: Optional[str]) -> Optional[SnykCliSelection]:
+def _read_only_selected_snyk_cli(cli_path: str | None) -> SnykCliSelection | None:
     """Resolve the Snyk CLI contract for read-only verification.
 
     ``--verify --read-only`` must not install or update prerequisites, but it
@@ -1402,7 +1407,7 @@ def _read_only_selected_snyk_cli(cli_path: Optional[str]) -> Optional[SnykCliSel
     )
 
 
-def _check_user_specified_snyk(cli_path: str, snyk_version: Optional[str]) -> SnykCliSelection:
+def _check_user_specified_snyk(cli_path: str, snyk_version: str | None) -> SnykCliSelection:
     """Verify the user-specified Snyk CLI exists at ``cli_path`` and print its version.
 
     Exits non-zero if the binary is missing or not executable. Version below
@@ -1436,12 +1441,12 @@ def _check_user_specified_snyk(cli_path: str, snyk_version: Optional[str]) -> Sn
 
 def check_prerequisites(
     auto_yes: bool,
-    snyk_version: Optional[str] = None,
-    node_version: Optional[str] = None,
+    snyk_version: str | None = None,
+    node_version: str | None = None,
     no_latest_deps: bool = False,
-    nvm_version: Optional[str] = None,
-    cli_path: Optional[str] = None,
-) -> Optional[SnykCliSelection]:
+    nvm_version: str | None = None,
+    cli_path: str | None = None,
+) -> SnykCliSelection | None:
     """Check that the required prerequisites are installed and configured. If not, attempt to install them.
 
     ``snyk_version`` is the pinned Snyk CLI version from the manifest
@@ -1466,7 +1471,7 @@ def check_prerequisites(
 
     warnings = 0
 
-    def get_npm_install_cmd(pkg: str) -> List[str]:
+    def get_npm_install_cmd(pkg: str) -> list[str]:
         # Assumes node was installed per-user.
         return ["npm", "install", "-g", pkg]
 
@@ -1579,7 +1584,7 @@ def check_prerequisites(
 
 
 def _print_snyk_version_status(
-    snyk_ver_str: str, snyk_version: Optional[str], cli_path: Optional[str] = None
+    snyk_ver_str: str, snyk_version: str | None, cli_path: str | None = None
 ) -> None:
     if _snyk_version_below_minimum(snyk_ver_str, snyk_version):
         print(f"  {C.yellow('WARNING')} Snyk CLI {snyk_ver_str} is outdated (min: {snyk_version})")
@@ -1589,9 +1594,9 @@ def _print_snyk_version_status(
 
 
 def print_prerequisite_versions(
-    snyk_version: Optional[str] = None,
-    node_version: Optional[str] = None,
-    cli_path: Optional[str] = None,
+    snyk_version: str | None = None,
+    node_version: str | None = None,
+    cli_path: str | None = None,
 ) -> None:
     """Print Python/Node/Snyk CLI versions, flagging any older than the manifest pins.
 
@@ -1705,7 +1710,7 @@ def get_ade_home(ade: str) -> Path:
     return base / ADE_HOMES[ade]
 
 
-def _safe_conflict_path(ade: str, entry: Dict[str, Any]) -> Optional[Path]:
+def _safe_conflict_path(ade: str, entry: dict[str, Any]) -> Path | None:
     """Resolve a manifest conflicting-resources entry to an absolute Path under a trusted base.
 
     Returns None if `src` is missing, contains traversal segments, or escapes the
@@ -1734,7 +1739,7 @@ def _safe_conflict_path(ade: str, entry: Dict[str, Any]) -> Optional[Path]:
     return candidate
 
 
-def find_git_root(start: Path) -> Optional[Path]:
+def find_git_root(start: Path) -> Path | None:
     """Walk up from *start* looking for a ``.git`` entry (dir or worktree file).
 
     Returns the first ancestor that contains ``.git``, or None when none does.
@@ -1749,7 +1754,7 @@ def find_git_root(start: Path) -> Optional[Path]:
     return None
 
 
-def resolve_workspace(workspace_arg: Optional[str]) -> Optional[Path]:
+def resolve_workspace(workspace_arg: str | None) -> Path | None:
     """Resolve the workspace root used for workspace-scoped recipes.
 
     Priority:
@@ -1831,7 +1836,7 @@ def _reject_embedded_quote(label: str, value: str) -> str:
     return value
 
 
-def expand_install_tokens(s: str, workspace: Optional[Path]) -> str:
+def expand_install_tokens(s: str, workspace: Path | None) -> str:
     """Replace ``$WORKSPACE``/``$HOME`` with their absolute paths.
 
     Used when materialising a ``pre_commit_integration.command`` string so the
@@ -1906,7 +1911,7 @@ def _cursor_process_running() -> bool:
         return False
 
 
-def detect_ades() -> List[str]:
+def detect_ades() -> list[str]:
     detected = []
     home = Path.home()
 
@@ -1949,11 +1954,11 @@ def detect_ades() -> List[str]:
 
 
 def get_target_ades(
-    target_ade: Optional[str],
+    target_ade: str | None,
     auto_yes: bool,
     *,
     required: bool = True,
-) -> List[str]:
+) -> list[str]:
     if target_ade:
         return [target_ade]
 
@@ -2182,7 +2187,7 @@ def apply_transform(
 
 
 def merge_config(
-    strategy: str, target: Path, source: Path, payload: "PayloadContext", dry_run: bool
+    strategy: str, target: Path, source: Path, payload: PayloadContext, dry_run: bool
 ) -> None:
     if dry_run:
         print(f"    {C.dim(f'[dry-run] merge ({strategy}): {target}')}")
@@ -2208,7 +2213,7 @@ def merge_config(
 
 
 def cleanup_legacy_config_merge(
-    cm: Dict[str, Any], ade: str, payload: "PayloadContext", dry_run: bool
+    cm: dict[str, Any], ade: str, payload: PayloadContext, dry_run: bool
 ) -> None:
     """Strip Snyk entries from superseded config_merge locations.
 
@@ -2298,7 +2303,7 @@ def remove_empty_parents(directory: Path, stop: Path, dry_run: bool) -> None:
         current = current.parent
 
 
-def remove_legacy_workspace_files(sources: Dict[str, Any], workspace: Path, dry_run: bool) -> None:
+def remove_legacy_workspace_files(sources: dict[str, Any], workspace: Path, dry_run: bool) -> None:
     """Remove workspace files written by older installer versions at locations
     we no longer use (declared as ``legacy_files`` in the manifest), and prune
     their emptied parents + ``__pycache__``.
@@ -2376,8 +2381,11 @@ def _load_git_hooks(payload: PayloadContext) -> Any:
 
 
 def _display_name_from_hook_tag(tag: str) -> str:
-    words = tag.removeprefix("snyk-").replace("-", " ").title()
-    return f"Snyk {words}" if tag.startswith("snyk-") else words
+    is_snyk_tag = tag.startswith("snyk-")
+    # str.removeprefix requires Python 3.9+; slice manually for 3.8 compatibility.
+    stripped = tag[len("snyk-") :] if is_snyk_tag else tag
+    words = stripped.replace("-", " ").title()
+    return f"Snyk {words}" if is_snyk_tag else words
 
 
 class PreCommitIntegrationParts(NamedTuple):
@@ -2387,7 +2395,7 @@ class PreCommitIntegrationParts(NamedTuple):
 
 
 def _pre_commit_integration_parts(
-    pci: Dict[str, Any], workspace: Optional[Path]
+    pci: dict[str, Any], workspace: Path | None
 ) -> PreCommitIntegrationParts:
     """Build shared hook fields from a manifest pre-commit integration block.
     ``workspace=None`` means git-global scope: only ``$HOME`` expands."""
@@ -2397,7 +2405,7 @@ def _pre_commit_integration_parts(
     return PreCommitIntegrationParts(tag, command, name)
 
 
-def _pre_commit_hook_spec(git_hooks: Any, pci: Dict[str, Any], workspace: Optional[Path]) -> Any:
+def _pre_commit_hook_spec(git_hooks: Any, pci: dict[str, Any], workspace: Path | None) -> Any:
     parts = _pre_commit_integration_parts(pci, workspace)
     return git_hooks.HookSpec(tag=parts.tag, command=parts.command, name=parts.name)
 
@@ -2474,8 +2482,8 @@ def resolve_verify_recipes(
     manifest: Manifest,
     payload: PayloadContext,
     profile: str,
-    workspace: Optional[Path],
-) -> List[str]:
+    workspace: Path | None,
+) -> list[str]:
     recipes = manifest.resolve_recipes(profile)
     if (
         workspace is not None
@@ -2677,7 +2685,7 @@ def uninstall_workspace_recipe(
     remove_legacy_workspace_files(sources, workspace, dry_run)
 
 
-def _snyk_command_for_selection(selected_snyk_cli: Optional[SnykCliSelection]) -> str:
+def _snyk_command_for_selection(selected_snyk_cli: SnykCliSelection | None) -> str:
     """Return the command installer-managed subprocesses should use for Snyk."""
     if selected_snyk_cli and selected_snyk_cli.source != SNYK_CLI_SOURCE_PATH:
         path: str = selected_snyk_cli.path
@@ -2686,7 +2694,7 @@ def _snyk_command_for_selection(selected_snyk_cli: Optional[SnykCliSelection]) -
 
 
 def _cleanup_install_tree(
-    files: List[Dict[str, Any]], resolve_dest: Callable[[str], Path], root: Path, dry_run: bool
+    files: list[dict[str, Any]], resolve_dest: Callable[[str], Path], root: Path, dry_run: bool
 ) -> None:
     """Remove ``__pycache__`` dirs and empty parent directories left behind
     under *root* after removing *files*."""
@@ -2850,9 +2858,9 @@ def uninstall_git_global_recipe(
 
 
 def _resolve_mcp_snyk_selection(
-    selected_snyk_cli: Optional[SnykCliSelection],
-    cli_path: Optional[str],
-) -> Optional[SnykCliSelection]:
+    selected_snyk_cli: SnykCliSelection | None,
+    cli_path: str | None,
+) -> SnykCliSelection | None:
     """Return the Snyk selection that should be reflected in MCP config.
 
     ``cli_path`` is kept as a backwards-compatible direct-call seam for tests
@@ -2874,10 +2882,10 @@ _MCP_SOURCE_NAMES = frozenset({".mcp.json", ".mcp-codex.toml"})
 
 
 def _mcp_server_command_for_selection(
-    selected_snyk_cli: Optional[SnykCliSelection],
+    selected_snyk_cli: SnykCliSelection | None,
     ade: str,
     source_name: str,
-) -> Optional[Tuple[str, List[str]]]:
+) -> tuple[str, list[str]] | None:
     """Return the MCP server command/args for the selected Snyk CLI contract.
 
     Returns ``None`` for anything that isn't an MCP config source (e.g. a
@@ -2894,7 +2902,7 @@ def _mcp_server_command_for_selection(
 
 
 @contextlib.contextmanager
-def _mcp_json_source(command: str, args: List[str]) -> Iterator[Path]:
+def _mcp_json_source(command: str, args: list[str]) -> Iterator[Path]:
     """Yield a temp .mcp.json-shaped source with the selected Snyk command.
 
     The merge layer expects an on-disk file, so we materialize one with the
@@ -2923,7 +2931,7 @@ def _mcp_json_source(command: str, args: List[str]) -> Iterator[Path]:
 
 
 @contextlib.contextmanager
-def _mcp_codex_source(command: str, args: List[str]) -> Iterator[Path]:
+def _mcp_codex_source(command: str, args: list[str]) -> Iterator[Path]:
     """Yield a temp .mcp-codex.toml with the selected Snyk command.
 
     Codex-specific parallel to ``_mcp_json_source``: ``merge_codex_config``
@@ -2949,7 +2957,7 @@ def _mcp_codex_source(command: str, args: List[str]) -> Iterator[Path]:
 def _mcp_source_for_selection(
     source: Path,
     ade: str,
-    selected_snyk_cli: Optional[SnykCliSelection],
+    selected_snyk_cli: SnykCliSelection | None,
 ) -> Iterator[Path]:
     """Yield an MCP config source matching the selected Snyk CLI, if needed."""
     command = _mcp_server_command_for_selection(selected_snyk_cli, ade, source.name)
@@ -2974,8 +2982,8 @@ def install_recipe(
     manifest: Manifest,
     payload: PayloadContext,
     dry_run: bool,
-    cli_path: Optional[str] = None,
-    selected_snyk_cli: Optional[SnykCliSelection] = None,
+    cli_path: str | None = None,
+    selected_snyk_cli: SnykCliSelection | None = None,
 ) -> None:
     sources = manifest.get_sources(recipe_id, ade)
     if not sources:
@@ -3022,8 +3030,8 @@ def verify_recipe(
     ade: str,
     manifest: Manifest,
     payload: PayloadContext,
-    cli_path: Optional[str] = None,
-    selected_snyk_cli: Optional[SnykCliSelection] = None,
+    cli_path: str | None = None,
+    selected_snyk_cli: SnykCliSelection | None = None,
 ) -> bool:
     sources = manifest.get_sources(recipe_id, ade)
     if not sources:
@@ -3151,10 +3159,10 @@ def uninstall_ade_recipe(
 
 
 def uninstall(
-    ades: List[str],
+    ades: list[str],
     manifest: Manifest,
     payload: PayloadContext,
-    workspace: Optional[Path],
+    workspace: Path | None,
     dry_run: bool,
 ) -> None:
     print(f"  {C.bold('Uninstalling Snyk recipes...')}")
@@ -3201,12 +3209,12 @@ def uninstall(
 # =============================================================================
 
 
-def _has_installable_sources(sources: Dict[str, Any]) -> bool:
+def _has_installable_sources(sources: dict[str, Any]) -> bool:
     """Return whether an ADE source entry has anything the installer applies."""
     return bool(sources.get("files") or sources.get("config_merge") or sources.get("transforms"))
 
 
-def _ade_install_targets(ades: List[str], recipes: List[str], manifest: Manifest) -> List[str]:
+def _ade_install_targets(ades: list[str], recipes: list[str], manifest: Manifest) -> list[str]:
     """Return ADEs that have at least one selected recipe to install.
 
     ADE detection happens before recipe resolution is displayed, and a
@@ -3234,11 +3242,11 @@ def print_banner() -> None:
 
 
 def show_plan(
-    ades: List[str],
-    recipes: List[str],
+    ades: list[str],
+    recipes: list[str],
     profile: str,
     manifest: Manifest,
-    workspace: Optional[Path],
+    workspace: Path | None,
 ) -> None:
     ade_targets = _ade_install_targets(ades, recipes, manifest)
     print(f"  {C.bold('Installation Plan')}")
@@ -3288,7 +3296,7 @@ def show_plan(
     print()
 
 
-def print_summary(ades: List[str], recipes: List[str], dry_run: bool, manifest: Manifest) -> None:
+def print_summary(ades: list[str], recipes: list[str], dry_run: bool, manifest: Manifest) -> None:
     ade_targets = _ade_install_targets(ades, recipes, manifest)
     status = "[DRY RUN] " if dry_run else ""
     print()

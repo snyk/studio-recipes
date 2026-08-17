@@ -1,5 +1,7 @@
 """Tests for snyk-studio-installer.py (cross-platform Python installer)."""
 
+from __future__ import annotations
+
 import contextlib
 import json
 import os
@@ -2486,6 +2488,12 @@ class TestRecipeSelectionInMain:
     @pytest.fixture
     def manifest(self):
         return installer.Manifest(INSTALLER_DIR / "manifest.json")
+
+    @pytest.fixture(autouse=True)
+    def _isolated_home(self, monkeypatch, tmp_path):
+        """Isolate Path.home() so --verify's git-global auto-detection can't
+        read this machine's real ~/.snyk-studio state and git config."""
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
 
     @staticmethod
     def _args(**overrides):

@@ -2,6 +2,9 @@
 the pure-Python diff/finding logic in `secrets_at_commit/lib/`, and the
 entry script's fail-open/fail-closed contract."""
 
+from __future__ import annotations
+
+import dataclasses
 import importlib
 import json
 import os
@@ -11,11 +14,12 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import textwrap
+import time
 from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 import pytest
 
@@ -38,6 +42,7 @@ installer = importlib.import_module("snyk-studio-installer")
 secrets_hook = importlib.import_module("snyk_secrets_at_commit")
 from lib import (  # noqa: E402
     baseline,
+    deprecated_flags,
     diff_scope,
     findings,
     git_ops,
@@ -48,7 +53,7 @@ from lib import (  # noqa: E402
     snyk_cli,
     timing,
 )
-from lib.index_snapshot import ref_snapshot, staged_snapshot, working_tree_snapshot  # noqa: E402
+from lib.index_snapshot import SnapshotError, ref_snapshot, staged_snapshot  # noqa: E402
 
 
 def _init_git_repo(path: Path) -> None:
@@ -67,10 +72,9 @@ def _isolate_git_config(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty_config))
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(empty_config))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-    # Most tests are written against the default "line" strategy -- don't
-    # let a real shell env with SECRETS_DIFF_STRATEGY=content set leak in
-    # and change behavior out from under them. Tests that specifically
-    # exercise the "content" strategy set this themselves.
+    # SECRETS_DIFF_STRATEGY is a removed flag -- don't let a real shell env
+    # with it set leak in and add an unexpected deprecation-warning line to
+    # tests that assert on exact stderr output.
     monkeypatch.delenv("SECRETS_DIFF_STRATEGY", raising=False)
 
 
@@ -150,6 +154,42 @@ class TestManifest:
     def test_source_files_exist(self, manifest, payload):
         for f in manifest.recipes["secrets-precommit-hook"]["sources"]["workspace"]["files"]:
             assert payload.resolve_src(f["src"]).is_file(), f["src"]
+
+    def test_every_py_file_on_disk_is_in_manifest(self, manifest):
+        """The reverse of test_source_files_exist: a new lib/*.py module
+        that's imported but never added here installs nothing and only
+        fails at hook runtime (ModuleNotFoundError), which no unit test
+        catches since those import straight from the source tree."""
+        listed = {
+            f["src"]
+            for f in manifest.recipes["secrets-precommit-hook"]["sources"]["workspace"]["files"]
+        }
+        on_disk = {
+            p.relative_to(SECRETS_HOOK_DIR.parent.parent).as_posix()
+            for p in SECRETS_HOOK_DIR.rglob("*.py")
+        }
+        missing = on_disk - listed
+        assert not missing, f"present on disk but missing from manifest.json: {missing}"
+
+    def test_every_py_file_on_disk_is_in_global_manifest(self, manifest):
+        """Same check as test_every_py_file_on_disk_is_in_manifest, but for
+        the global-install variant's own file list -- the two lists are
+        maintained separately, so a module added to one and not the other
+        installs nothing for global installs (ModuleNotFoundError at
+        runtime, not caught by any test that only exercises the workspace
+        variant)."""
+        listed = {
+            f["src"]
+            for f in manifest.recipes["secrets-precommit-hook-global"]["sources"]["git-global"][
+                "files"
+            ]
+        }
+        on_disk = {
+            p.relative_to(SECRETS_HOOK_DIR.parent.parent).as_posix()
+            for p in SECRETS_HOOK_DIR.rglob("*.py")
+        }
+        missing = on_disk - listed
+        assert not missing, f"present on disk but missing from global manifest.json: {missing}"
 
     def test_default_profile_does_not_install_secrets_hook_by_default(
         self, repo, manifest, payload
@@ -326,27 +366,27 @@ class TestSplitAddedVsPreExisting:
         return findings.Finding(file_path=path, start_line=line)
 
     def test_line_inside_range_is_added(self):
-        added, pre = diff_scope.split_added_vs_pre_existing(
+        added, pre, _ = diff_scope.split_added_vs_pre_existing(
             [self._finding(line=5)], {"app.py": [(1, 10)]}
         )
         assert added == [self._finding(line=5)]
         assert pre == []
 
     def test_line_outside_range_is_pre_existing(self):
-        added, pre = diff_scope.split_added_vs_pre_existing(
+        added, pre, _ = diff_scope.split_added_vs_pre_existing(
             [self._finding(line=50)], {"app.py": [(1, 10)]}
         )
         assert added == []
         assert pre == [self._finding(line=50)]
 
     def test_file_with_no_ranges_is_all_pre_existing(self):
-        added, pre = diff_scope.split_added_vs_pre_existing([self._finding()], {})
+        added, pre, _ = diff_scope.split_added_vs_pre_existing([self._finding()], {})
         assert added == []
         assert len(pre) == 1
 
     def test_backslash_path_from_finding_still_matches_forward_slash_range(self):
         finding = findings.Finding(file_path="src\\app.py", start_line=5)
-        added, pre = diff_scope.split_added_vs_pre_existing([finding], {"src/app.py": [(1, 10)]})
+        added, pre, _ = diff_scope.split_added_vs_pre_existing([finding], {"src/app.py": [(1, 10)]})
         assert added == [finding]
         assert pre == []
 
@@ -355,7 +395,7 @@ class TestSplitAddedVsPreExisting:
         # an edit but whose end_line falls inside it must still count as
         # added -- checking start_line alone would miss this.
         finding = findings.Finding(file_path="app.py", start_line=8, end_line=12)
-        added, pre = diff_scope.split_added_vs_pre_existing([finding], {"app.py": [(10, 15)]})
+        added, pre, _ = diff_scope.split_added_vs_pre_existing([finding], {"app.py": [(10, 15)]})
         assert added == [finding]
         assert pre == []
 
@@ -363,7 +403,7 @@ class TestSplitAddedVsPreExisting:
         # Neither endpoint falls literally inside the range, but the range
         # is fully contained within the finding's span.
         finding = findings.Finding(file_path="app.py", start_line=1, end_line=20)
-        added, pre = diff_scope.split_added_vs_pre_existing([finding], {"app.py": [(10, 12)]})
+        added, pre, _ = diff_scope.split_added_vs_pre_existing([finding], {"app.py": [(10, 12)]})
         assert added == [finding]
         assert pre == []
 
@@ -372,13 +412,13 @@ class TestSplitAddedVsPreExisting:
         # so it defaults to 0) must never be classified as pre-existing --
         # that would silently let a blocking finding through as pre-existing.
         finding = findings.Finding(file_path="app.py", start_line=0)
-        added, pre = diff_scope.split_added_vs_pre_existing([finding], {"app.py": [(1, 10)]})
+        added, pre, _ = diff_scope.split_added_vs_pre_existing([finding], {"app.py": [(1, 10)]})
         assert added == [finding]
         assert pre == []
 
     def test_missing_start_line_is_added_even_with_no_ranges_for_file(self):
         finding = findings.Finding(file_path="app.py", start_line=0)
-        added, pre = diff_scope.split_added_vs_pre_existing([finding], {})
+        added, pre, _ = diff_scope.split_added_vs_pre_existing([finding], {})
         assert added == [finding]
         assert pre == []
 
@@ -389,14 +429,13 @@ class TestSplitAddedVsPreExisting:
 
 
 class TestStagedSnapshot:
-    def test_no_files_yields_none(self, repo):
+    def test_no_files_checks_out_empty_directory(self, repo):
         with staged_snapshot(repo, []) as snap:
-            assert snap is None
+            assert list(snap.iterdir()) == []
 
     def test_success_checks_out_index_content(self, repo):
         _stage(repo, "app.py", "one\n")
         with staged_snapshot(repo, ["app.py"]) as snap:
-            assert snap is not None
             assert (snap / "app.py").read_text() == "one\n"
 
     def test_unstaged_edit_not_reflected_in_snapshot(self, repo):
@@ -406,7 +445,7 @@ class TestStagedSnapshot:
         with staged_snapshot(repo, ["app.py"]) as snap:
             assert (snap / "app.py").read_text() == "staged content\n"
 
-    def test_failure_yields_none(self, repo, monkeypatch):
+    def test_failure_raises_with_stderr_snippet(self, repo, monkeypatch):
         monkeypatch.setattr(
             subprocess,
             "run",
@@ -414,10 +453,11 @@ class TestStagedSnapshot:
                 args=[], returncode=1, stdout="", stderr="<GIT_CHECKOUT_INDEX_ERROR>"
             ),
         )
-        with staged_snapshot(repo, ["app.py"]) as snap:
-            assert snap is None
+        with pytest.raises(SnapshotError, match="<GIT_CHECKOUT_INDEX_ERROR>"):
+            with staged_snapshot(repo, ["app.py"]):
+                pass
 
-    def test_hung_checkout_index_times_out_instead_of_hanging(self, repo, monkeypatch):
+    def test_hung_checkout_index_raises_timeout_detail(self, repo, monkeypatch):
         monkeypatch.setattr(
             subprocess,
             "run",
@@ -425,12 +465,49 @@ class TestStagedSnapshot:
                 subprocess.TimeoutExpired(cmd="git", timeout=kw.get("timeout"))
             ),
         )
-        with staged_snapshot(repo, ["app.py"]) as snap:
-            assert snap is None
+        with pytest.raises(SnapshotError, match="timed out"):
+            with staged_snapshot(repo, ["app.py"]):
+                pass
+
+    def test_scratch_dir_creation_failure_is_actionable(self, repo, monkeypatch, tmp_path_factory):
+        fake_tmp = tmp_path_factory.mktemp("fake-tmp-root")
+        monkeypatch.setattr(tempfile, "gettempdir", lambda: str(fake_tmp))
+        monkeypatch.setattr(
+            tempfile,
+            "mkdtemp",
+            lambda *a, **kw: (_ for _ in ()).throw(OSError(28, "No space left on device")),
+        )
+        with pytest.raises(SnapshotError) as exc_info:
+            with staged_snapshot(repo, ["app.py"]):
+                pass
+        assert str(fake_tmp) in str(exc_info.value)
+        assert "No space left on device" in str(exc_info.value)
+
+    def test_temp_dir_cleaned_up_on_checkout_index_failure(self, repo, monkeypatch):
+        captured: list[Path] = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def _tracking_mkdtemp(*a, **kw):
+            d = Path(real_mkdtemp(*a, **kw))
+            captured.append(d)
+            return str(d)
+
+        monkeypatch.setattr(tempfile, "mkdtemp", _tracking_mkdtemp)
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda *a, **kw: subprocess.CompletedProcess(
+                args=[], returncode=1, stdout="", stderr=""
+            ),
+        )
+        with pytest.raises(SnapshotError):
+            with staged_snapshot(repo, ["app.py"]):
+                pass
+        assert not captured[0].exists()
 
     def test_temp_dir_cleaned_up_even_on_exception(self, repo):
         _stage(repo, "app.py", "one\n")
-        captured: List[Path] = []
+        captured: list[Path] = []
 
         def _raise_inside_snapshot():
             with staged_snapshot(repo, ["app.py"]) as snap:
@@ -442,64 +519,28 @@ class TestStagedSnapshot:
         assert not captured[0].exists()
 
 
-class TestWorkingTreeSnapshot:
-    def test_no_files_yields_none(self, repo):
-        with working_tree_snapshot(repo, []) as snap:
-            assert snap is None
-
-    def test_copies_only_requested_working_tree_files(self, repo):
-        _stage(repo, "app.py", "staged content\n")
-        (repo / "app.py").write_text("working tree content\n")
-        (repo / "ignored.py").write_text("do not copy me\n")
-
-        with working_tree_snapshot(repo, ["app.py"]) as snap:
-            assert snap is not None
-            assert snap != repo
-            assert (snap / "app.py").read_text() == "working tree content\n"
-            assert not (snap / "ignored.py").exists()
-
-    def test_missing_file_yields_none(self, repo):
-        with working_tree_snapshot(repo, ["missing.py"]) as snap:
-            assert snap is None
-
-    def test_rejects_paths_outside_repo(self, repo):
-        with working_tree_snapshot(repo, ["../outside.py"]) as snap:
-            assert snap is None
-
-    def test_temp_dir_cleaned_up_even_on_exception(self, repo):
-        _stage(repo, "app.py", "one\n")
-        captured: List[Path] = []
-
-        def _raise_inside_snapshot():
-            with working_tree_snapshot(repo, ["app.py"]) as snap:
-                assert snap is not None
-                captured.append(snap)
-                raise RuntimeError("<TEST_EXCEPTION_INSIDE_WORKING_TREE_SNAPSHOT_CONTEXT>")
-
-        with pytest.raises(RuntimeError):
-            _raise_inside_snapshot()
-        assert not captured[0].exists()
-
-
 class TestRefSnapshot:
     def test_no_files_yields_none(self, repo):
-        with ref_snapshot(repo, "HEAD", []) as (snap, existing):
+        with ref_snapshot(repo, "HEAD", []) as (snap, existing, failed):
             assert snap is None
             assert existing == set()
+            assert failed is False
 
     def test_extracts_correct_ref_content(self, repo):
         _stage(repo, "app.py", "one\n")
         subprocess.run(["git", "commit", "-q", "-m", "add app"], cwd=repo, check=True)
-        with ref_snapshot(repo, "HEAD", ["app.py"]) as (snap, existing):
+        with ref_snapshot(repo, "HEAD", ["app.py"]) as (snap, existing, failed):
             assert existing == {"app.py"}
             assert (snap / "app.py").read_text() == "one\n"
+            assert failed is False
 
     def test_brand_new_file_gracefully_excluded(self, repo):
         # app.py is staged but not yet committed -- doesn't exist at HEAD.
         _stage(repo, "app.py", "one\n")
-        with ref_snapshot(repo, "HEAD", ["app.py"]) as (snap, existing):
+        with ref_snapshot(repo, "HEAD", ["app.py"]) as (snap, existing, failed):
             assert snap is None
             assert existing == set()
+            assert failed is False
 
     def test_mix_of_existing_and_new_files(self, repo):
         # A new file alongside an existing one must not lose baseline
@@ -507,17 +548,23 @@ class TestRefSnapshot:
         _stage(repo, "existing.py", "one\n")
         subprocess.run(["git", "commit", "-q", "-m", "add existing"], cwd=repo, check=True)
         _stage(repo, "brand_new.py", "two\n")
-        with ref_snapshot(repo, "HEAD", ["existing.py", "brand_new.py"]) as (snap, existing):
+        with ref_snapshot(repo, "HEAD", ["existing.py", "brand_new.py"]) as (
+            snap,
+            existing,
+            failed,
+        ):
             assert existing == {"existing.py"}
             assert (snap / "existing.py").read_text() == "one\n"
             assert not (snap / "brand_new.py").exists()
+            assert failed is False
 
     def test_bad_ref_yields_none(self, repo):
         _stage(repo, "app.py", "one\n")
         subprocess.run(["git", "commit", "-q", "-m", "add app"], cwd=repo, check=True)
-        with ref_snapshot(repo, "not-a-real-ref", ["app.py"]) as (snap, existing):
+        with ref_snapshot(repo, "not-a-real-ref", ["app.py"]) as (snap, existing, failed):
             assert snap is None
             assert existing == set()
+            assert failed is False
 
     def test_hung_git_archive_times_out_instead_of_hanging(self, repo, monkeypatch):
         _stage(repo, "app.py", "one\n")
@@ -530,17 +577,64 @@ class TestRefSnapshot:
             return real_run(args, *a, **kw)
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        with ref_snapshot(repo, "HEAD", ["app.py"]) as (snap, existing):
+        with ref_snapshot(repo, "HEAD", ["app.py"]) as (snap, existing, failed):
             assert snap is None
             assert existing == set()
+            # A hung git archive is a real, attempted failure -- distinct
+            # from "nothing exists at ref" -- so callers can say so.
+            assert failed is True
+
+    def test_deadline_exhausted_after_files_confirmed_is_flagged(self, repo, monkeypatch):
+        # Files were confirmed to exist at `ref` and a scratch dir was
+        # created -- running out of shared budget before `git archive`
+        # could run is a real, attempted failure, not "nothing to do."
+        # The deadline check inside `_existing_at_ref` must still succeed
+        # (real budget for that call); only the later check, after
+        # existence is confirmed, should see it exhausted.
+        _stage(repo, "app.py", "one\n")
+        subprocess.run(["git", "commit", "-q", "-m", "add app"], cwd=repo, check=True)
+        real_bounded_git_timeout = index_snapshot.bounded_git_timeout
+        calls = []
+
+        def _fake_bounded_git_timeout(deadline):
+            calls.append(deadline)
+            return real_bounded_git_timeout(None) if len(calls) == 1 else None
+
+        monkeypatch.setattr(index_snapshot, "bounded_git_timeout", _fake_bounded_git_timeout)
+        with ref_snapshot(repo, "HEAD", ["app.py"], deadline=0.0) as (snap, existing, failed):
+            assert snap is None
+            assert existing == set()
+            assert failed is True
+
+    def test_archive_extraction_failure_is_flagged(self, repo, monkeypatch):
+        _stage(repo, "app.py", "one\n")
+        subprocess.run(["git", "commit", "-q", "-m", "add app"], cwd=repo, check=True)
+        monkeypatch.setattr(index_snapshot, "_extract_archive", lambda *a, **kw: False)
+        with ref_snapshot(repo, "HEAD", ["app.py"]) as (snap, existing, failed):
+            assert snap is None
+            assert existing == set()
+            assert failed is True
+
+    def test_scratch_dir_creation_failure_is_flagged_not_raised(self, repo, monkeypatch):
+        _stage(repo, "app.py", "one\n")
+        subprocess.run(["git", "commit", "-q", "-m", "add app"], cwd=repo, check=True)
+
+        def _raise(*a, **kw):
+            raise index_snapshot.SnapshotError("disk full")
+
+        monkeypatch.setattr(index_snapshot, "_create_scratch_dir", _raise)
+        with ref_snapshot(repo, "HEAD", ["app.py"]) as (snap, existing, failed):
+            assert snap is None
+            assert existing == set()
+            assert failed is True
 
     def test_temp_dir_cleaned_up_even_on_exception(self, repo):
         _stage(repo, "app.py", "one\n")
         subprocess.run(["git", "commit", "-q", "-m", "add app"], cwd=repo, check=True)
-        captured: List[Path] = []
+        captured: list[Path] = []
 
         def _raise_inside_snapshot():
-            with ref_snapshot(repo, "HEAD", ["app.py"]) as (snap, _existing):
+            with ref_snapshot(repo, "HEAD", ["app.py"]) as (snap, _existing, _failed):
                 captured.append(snap)
                 raise RuntimeError("<TEST_EXCEPTION_INSIDE_REF_SNAPSHOT_CONTEXT>")
 
@@ -553,7 +647,7 @@ class TestExtractDefensively:
     """Exercised directly, regardless of which Python runs these tests."""
 
     @staticmethod
-    def _make_tar(members: List[Tuple[tarfile.TarInfo, Optional[bytes]]]) -> tarfile.TarFile:
+    def _make_tar(members: list[tuple[tarfile.TarInfo, bytes | None]]) -> tarfile.TarFile:
         buf = BytesIO()
         with tarfile.open(fileobj=buf, mode="w") as tar:
             for info, data in members:
@@ -617,7 +711,7 @@ class TestExtractDefensively:
         file_member.size = 5
 
         class _FakeTar:
-            def getmembers(self) -> List[tarfile.TarInfo]:
+            def getmembers(self) -> list[tarfile.TarInfo]:
                 return [pax_member, file_member]
 
             def extract(self, member: tarfile.TarInfo, path: Path) -> None:
@@ -691,6 +785,319 @@ class TestParseSecretsResults:
             )
         ]
 
+    def test_extracts_finding_id_from_real_cli_sample(self):
+        # Verbatim shape from a real `snyk secrets test --json` run --
+        # confirms the exact key: fingerprints["snyk/asset/finding/v1"]
+        # (singular "asset" -- Snyk Code's own docs use "assets" at the
+        # same key name for that product, don't assume they're the same).
+        payload = json.dumps(
+            {
+                "runs": [
+                    {
+                        "results": [
+                            {
+                                "ruleId": "aws-access-token",
+                                "level": "error",
+                                "locations": [
+                                    {
+                                        "physicalLocation": {
+                                            "artifactLocation": {"uri": "demo/config.py"},
+                                            "region": {
+                                                "startLine": 2,
+                                                "startColumn": 22,
+                                                "endLine": 2,
+                                                "endColumn": 42,
+                                            },
+                                        }
+                                    }
+                                ],
+                                "fingerprints": {
+                                    "identity": "UNDEFINED-1c283a56-23de-4478-bef3-e8ad6cb80e7a",
+                                    "snyk/asset/finding/v1": (
+                                        "UNDEFINED-1c283a56-23de-4478-bef3-e8ad6cb80e7a"
+                                    ),
+                                },
+                            }
+                        ]
+                    }
+                ]
+            }
+        )
+        out = findings.parse_secrets_results(payload)
+        assert out[0].finding_id == "UNDEFINED-1c283a56-23de-4478-bef3-e8ad6cb80e7a"
+
+    def test_finding_id_absent_without_fingerprints(self):
+        payload = json.dumps(
+            {
+                "runs": [
+                    {
+                        "results": [
+                            {
+                                "ruleId": "x",
+                                "level": "error",
+                                "locations": [
+                                    {
+                                        "physicalLocation": {
+                                            "artifactLocation": {"uri": "app.py"},
+                                            "region": {"startLine": 1, "startColumn": 1},
+                                        }
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ]
+            }
+        )
+        out = findings.parse_secrets_results(payload)
+        assert out[0].finding_id is None
+
+    def test_malformed_fingerprint_value_degrades_to_no_finding_id(self):
+        # An unexpected shape (e.g. a non-string) must not abort the whole
+        # scan over a hint-only field -- degrade to no ignore hint instead.
+        payload = json.dumps(
+            {
+                "runs": [
+                    {
+                        "results": [
+                            {
+                                "ruleId": "x",
+                                "level": "error",
+                                "locations": [
+                                    {
+                                        "physicalLocation": {
+                                            "artifactLocation": {"uri": "app.py"},
+                                            "region": {"startLine": 1, "startColumn": 1},
+                                        }
+                                    }
+                                ],
+                                "fingerprints": {"snyk/asset/finding/v1": 12345},
+                            }
+                        ]
+                    }
+                ]
+            }
+        )
+        out = findings.parse_secrets_results(payload)
+        assert out is not None
+        assert out[0].finding_id is None
+
+    def test_malformed_fingerprints_shape_degrades_to_no_finding_id(self):
+        # "fingerprints" itself can be present but not an object (e.g. a
+        # producer that emits JSON null) -- same hint-only degradation as
+        # a malformed value inside it, not a whole-scan parse failure.
+        payload = json.dumps(
+            {
+                "runs": [
+                    {
+                        "results": [
+                            {
+                                "ruleId": "x",
+                                "level": "error",
+                                "locations": [
+                                    {
+                                        "physicalLocation": {
+                                            "artifactLocation": {"uri": "app.py"},
+                                            "region": {"startLine": 1, "startColumn": 1},
+                                        }
+                                    }
+                                ],
+                                "fingerprints": None,
+                            }
+                        ]
+                    }
+                ]
+            }
+        )
+        out = findings.parse_secrets_results(payload)
+        assert out is not None
+        assert out[0].finding_id is None
+
+    def test_accepted_suppression_marks_finding_ignored(self):
+        # Verbatim shape from a real `snyk secrets test --json` run after
+        # `snyk ignore create --remote-repo-url=...` against that finding.
+        payload = json.dumps(
+            {
+                "runs": [
+                    {
+                        "results": [
+                            {
+                                "ruleId": "aws-access-token",
+                                "level": "error",
+                                "locations": [
+                                    {
+                                        "physicalLocation": {
+                                            "artifactLocation": {"uri": "demo/untouched.py"},
+                                            "region": {
+                                                "startLine": 3,
+                                                "startColumn": 22,
+                                                "endLine": 3,
+                                                "endColumn": 42,
+                                            },
+                                        }
+                                    }
+                                ],
+                                "fingerprints": {
+                                    "identity": "d02aa386-ed36-5df1-8c33-e0cc97271bbe",
+                                    "snyk/asset/finding/v1": "d02aa386-ed36-5df1-8c33-e0cc97271bbe",
+                                },
+                                "suppressions": [
+                                    {
+                                        "guid": "90d5da9a-01bf-4f9b-b6c4-a533aca9d9d4",
+                                        "status": "accepted",
+                                        "justification": "testing",
+                                        "kind": "external",
+                                        "properties": {
+                                            "category": "not-vulnerable",
+                                            "ignoredOn": "2026-08-12T16:26:44Z",
+                                            "ignoredBy": {
+                                                "name": "Jacob",
+                                                "email": "jacob.boerma@snyk.io",
+                                            },
+                                        },
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ]
+            }
+        )
+        out = findings.parse_secrets_results(payload)
+        assert out is not None
+        assert len(out) == 1
+        assert out[0].suppression == "accepted"
+        assert out[0].is_ignored is True
+
+    def _finding_with_suppression_status(self, status):
+        payload = json.dumps(
+            {
+                "runs": [
+                    {
+                        "results": [
+                            {
+                                "ruleId": "aws-access-token",
+                                "level": "error",
+                                "locations": [
+                                    {
+                                        "physicalLocation": {
+                                            "artifactLocation": {"uri": "app.py"},
+                                            "region": {"startLine": 1, "startColumn": 1},
+                                        }
+                                    }
+                                ],
+                                "suppressions": [{"status": status}],
+                            }
+                        ]
+                    }
+                ]
+            }
+        )
+        out = findings.parse_secrets_results(payload)
+        assert out is not None
+        assert len(out) == 1
+        return out[0]
+
+    def test_under_review_suppression_is_not_ignored_but_is_flagged(self):
+        finding = self._finding_with_suppression_status("underReview")
+        assert finding.suppression == "underReview"
+        assert finding.is_ignored is False
+        assert finding.is_under_review is True
+
+    def test_rejected_suppression_is_not_ignored_but_is_flagged(self):
+        finding = self._finding_with_suppression_status("rejected")
+        assert finding.suppression == "rejected"
+        assert finding.is_ignored is False
+        assert finding.is_rejected is True
+
+    def test_missing_status_on_suppression_defaults_to_accepted(self):
+        # SARIF 2.1: suppression.status defaults to "accepted" when absent.
+        payload = json.dumps(
+            {
+                "runs": [
+                    {
+                        "results": [
+                            {
+                                "ruleId": "aws-access-token",
+                                "level": "error",
+                                "locations": [
+                                    {
+                                        "physicalLocation": {
+                                            "artifactLocation": {"uri": "app.py"},
+                                            "region": {"startLine": 1, "startColumn": 1},
+                                        }
+                                    }
+                                ],
+                                "suppressions": [{"guid": "abc123"}],
+                            }
+                        ]
+                    }
+                ]
+            }
+        )
+        out = findings.parse_secrets_results(payload)
+        assert out is not None
+        assert len(out) == 1
+        assert out[0].suppression == "accepted"
+        assert out[0].is_ignored is True
+
+    def test_no_suppression_is_none_status(self):
+        payload = json.dumps(
+            {
+                "runs": [
+                    {
+                        "results": [
+                            {
+                                "ruleId": "x",
+                                "level": "error",
+                                "locations": [
+                                    {
+                                        "physicalLocation": {
+                                            "artifactLocation": {"uri": "app.py"},
+                                            "region": {"startLine": 1, "startColumn": 1},
+                                        }
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ]
+            }
+        )
+        out = findings.parse_secrets_results(payload)
+        assert out is not None
+        assert out[0].suppression == "none"
+
+    def test_accepted_wins_over_under_review_on_same_result(self):
+        # A result carrying more than one suppression entry shouldn't be
+        # possible in practice, but if it happens, accepted must win.
+        payload = json.dumps(
+            {
+                "runs": [
+                    {
+                        "results": [
+                            {
+                                "ruleId": "x",
+                                "level": "error",
+                                "locations": [
+                                    {
+                                        "physicalLocation": {
+                                            "artifactLocation": {"uri": "app.py"},
+                                            "region": {"startLine": 1, "startColumn": 1},
+                                        }
+                                    }
+                                ],
+                                "suppressions": [{"status": "underReview"}, {"status": "accepted"}],
+                            }
+                        ]
+                    }
+                ]
+            }
+        )
+        out = findings.parse_secrets_results(payload)
+        assert out is not None
+        assert out[0].suppression == "accepted"
+
     def test_defaults_end_line_column_to_start_when_absent(self):
         # A SARIF producer that omits endLine/endColumn shouldn't yield an
         # ill-defined (0, 0) span.
@@ -748,7 +1155,7 @@ class TestParseSecretsResults:
         )
         parsed = findings.parse_secrets_results(payload)
         assert parsed[0].start_line == 0
-        added, pre = diff_scope.split_added_vs_pre_existing(parsed, {"app.py": [(1, 10)]})
+        added, pre, _ = diff_scope.split_added_vs_pre_existing(parsed, {"app.py": [(1, 10)]})
         assert added == parsed
         assert pre == []
 
@@ -821,30 +1228,101 @@ class TestParseSecretsResults:
         assert findings.parse_secrets_results(json.dumps({"runs": []})) == []
 
 
-class TestFilterBySeverity:
-    @staticmethod
-    def _finding(severity):
-        return findings.Finding(id=severity, severity=severity)
+class TestDeprecatedFlagWarnings:
+    """Exercised against an isolated, synthetic registry -- real entries
+    (SECRETS_FALLBACK_TO_WORKING_DIR onward) are swapped out for the
+    duration of these tests so they can't leak in from a real shell env."""
 
-    def test_default_threshold_is_medium(self, monkeypatch):
-        monkeypatch.delenv("SECRETS_MIN_BLOCK_SEVERITY", raising=False)
-        out = findings.filter_by_severity([self._finding("low"), self._finding("medium")])
-        assert [f.id for f in out] == ["medium"]
+    FAKE = deprecated_flags.DeprecatedFlag(
+        name="SECRETS_TOTALLY_FAKE_FLAG", message="see the docs for what replaced it"
+    )
 
-    def test_custom_threshold(self, monkeypatch):
-        monkeypatch.setenv("SECRETS_MIN_BLOCK_SEVERITY", "critical")
-        out = findings.filter_by_severity([self._finding("high"), self._finding("critical")])
-        assert [f.id for f in out] == ["critical"]
+    @pytest.fixture(autouse=True)
+    def _isolated_registry(self, monkeypatch):
+        monkeypatch.setattr(deprecated_flags, "_DEPRECATED_FLAGS", {self.FAKE.name: self.FAKE})
 
-    def test_invalid_threshold_falls_back_to_medium(self, monkeypatch):
-        monkeypatch.setenv("SECRETS_MIN_BLOCK_SEVERITY", "not-a-severity")
-        out = findings.filter_by_severity([self._finding("low"), self._finding("high")])
-        assert [f.id for f in out] == ["high"]
+    def test_unset_flag_produces_no_warning(self, monkeypatch):
+        monkeypatch.delenv(self.FAKE.name, raising=False)
+        assert deprecated_flags.get_deprecated_flag_warnings() == []
+
+    def test_set_flag_produces_one_warning_with_message(self, monkeypatch):
+        monkeypatch.setenv(self.FAKE.name, "1")
+        out = deprecated_flags.get_deprecated_flag_warnings()
+        assert len(out) == 1
+        assert self.FAKE.name in out[0]
+        assert self.FAKE.message in out[0]
+
+    def test_set_to_any_value_still_warns(self, monkeypatch):
+        monkeypatch.setenv(self.FAKE.name, "0")
+        assert len(deprecated_flags.get_deprecated_flag_warnings()) == 1
+
+    def test_registration_order_is_preserved(self, monkeypatch):
+        other = deprecated_flags.DeprecatedFlag(name="SECRETS_ANOTHER_FAKE_FLAG", message="x")
+        monkeypatch.setattr(
+            deprecated_flags, "_DEPRECATED_FLAGS", {self.FAKE.name: self.FAKE, other.name: other}
+        )
+        monkeypatch.setenv(self.FAKE.name, "1")
+        monkeypatch.setenv(other.name, "1")
+        out = deprecated_flags.get_deprecated_flag_warnings()
+        assert [self.FAKE.name in line for line in out] == [True, False]
+
+
+class TestRealDeprecatedFlags:
+    """The actual registry -- one test per removed flag, added alongside
+    the removal PR that registers it."""
+
+    def test_fallback_to_working_dir_is_registered(self, monkeypatch):
+        monkeypatch.setenv("SECRETS_FALLBACK_TO_WORKING_DIR", "1")
+        out = deprecated_flags.get_deprecated_flag_warnings()
+        assert any("SECRETS_FALLBACK_TO_WORKING_DIR" in line for line in out)
+
+    def test_ignore_paths_is_registered(self, monkeypatch):
+        monkeypatch.setenv("SECRETS_IGNORE_PATHS", "app.py")
+        out = deprecated_flags.get_deprecated_flag_warnings()
+        assert any(
+            "SECRETS_IGNORE_PATHS" in line and "ignore request command" in line for line in out
+        )
+
+    def test_diff_strategy_is_registered(self, monkeypatch):
+        monkeypatch.setenv("SECRETS_DIFF_STRATEGY", "line")
+        out = deprecated_flags.get_deprecated_flag_warnings()
+        assert any("SECRETS_DIFF_STRATEGY" in line for line in out)
+
+    def test_min_block_severity_is_registered(self, monkeypatch):
+        monkeypatch.setenv("SECRETS_MIN_BLOCK_SEVERITY", "high")
+        out = deprecated_flags.get_deprecated_flag_warnings()
+        assert any("SECRETS_MIN_BLOCK_SEVERITY" in line for line in out)
 
 
 # ============================================================================
 # 5. lib/snyk_cli.py
 # ============================================================================
+
+
+class TestNeedsShell:
+    def test_cmd_needs_a_shell_on_windows(self, monkeypatch):
+        monkeypatch.setattr(proc, "IS_WINDOWS", True)
+        assert proc.needs_shell(r"C:\snyk\snyk.cmd")
+
+    def test_bat_needs_a_shell_on_windows(self, monkeypatch):
+        monkeypatch.setattr(proc, "IS_WINDOWS", True)
+        assert proc.needs_shell(r"C:\snyk\snyk.bat")
+
+    def test_case_insensitive_extension_match(self, monkeypatch):
+        monkeypatch.setattr(proc, "IS_WINDOWS", True)
+        assert proc.needs_shell(r"C:\snyk\SNYK.CMD")
+
+    def test_exe_never_needs_a_shell_even_on_windows(self, monkeypatch):
+        monkeypatch.setattr(proc, "IS_WINDOWS", True)
+        assert not proc.needs_shell(r"C:\snyk\snyk.exe")
+
+    def test_extensionless_never_needs_a_shell_even_on_windows(self, monkeypatch):
+        monkeypatch.setattr(proc, "IS_WINDOWS", True)
+        assert not proc.needs_shell("/usr/local/bin/snyk")
+
+    def test_cmd_never_needs_a_shell_off_windows(self, monkeypatch):
+        monkeypatch.setattr(proc, "IS_WINDOWS", False)
+        assert not proc.needs_shell("/usr/local/bin/snyk.cmd")
 
 
 class TestFindSnykBinary:
@@ -909,6 +1387,77 @@ class TestFindSnykBinary:
         monkeypatch.chdir(tmp_path / "cwd")
         self._pin("snyk")
         on_path = self._fake_cli_on_path(tmp_path / "npm-bin")
+        monkeypatch.setenv("PATH", str(on_path.parent))
+        assert snyk_cli.find_snyk_binary() == str(on_path)
+
+    def test_pin_containing_shell_metacharacter_is_rejected_for_a_cmd_on_windows(
+        self, monkeypatch, tmp_path
+    ):
+        # Only a .cmd/.bat pin reaches a shell=True subprocess call (see
+        # lib.proc.needs_shell) -- only there is a metacharacter unsafe.
+        monkeypatch.setattr(proc, "IS_WINDOWS", True)
+        pinned = self._fake_cli(tmp_path / "std&alone" / "snyk.cmd")
+        self._pin(str(pinned))
+        on_path = self._fake_cli_on_path(tmp_path / "npm-bin")
+        monkeypatch.setenv("PATH", str(on_path.parent))
+        assert snyk_cli.find_snyk_binary() == str(on_path)
+
+    def test_pin_containing_shell_metacharacter_is_allowed_for_a_native_exe(
+        self, monkeypatch, tmp_path
+    ):
+        # A native .exe never reaches a shell, even on Windows -- no
+        # metacharacter in its path is unsafe.
+        monkeypatch.setattr(proc, "IS_WINDOWS", True)
+        pinned = self._fake_cli(tmp_path / "std&alone" / "snyk.exe")
+        self._pin(str(pinned))
+        assert snyk_cli.find_snyk_binary() == str(pinned)
+
+    def test_path_resolved_cmd_binary_with_shell_metacharacter_is_rejected_on_windows(
+        self, monkeypatch, tmp_path
+    ):
+        # A PATH-resolved .cmd reaches a shell=True subprocess call on
+        # Windows -- only there is a metacharacter actually unsafe. Force
+        # the candidate name list since it's normally frozen at import
+        # time from the real platform, not the monkeypatched one.
+        monkeypatch.setattr(proc, "IS_WINDOWS", True)
+        monkeypatch.setattr(snyk_cli, "_SNYK_BINARY_NAMES", ["snyk.cmd"])
+        monkeypatch.delenv("PATH", raising=False)
+        on_path = self._fake_cli(tmp_path / "npm&bin" / "snyk.cmd")
+        monkeypatch.setenv("PATH", str(on_path.parent))
+        assert snyk_cli.find_snyk_binary() is None
+
+    def test_path_resolved_cmd_binary_with_semicolon_is_rejected_on_windows(
+        self, monkeypatch, tmp_path
+    ):
+        # cmd.exe treats ';' as an argument delimiter (like space or ','),
+        # even though it's a legal character in a Windows directory name --
+        # only a .cmd/.bat target reaches that shell (see needs_shell).
+        monkeypatch.setattr(proc, "IS_WINDOWS", True)
+        monkeypatch.setattr(snyk_cli, "_SNYK_BINARY_NAMES", ["snyk.cmd"])
+        monkeypatch.delenv("PATH", raising=False)
+        on_path = self._fake_cli(tmp_path / "npm;bin" / "snyk.cmd")
+        monkeypatch.setenv("PATH", str(on_path.parent))
+        assert snyk_cli.find_snyk_binary() is None
+
+    def test_path_resolved_exe_binary_with_shell_metacharacter_is_allowed_on_windows(
+        self, monkeypatch, tmp_path
+    ):
+        # A native .exe never reaches a shell, even on Windows.
+        monkeypatch.setattr(proc, "IS_WINDOWS", True)
+        monkeypatch.setattr(snyk_cli, "_SNYK_BINARY_NAMES", ["snyk.exe"])
+        monkeypatch.delenv("PATH", raising=False)
+        on_path = self._fake_cli(tmp_path / "npm&bin" / "snyk.exe")
+        monkeypatch.setenv("PATH", str(on_path.parent))
+        assert snyk_cli.find_snyk_binary() == str(on_path)
+
+    def test_path_resolved_binary_with_shell_metacharacter_is_allowed_off_windows(
+        self, monkeypatch, tmp_path
+    ):
+        # shell=False off Windows -- a `&` in the path is a literal, safe
+        # character, not shell syntax, so it must not be rejected there.
+        monkeypatch.setattr(proc, "IS_WINDOWS", False)
+        monkeypatch.delenv("PATH", raising=False)
+        on_path = self._fake_cli_on_path(tmp_path / "npm&bin")
         monkeypatch.setenv("PATH", str(on_path.parent))
         assert snyk_cli.find_snyk_binary() == str(on_path)
 
@@ -1060,22 +1609,6 @@ class TestCheckSnykAuth:
         assert snyk_cli.check_snyk_auth() == "file-token"
 
 
-class TestResolveScanFiles:
-    def test_no_ignore_patterns_passthrough(self, monkeypatch):
-        monkeypatch.delenv("SECRETS_IGNORE_PATHS", raising=False)
-        assert snyk_cli.resolve_scan_files(["a.py", "b.py"]) == ["a.py", "b.py"]
-
-    def test_excludes_matching_glob(self, monkeypatch):
-        monkeypatch.setenv("SECRETS_IGNORE_PATHS", "fixtures/*,*.lock")
-        out = snyk_cli.resolve_scan_files(["fixtures/x.py", "app.py", "yarn.lock"])
-        assert out == ["app.py"]
-
-    def test_multiple_patterns_are_comma_separated_and_trimmed(self, monkeypatch):
-        monkeypatch.setenv("SECRETS_IGNORE_PATHS", " a.py , b.py ")
-        out = snyk_cli.resolve_scan_files(["a.py", "b.py", "c.py"])
-        assert out == ["c.py"]
-
-
 class TestRunSecretsScan:
     def test_passes_timeout_to_subprocess(self, monkeypatch, tmp_path):
         captured = {}
@@ -1085,10 +1618,12 @@ class TestRunSecretsScan:
             return subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr="")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        snyk_cli.run_secrets_scan(tmp_path, "snyk", timeout=3.5)
+        snyk_cli.run_secrets_scan(tmp_path, snyk_cli.ScanInvocation(snyk_bin="snyk"), timeout=3.5)
         assert captured["timeout"] == 3.5
 
     def test_scan_uses_workspace_root_as_single_snyk_input(self, monkeypatch, tmp_path):
+        """Also the "no remote_url" case: ScanInvocation.remote_url
+        defaults to None, and the argv has no --remote-repo-url flag."""
         captured = {}
         clean_sarif = json.dumps({"runs": [{"results": []}]})
 
@@ -1097,17 +1632,42 @@ class TestRunSecretsScan:
             return subprocess.CompletedProcess(args=[], returncode=0, stdout=clean_sarif, stderr="")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        status, out = snyk_cli.run_secrets_scan(tmp_path, "snyk", timeout=1)
+        status, out = snyk_cli.run_secrets_scan(
+            tmp_path, snyk_cli.ScanInvocation(snyk_bin="snyk"), timeout=1
+        )
         assert status == "success"
         assert out == []
         assert captured["args"] == ["snyk", "secrets", "test", ".", "--json"]
+
+    def test_includes_remote_repo_url_flag_when_set(self, monkeypatch, tmp_path):
+        captured = {}
+
+        def fake_run(*args, **kwargs):
+            captured["args"] = args[0]
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        invocation = snyk_cli.ScanInvocation(
+            snyk_bin="snyk", remote_url="git@github.com:acme/repo.git"
+        )
+        snyk_cli.run_secrets_scan(tmp_path, invocation, timeout=1)
+        assert captured["args"] == [
+            "snyk",
+            "secrets",
+            "test",
+            ".",
+            "--json",
+            "--remote-repo-url=git@github.com:acme/repo.git",
+        ]
 
     def test_timeout_expired_yields_timeout_status(self, monkeypatch, tmp_path):
         def fake_run(*args, **kwargs):
             raise subprocess.TimeoutExpired(cmd="snyk", timeout=1)
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        status, out = snyk_cli.run_secrets_scan(tmp_path, "snyk", timeout=1)
+        status, out = snyk_cli.run_secrets_scan(
+            tmp_path, snyk_cli.ScanInvocation(snyk_bin="snyk"), timeout=1
+        )
         assert status == "timeout"
         assert out == []
 
@@ -1118,7 +1678,9 @@ class TestRunSecretsScan:
             )
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        status, _ = snyk_cli.run_secrets_scan(tmp_path, "snyk", timeout=1)
+        status, _ = snyk_cli.run_secrets_scan(
+            tmp_path, snyk_cli.ScanInvocation(snyk_bin="snyk"), timeout=1
+        )
         assert status == "auth_required"
 
     def test_malformed_stdout_on_success_exit_code_is_an_error_not_a_clean_scan(
@@ -1133,11 +1695,13 @@ class TestRunSecretsScan:
             return subprocess.CompletedProcess(args=[], returncode=0, stdout="not json", stderr="")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        status, out = snyk_cli.run_secrets_scan(tmp_path, "snyk", timeout=1)
-        assert status == "error"
+        status, out = snyk_cli.run_secrets_scan(
+            tmp_path, snyk_cli.ScanInvocation(snyk_bin="snyk"), timeout=1
+        )
+        assert status == "unparseable"
         assert out == []
 
-    def test_shell_and_creationflags_match_platform(self, monkeypatch, tmp_path):
+    def test_shell_and_creationflags_match_invocation(self, monkeypatch, tmp_path):
         captured = {}
 
         def fake_run(*args, **kwargs):
@@ -1145,53 +1709,197 @@ class TestRunSecretsScan:
             return subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr="")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        snyk_cli.run_secrets_scan(tmp_path, "snyk", timeout=1)
-        assert captured["shell"] == proc.IS_WINDOWS
-        assert captured["creationflags"] == proc.CREATE_NO_WINDOW
+        for needs_shell in (True, False):
+            captured.clear()
+            invocation = snyk_cli.ScanInvocation(snyk_bin="snyk", needs_shell=needs_shell)
+            snyk_cli.run_secrets_scan(tmp_path, invocation, timeout=1)
+            assert captured["shell"] == needs_shell
+            assert captured["creationflags"] == proc.CREATE_NO_WINDOW
+
+
+class TestRunSecretsScanWithRetries:
+    def test_retries_transient_error_then_succeeds(self, monkeypatch, tmp_path):
+        results = [("error", []), ("error", []), ("success", [])]
+
+        def fake_scan(workspace, invocation, timeout):
+            return results.pop(0)
+
+        monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_scan)
+        invocation = snyk_cli.ScanInvocation(snyk_bin="snyk")
+        attempt = snyk_cli.run_secrets_scan_with_retries(
+            tmp_path, invocation, time.monotonic() + 30
+        )
+        assert (attempt.status, attempt.attempts) == ("success", 3)
+
+    def test_gives_up_after_max_attempts(self, monkeypatch, tmp_path):
+        calls = []
+
+        def fake_scan(workspace, invocation, timeout):
+            calls.append(1)
+            return "error", []
+
+        monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_scan)
+        invocation = snyk_cli.ScanInvocation(snyk_bin="snyk")
+        attempt = snyk_cli.run_secrets_scan_with_retries(
+            tmp_path, invocation, time.monotonic() + 30
+        )
+        assert (attempt.status, attempt.attempts) == (
+            "retries_exhausted",
+            snyk_cli.MAX_SCAN_ATTEMPTS,
+        )
+        assert len(calls) == snyk_cli.MAX_SCAN_ATTEMPTS
+
+    def test_no_new_attempt_once_deadline_has_passed(self, monkeypatch, tmp_path):
+        calls = []
+
+        def fake_scan(workspace, invocation, timeout):
+            calls.append(1)
+            return "error", []
+
+        monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_scan)
+        invocation = snyk_cli.ScanInvocation(snyk_bin="snyk")
+        attempt = snyk_cli.run_secrets_scan_with_retries(tmp_path, invocation, time.monotonic() - 1)
+        assert (attempt.status, attempt.attempts) == ("timeout", 0)
+        assert calls == []
+
+    def test_unparseable_is_not_retried(self, monkeypatch, tmp_path):
+        calls = []
+
+        def fake_scan(workspace, invocation, timeout):
+            calls.append(1)
+            return "unparseable", []
+
+        monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_scan)
+        invocation = snyk_cli.ScanInvocation(snyk_bin="snyk")
+        attempt = snyk_cli.run_secrets_scan_with_retries(
+            tmp_path, invocation, time.monotonic() + 30
+        )
+        assert (attempt.status, attempt.attempts) == ("unparseable", 1)
+        assert len(calls) == 1
+
+    def test_auth_required_is_not_retried(self, monkeypatch, tmp_path):
+        calls = []
+
+        def fake_scan(workspace, invocation, timeout):
+            calls.append(1)
+            return "auth_required", []
+
+        monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_scan)
+        invocation = snyk_cli.ScanInvocation(snyk_bin="snyk")
+        attempt = snyk_cli.run_secrets_scan_with_retries(
+            tmp_path, invocation, time.monotonic() + 30
+        )
+        assert (attempt.status, attempt.attempts) == ("auth_required", 1)
+        assert len(calls) == 1
+
+    def test_passes_invocation_through_to_run_secrets_scan(self, monkeypatch, tmp_path):
+        received = []
+
+        def fake_scan(workspace, invocation, timeout):
+            received.append(invocation)
+            return "success", []
+
+        monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_scan)
+        invocation = snyk_cli.ScanInvocation(
+            snyk_bin="snyk", remote_url="git@github.com:acme/repo.git"
+        )
+        snyk_cli.run_secrets_scan_with_retries(tmp_path, invocation, time.monotonic() + 30)
+        assert received == [invocation]
 
 
 class TestRunConcurrentScans:
     def test_both_scans_invoked_with_their_own_workspace(self, monkeypatch, tmp_path):
         calls = []
 
-        def fake_run_secrets_scan(workspace, snyk_bin, timeout):
+        def fake_run_secrets_scan(workspace, invocation, timeout):
             calls.append(workspace)
             return "success", []
 
         monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_run_secrets_scan)
         current_dir, baseline_dir = tmp_path / "current", tmp_path / "baseline"
-        snyk_cli.run_concurrent_scans(current_dir, baseline_dir, "snyk", timeout=5)
+        invocation = snyk_cli.ScanInvocation(snyk_bin="snyk")
+        snyk_cli.run_concurrent_scans(current_dir, baseline_dir, invocation, time.monotonic() + 5)
         assert current_dir in calls
         assert baseline_dir in calls
 
+    def test_both_lanes_receive_the_same_invocation(self, monkeypatch, tmp_path):
+        """Both lanes are snapshots of the same real repo, so both must
+        resolve to the same --remote-repo-url -- not two independently
+        computed values that could drift apart."""
+        received = {}
+
+        def fake_run_secrets_scan(workspace, invocation, timeout):
+            received[str(workspace)] = invocation
+            return "success", []
+
+        monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_run_secrets_scan)
+        current_dir, baseline_dir = tmp_path / "current", tmp_path / "baseline"
+        invocation = snyk_cli.ScanInvocation(
+            snyk_bin="snyk", remote_url="git@github.com:acme/repo.git"
+        )
+        snyk_cli.run_concurrent_scans(current_dir, baseline_dir, invocation, time.monotonic() + 5)
+        assert received[str(current_dir)] == invocation
+        assert received[str(baseline_dir)] == invocation
+
     def test_results_returned_in_current_baseline_order(self, monkeypatch, tmp_path):
-        def fake_run_secrets_scan(workspace, snyk_bin, timeout):
+        def fake_run_secrets_scan(workspace, invocation, timeout):
             return ("success", []) if "current" in str(workspace) else ("timeout", [])
 
         monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_run_secrets_scan)
+        invocation = snyk_cli.ScanInvocation(snyk_bin="snyk")
         (current_result, baseline_result) = snyk_cli.run_concurrent_scans(
-            tmp_path / "current", tmp_path / "baseline", "snyk", timeout=5
+            tmp_path / "current", tmp_path / "baseline", invocation, time.monotonic() + 5
         )
-        assert current_result == ("success", [])
-        assert baseline_result == ("timeout", [])
+        assert (current_result.status, current_result.findings) == ("success", [])
+        assert (baseline_result.status, baseline_result.findings) == ("timeout", [])
 
     def test_runs_concurrently_not_sequentially(self, monkeypatch, tmp_path):
         # Sequential would take >= 2x the sleep; concurrent ~= 1x.
-        import time
-
         sleep_seconds = 0.2
 
-        def fake_run_secrets_scan(workspace, snyk_bin, timeout):
+        def fake_run_secrets_scan(workspace, invocation, timeout):
             time.sleep(sleep_seconds)
             return "success", []
 
         monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_run_secrets_scan)
+        invocation = snyk_cli.ScanInvocation(snyk_bin="snyk")
         start = time.monotonic()
         snyk_cli.run_concurrent_scans(
-            tmp_path / "current", tmp_path / "baseline", "snyk", timeout=5
+            tmp_path / "current", tmp_path / "baseline", invocation, time.monotonic() + 5
         )
         elapsed = time.monotonic() - start
         assert elapsed < sleep_seconds * 1.75
+
+    def test_bounded_even_if_a_lane_ignores_its_own_deadline(self, monkeypatch, tmp_path):
+        """A lane's own subprocess.run(timeout=...) is what actually kills
+        a hung `snyk` process in production -- this proves the *wrapper*
+        around both lanes doesn't hang even if a lane's thread somehow
+        never returns, by never actually respecting the shrinking
+        `remaining` timeout it's given."""
+        hang_seconds = 0.3
+
+        def _ignores_its_own_timeout(workspace, invocation, timeout):
+            time.sleep(hang_seconds)
+            return "success", []
+
+        monkeypatch.setattr(snyk_cli, "run_secrets_scan", _ignores_its_own_timeout)
+        monkeypatch.setattr(snyk_cli, "RESULT_GRACE_SECONDS", 0.05)
+        deadline = time.monotonic() + 0.05
+
+        start = time.monotonic()
+        invocation = snyk_cli.ScanInvocation(snyk_bin="snyk")
+        current, baseline = snyk_cli.run_concurrent_scans(
+            tmp_path / "current", tmp_path / "baseline", invocation, deadline
+        )
+        elapsed = time.monotonic() - start
+
+        assert elapsed < hang_seconds  # returned well before the hang finished
+        assert current.status == "timeout"
+        assert baseline.status == "timeout"
+        # Real attempt count is unknown (the thread never returned), but it
+        # was actively scanning -- report 1, not a misleading 0.
+        assert current.attempts == 1
+        assert baseline.attempts == 1
 
 
 # ============================================================================
@@ -1222,6 +1930,232 @@ class TestPrintFindings:
         report.print_findings([])
         assert capsys.readouterr().err == ""
 
+    def test_prints_ready_to_run_ignore_command_when_id_and_remote_present(self, capsys):
+        report.print_findings(
+            [
+                findings.Finding(
+                    id="x",
+                    title="X",
+                    severity="high",
+                    file_path="a.py",
+                    start_line=1,
+                    start_column=1,
+                    finding_id="abc123-def456",
+                )
+            ],
+            remote_url="git@github.com:acme/repo.git",
+        )
+        err = capsys.readouterr().err
+        assert (
+            "snyk ignore create --finding-id=abc123-def456 "
+            "--remote-repo-url=git@github.com:acme/repo.git" in err
+        )
+
+    def test_ignore_command_quotes_a_remote_url_with_spaces(self, capsys):
+        # A local filesystem remote can contain spaces -- the command must
+        # stay copy-pasteable (its whole reason for never being wrapped).
+        report.print_findings(
+            [
+                findings.Finding(
+                    id="x",
+                    title="X",
+                    severity="high",
+                    file_path="a.py",
+                    start_line=1,
+                    start_column=1,
+                    finding_id="abc123-def456",
+                )
+            ],
+            remote_url="/Users/me/my repo/.git",
+        )
+        err = capsys.readouterr().err
+        assert "--remote-repo-url='/Users/me/my repo/.git'" in err
+
+    def test_ignore_command_neutralizes_shell_metacharacters_in_remote_url(self, capsys):
+        # remote_url comes from `git config --get remote.origin.url` --
+        # not trusted input. A double-quote wrap alone doesn't stop
+        # $(...) from executing on paste; real shell quoting does.
+        report.print_findings(
+            [
+                findings.Finding(
+                    id="x",
+                    title="X",
+                    severity="high",
+                    file_path="a.py",
+                    start_line=1,
+                    start_column=1,
+                    finding_id="abc123-def456",
+                )
+            ],
+            remote_url="https://x.example/$(touch pwned)",
+        )
+        err = capsys.readouterr().err
+        # Single-quoted: the whole thing is one shell word, so $(...)
+        # is inert literal text rather than executable substitution.
+        assert "--remote-repo-url='https://x.example/$(touch pwned)'" in err
+
+    def test_ignore_command_quoting_is_not_gated_on_is_windows(self, monkeypatch, capsys):
+        # Quoting must stay POSIX-style even when IS_WINDOWS is True.
+        monkeypatch.setattr(proc, "IS_WINDOWS", True)
+        report.print_findings(
+            [
+                findings.Finding(
+                    id="x",
+                    title="X",
+                    severity="high",
+                    file_path="a.py",
+                    start_line=1,
+                    start_column=1,
+                    finding_id="abc123-def456",
+                )
+            ],
+            remote_url="https://x.example/$(touch pwned)",
+        )
+        err = capsys.readouterr().err
+        assert "--remote-repo-url='https://x.example/$(touch pwned)'" in err
+
+    def test_no_ignore_command_line_for_undefined_prefixed_id(self, capsys):
+        # Confirmed against a real `snyk ignore create` run: the CLI rejects
+        # an UNDEFINED-<uuid> fingerprint outright as an invalid UUID, so
+        # it's never usable -- omit the command rather than show one
+        # guaranteed to fail.
+        report.print_findings(
+            [
+                findings.Finding(
+                    id="x",
+                    title="X",
+                    severity="high",
+                    file_path="a.py",
+                    start_line=1,
+                    start_column=1,
+                    finding_id="UNDEFINED-abc123",
+                )
+            ],
+            remote_url="git@github.com:acme/repo.git",
+        )
+        assert "snyk ignore create" not in capsys.readouterr().err
+
+    def test_no_ignore_command_line_without_finding_id(self, capsys):
+        report.print_findings(
+            [
+                findings.Finding(
+                    id="x",
+                    title="X",
+                    severity="high",
+                    file_path="a.py",
+                    start_line=1,
+                    start_column=1,
+                )
+            ],
+            remote_url="git@github.com:acme/repo.git",
+        )
+        assert "snyk ignore create" not in capsys.readouterr().err
+
+    def test_no_ignore_command_line_without_remote_url(self, capsys):
+        report.print_findings(
+            [
+                findings.Finding(
+                    id="x",
+                    title="X",
+                    severity="high",
+                    file_path="a.py",
+                    start_line=1,
+                    start_column=1,
+                    finding_id="abc123",
+                )
+            ],
+            remote_url=None,
+        )
+        assert "snyk ignore create" not in capsys.readouterr().err
+
+    def test_under_review_finding_shows_tag_and_no_ignore_command(self, capsys):
+        report.print_findings(
+            [
+                findings.Finding(
+                    id="x",
+                    title="X",
+                    severity="high",
+                    file_path="a.py",
+                    start_line=1,
+                    start_column=1,
+                    finding_id="abc123",
+                    suppression="underReview",
+                )
+            ],
+            remote_url="git@github.com:acme/repo.git",
+        )
+        err = capsys.readouterr().err
+        assert "(ignore request pending review)" in err
+        assert "snyk ignore create" not in err
+
+    def test_rejected_finding_shows_tag_and_still_shows_ignore_command(self, capsys):
+        report.print_findings(
+            [
+                findings.Finding(
+                    id="x",
+                    title="X",
+                    severity="high",
+                    file_path="a.py",
+                    start_line=1,
+                    start_column=1,
+                    finding_id="abc123",
+                    suppression="rejected",
+                )
+            ],
+            remote_url="git@github.com:acme/repo.git",
+        )
+        err = capsys.readouterr().err
+        assert "(a previous ignore request was rejected)" in err
+        assert "snyk ignore create --finding-id=abc123" in err
+
+    def test_ignored_finding_shows_tag_and_no_ignore_command(self, capsys):
+        report.print_findings(
+            [
+                findings.Finding(
+                    id="x",
+                    title="X",
+                    severity="high",
+                    file_path="a.py",
+                    start_line=1,
+                    start_column=1,
+                    finding_id="abc123",
+                    suppression="accepted",
+                )
+            ],
+            remote_url="git@github.com:acme/repo.git",
+        )
+        err = capsys.readouterr().err
+        assert "(already ignored)" in err
+        assert "snyk ignore create" not in err
+
+    def test_multi_finding_group_shows_each_findings_own_command(self, capsys):
+        report.print_findings(
+            [
+                findings.Finding(
+                    id="x",
+                    title="X",
+                    severity="high",
+                    file_path="a.py",
+                    start_line=1,
+                    start_column=1,
+                    finding_id="id-1",
+                ),
+                findings.Finding(
+                    id="y",
+                    title="Y",
+                    severity="medium",
+                    file_path="a.py",
+                    start_line=1,
+                    start_column=1,
+                    finding_id="id-2",
+                ),
+            ],
+            remote_url="git@github.com:acme/repo.git",
+        )
+        err = capsys.readouterr().err
+        assert "snyk ignore create --finding-id=id-1" in err
+        assert "snyk ignore create --finding-id=id-2" in err
+
     def test_color_off_when_not_a_tty(self, monkeypatch):
         monkeypatch.delenv("NO_COLOR", raising=False)
         assert report.supports_color() is False
@@ -1229,6 +2163,51 @@ class TestPrintFindings:
     def test_color_off_when_no_color_set(self, monkeypatch):
         monkeypatch.setenv("NO_COLOR", "1")
         assert report.supports_color() is False
+
+    def test_suppression_tag_colors_by_status(self):
+        under_review = findings.Finding(
+            id="x", file_path="a.py", start_line=1, suppression="underReview"
+        )
+        rejected = findings.Finding(id="x", file_path="a.py", start_line=1, suppression="rejected")
+        ignored = findings.Finding(id="x", file_path="a.py", start_line=1, suppression="accepted")
+
+        assert report._suppression_tag(under_review, color=True) == (
+            " \033[33m(ignore request pending review)\033[0m"
+        )
+        assert report._suppression_tag(rejected, color=True) == (
+            " \033[31m(a previous ignore request was rejected)\033[0m"
+        )
+        assert report._suppression_tag(ignored, color=True) == " \033[2m(already ignored)\033[0m"
+
+    def test_suppression_tag_uncolored_when_color_off(self):
+        under_review = findings.Finding(
+            id="x", file_path="a.py", start_line=1, suppression="underReview"
+        )
+        tag = report._suppression_tag(under_review, color=False)
+        assert tag == " (ignore request pending review)"
+        assert "\033" not in tag
+
+    def test_dim_group_wraps_whole_line_not_just_the_tag(self, monkeypatch, capsys):
+        # dim=True must override per-severity coloring too -- otherwise a
+        # "not blocking" group still has a red/yellow severity word
+        # fighting the gray, un-blocking signal.
+        monkeypatch.setattr(report, "supports_color", lambda: True)
+        finding = findings.Finding(
+            id="x",
+            title="X",
+            severity="critical",
+            file_path="a.py",
+            start_line=1,
+            start_column=1,
+            suppression="accepted",
+        )
+        report.print_findings([finding], remote_url="git@github.com:acme/repo.git", dim=True)
+        err = capsys.readouterr().err
+        assert err.startswith(report._ANSI_DIM)
+        assert err.rstrip("\n").endswith(report._ANSI_RESET)
+        # No nested color codes inside -- severity/tag coloring is
+        # suppressed when the whole line is already being dimmed.
+        assert err.count("\033") == 2
 
 
 # ============================================================================
@@ -1270,6 +2249,31 @@ class TestSummaryLine:
         line = timing.summary_line(timing.Timer(), 2)
         assert "2 findings blocking commit" in line
 
+    def test_added_ignored_count_zero_is_unchanged(self):
+        # The default -- no already-ignored findings mixed in -- must
+        # produce exactly today's wording, byte for byte.
+        line = timing.summary_line(timing.Timer(), 3, under_review_count=1)
+        assert line.endswith("3 findings blocking commit (1 already under review)")
+
+    def test_added_ignored_count_reconciles_with_the_printed_list(self):
+        # 3 blocking + 1 already-ignored means 4 findings were actually
+        # introduced -- say so, instead of a bare "3 blocking" that reads
+        # as inconsistent next to 4 printed lines.
+        line = timing.summary_line(timing.Timer(), 3, under_review_count=1, added_ignored_count=1)
+        assert line.endswith("4 new findings introduced, 3 blocking (1 already under review)")
+
+    def test_added_ignored_count_without_under_review(self):
+        line = timing.summary_line(timing.Timer(), 1, added_ignored_count=1)
+        assert line.endswith("2 new findings introduced, 1 blocking")
+
+    def test_added_ignored_count_reconciles_even_when_nothing_blocks(self):
+        # Nothing is blocking, but a new finding was still introduced (and
+        # covered by an existing ignore) -- "no secrets found" would
+        # contradict the "already covered by an ignore" notice above it.
+        line = timing.summary_line(timing.Timer(), 0, added_ignored_count=1)
+        assert line.endswith("1 new finding introduced, 0 blocking")
+        assert "no secrets found" not in line
+
     def test_pre_existing_notice_singular(self):
         assert (
             timing.pre_existing_notice(1)
@@ -1286,6 +2290,24 @@ class TestSummaryLine:
         line = timing.summary_line(timing.Timer(), 0, pre_existing_count=1)
         assert line.endswith("no blocking secrets found")
         assert "pre-existing" not in line
+
+    def test_pre_existing_ignored_notice(self):
+        assert timing.pre_existing_ignored_notice(1) == (
+            "1 previously-ignored finding still present; not blocking this commit"
+        )
+
+    def test_added_ignored_notice(self):
+        assert timing.added_ignored_notice(1) == (
+            "1 new finding already covered by an ignore; not blocking this commit"
+        )
+
+    def test_removed_notice(self):
+        assert timing.removed_notice(2) == "cleaned up 2 pre-existing secrets, nice job"
+
+    def test_removed_ignored_notice(self):
+        assert (
+            timing.removed_ignored_notice(1) == "cleaned up 1 previously-ignored secret, nice job"
+        )
 
 
 # ============================================================================
@@ -1323,6 +2345,28 @@ class TestGetStagedFiles:
         monkeypatch.setattr(proc.subprocess, "run", fake_run)
         secrets_hook.get_staged_files(tmp_path)
         assert captured["timeout"] == proc.GIT_TIMEOUT
+
+    def test_no_deadline_left_skips_the_call_entirely(self, monkeypatch, tmp_path):
+        # Proves the shared-deadline budget actually gates git calls, not
+        # just the scan subprocess: no time left means no process spawned.
+        called = []
+        monkeypatch.setattr(proc.subprocess, "run", lambda *a, **kw: called.append(1))
+        already_passed = time.monotonic() - 1
+        assert git_ops.get_staged_files(tmp_path, already_passed) is None
+        assert called == []
+
+    def test_deadline_shrinks_the_subprocess_timeout_below_git_timeout(self, monkeypatch, tmp_path):
+        captured = {}
+
+        def fake_run(*args, **kwargs):
+            captured.update(kwargs)
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(proc.subprocess, "run", fake_run)
+        short_deadline = time.monotonic() + 2.0  # well under GIT_TIMEOUT
+        git_ops.get_staged_files(tmp_path, short_deadline)
+        assert captured["timeout"] < proc.GIT_TIMEOUT
+        assert captured["timeout"] <= 2.0
 
     def test_returns_none_on_nonzero_exit(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
@@ -1506,45 +2550,182 @@ class TestGetRenameMap:
         assert secrets_hook.get_rename_map(tmp_path) == {}
 
 
+class TestGetRemoteUrl:
+    """Real git repos throughout -- this is the value later passed as
+    --remote-repo-url to the scan and to `snyk ignore create`, so it must
+    reflect the real repo's origin, not the scan's scratch workspace.
+
+    get_remote_url() itself never judges shell-safety -- that depends on
+    which Snyk binary ends up resolved, not known yet at this point (see
+    is_safe_for_shell, applied once needs_shell is known)."""
+
+    def test_no_origin_remote_yields_unavailable(self, repo):
+        decision = git_ops.get_remote_url(repo)
+        assert decision.url is None
+        assert decision.status == "unavailable"
+
+    def test_returns_origin_remote_url(self, repo):
+        subprocess.run(
+            ["git", "remote", "add", "origin", "git@github.com:acme/repo.git"],
+            cwd=repo,
+            check=True,
+        )
+        decision = git_ops.get_remote_url(repo)
+        assert decision.url == "git@github.com:acme/repo.git"
+        assert decision.status == "ok"
+
+    def test_exhausted_deadline_yields_unavailable_not_unbounded_wait(self, repo):
+        subprocess.run(
+            ["git", "remote", "add", "origin", "git@github.com:acme/repo.git"],
+            cwd=repo,
+            check=True,
+        )
+        already_passed = time.monotonic() - 1
+        decision = git_ops.get_remote_url(repo, already_passed)
+        assert decision.url is None
+        assert decision.status == "unavailable"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://github.com/acme/repo.git",
+            "git@github.com:acme/repo.git",
+            "ssh://git@host.example.com:2222/acme/repo.git",
+            "file:///Users/me/repos/repo.git",
+        ],
+    )
+    def test_realistic_remote_url_forms_pass_through(self, repo, url):
+        subprocess.run(["git", "remote", "add", "origin", url], cwd=repo, check=True)
+        assert git_ops.get_remote_url(repo).url == url
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://example.com&calc.exe",
+            "https://example.com|whoami",
+            "https://example.com^whoami",
+            "https://example.com;rm -rf /",
+            "https://example.com`whoami`",
+            "https://example.com$(whoami)",
+        ],
+    )
+    def test_shell_unsafe_urls_still_pass_through_raw(self, repo, url):
+        # get_remote_url() doesn't reject on characters -- see
+        # TestIsSafeForShell below for the actual safety check, applied
+        # only once a shell is known to be involved.
+        subprocess.run(["git", "remote", "add", "origin", url], cwd=repo, check=True)
+        assert git_ops.get_remote_url(repo).url == url
+
+
+class TestIsSafeForShell:
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://github.com/acme/repo.git",
+            "git@github.com:acme/repo.git",
+            "ssh://git@host.example.com:2222/acme/repo.git",
+            "file:///Users/me/repos/repo.git",
+        ],
+    )
+    def test_realistic_remote_url_forms_are_safe(self, url):
+        assert git_ops.is_safe_for_shell(url)
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://example.com&calc.exe",
+            "https://example.com|whoami",
+            "https://example.com^whoami",
+            "https://example.com;rm -rf /",
+            "https://example.com`whoami`",
+            "https://example.com$(whoami)",
+        ],
+    )
+    def test_shell_metacharacters_are_unsafe(self, url):
+        # This value flows into run_secrets_scan's argv, which runs with
+        # shell=True when the resolved Snyk CLI is a .cmd/.bat -- cmd.exe
+        # would interpret these characters rather than treat them as a
+        # literal URL.
+        assert not git_ops.is_safe_for_shell(url)
+
+
+class TestRemoteUrlDecision:
+    def test_unavailable_has_no_url(self):
+        decision = git_ops.RemoteUrlDecision.unavailable()
+        assert decision.url is None
+        assert decision.status == "unavailable"
+
+    def test_ok_carries_the_url(self):
+        decision = git_ops.RemoteUrlDecision.ok("git@github.com:acme/repo.git")
+        assert decision.url == "git@github.com:acme/repo.git"
+        assert decision.status == "ok"
+
+    def test_rejected_downgrades_ok_to_no_url(self):
+        decision = git_ops.RemoteUrlDecision.ok("https://example.com&calc.exe").rejected()
+        assert decision.url is None
+        assert decision.status == "rejected_unsafe"
+
+
 class TestResolveScanScope:
     def test_outside_git_repo_is_prereq_failure(self, tmp_path):
-        scope, early_exit = secrets_hook.resolve_scan_scope(tmp_path)
+        scope, early_exit = secrets_hook.resolve_scan_scope(tmp_path, time.monotonic() + 90)
         assert scope is None
         assert early_exit == secrets_hook.EXIT_PREREQ
 
     def test_populates_files_and_ranges(self, repo):
         _stage(repo, "app.py", "one\ntwo\n")
-        scope, early_exit = secrets_hook.resolve_scan_scope(repo)
+        scope, early_exit = secrets_hook.resolve_scan_scope(repo, time.monotonic() + 90)
         assert early_exit is None
         assert scope.files == ["app.py"]
         assert scope.ranges == {"app.py": [(1, 2)]}
 
-    def test_ignored_files_leave_nothing_to_scan(self, repo, monkeypatch):
-        monkeypatch.setenv("SECRETS_IGNORE_PATHS", "app.py")
-        _stage(repo, "app.py", "one\n")
-        scope, early_exit = secrets_hook.resolve_scan_scope(repo)
-        assert scope is None
-        assert early_exit == secrets_hook.EXIT_OK
-
     def test_renames_empty_by_default(self, repo):
         _stage(repo, "app.py", "one\n")
-        scope, _ = secrets_hook.resolve_scan_scope(repo)
+        scope, _ = secrets_hook.resolve_scan_scope(repo, time.monotonic() + 90)
         assert scope.renames == {}
+
+    def test_remote_url_unavailable_without_origin(self, repo):
+        _stage(repo, "app.py", "one\n")
+        scope, _ = secrets_hook.resolve_scan_scope(repo, time.monotonic() + 90)
+        assert scope.remote_url.url is None
+        assert scope.remote_url.status == "unavailable"
+
+    def test_remote_url_populated_from_origin(self, repo):
+        subprocess.run(
+            ["git", "remote", "add", "origin", "git@github.com:acme/repo.git"],
+            cwd=repo,
+            check=True,
+        )
+        _stage(repo, "app.py", "one\n")
+        scope, _ = secrets_hook.resolve_scan_scope(repo, time.monotonic() + 90)
+        assert scope.remote_url.url == "git@github.com:acme/repo.git"
 
     def test_needs_renames_false_skips_the_extra_git_call(self, repo, monkeypatch):
         _stage(repo, "app.py", "one\n")
         called = []
         monkeypatch.setattr(secrets_hook, "get_rename_map", lambda *a, **kw: called.append(1) or {})
-        secrets_hook.resolve_scan_scope(repo, needs_renames=False)
+        secrets_hook.resolve_scan_scope(repo, time.monotonic() + 90, needs_renames=False)
         assert called == []
 
     def test_needs_renames_true_populates_renames(self, repo):
         _stage(repo, "a.py", "one\ntwo\n")
         subprocess.run(["git", "commit", "-q", "-m", "add a"], cwd=repo, check=True)
         subprocess.run(["git", "mv", "a.py", "b.py"], cwd=repo, check=True)
-        scope, early_exit = secrets_hook.resolve_scan_scope(repo, needs_renames=True)
+        scope, early_exit = secrets_hook.resolve_scan_scope(
+            repo, time.monotonic() + 90, needs_renames=True
+        )
         assert early_exit is None
         assert scope.renames == {"b.py": "a.py"}
+
+    def test_exhausted_deadline_is_prereq_failure_not_unbounded_wait(self, repo):
+        # Proves resolve_scan_scope's git calls actually share the same
+        # budget as the scan step, not their own separate GIT_TIMEOUT --
+        # an already-exhausted deadline fails closed immediately.
+        _stage(repo, "app.py", "one\n")
+        already_passed = time.monotonic() - 1
+        scope, early_exit = secrets_hook.resolve_scan_scope(repo, already_passed)
+        assert scope is None
+        assert early_exit == secrets_hook.EXIT_PREREQ
 
 
 class TestMainFailClosed:
@@ -1555,52 +2736,56 @@ class TestMainFailClosed:
     def test_git_diff_failure_is_prereq_failure(self, monkeypatch, tmp_path):
         monkeypatch.chdir(tmp_path)
         (tmp_path / ".git").mkdir()
-        monkeypatch.setattr(secrets_hook, "get_staged_files", lambda _: None)
+        monkeypatch.setattr(secrets_hook, "get_staged_files", lambda *a, **kw: None)
         assert secrets_hook.main([]) == secrets_hook.EXIT_PREREQ
 
     def test_added_line_range_failure_is_prereq_failure(self, monkeypatch, tmp_path):
         monkeypatch.chdir(tmp_path)
         (tmp_path / ".git").mkdir()
-        monkeypatch.setattr(secrets_hook, "get_staged_files", lambda _: ["app.py"])
-        monkeypatch.setattr(secrets_hook, "get_added_line_ranges", lambda _: None)
+        monkeypatch.setattr(secrets_hook, "get_staged_files", lambda *a, **kw: ["app.py"])
+        monkeypatch.setattr(secrets_hook, "get_added_line_ranges", lambda *a, **kw: None)
         assert secrets_hook.main([]) == secrets_hook.EXIT_PREREQ
 
     def test_no_staged_files_is_ok(self, monkeypatch, tmp_path):
         monkeypatch.chdir(tmp_path)
         (tmp_path / ".git").mkdir()
-        monkeypatch.setattr(secrets_hook, "get_staged_files", lambda _: [])
+        monkeypatch.setattr(secrets_hook, "get_staged_files", lambda *a, **kw: [])
         assert secrets_hook.main([]) == secrets_hook.EXIT_OK
 
 
-class TestScanFailureDefaultsToFailOpen:
+class TestScanFailureDefaultsToFailClosed:
     @pytest.fixture(autouse=True)
     def _stub_prereqs(self, monkeypatch, tmp_path):
         monkeypatch.chdir(tmp_path)
         (tmp_path / ".git").mkdir()
         monkeypatch.setattr(secrets_hook, "find_repo_root", lambda _: tmp_path)
-        monkeypatch.setattr(secrets_hook, "get_staged_files", lambda _: ["app.py"])
-        monkeypatch.setattr(secrets_hook, "get_added_line_ranges", lambda _: ({}, []))
+        monkeypatch.setattr(secrets_hook, "get_staged_files", lambda *a, **kw: ["app.py"])
+        monkeypatch.setattr(secrets_hook, "get_added_line_ranges", lambda *a, **kw: ({}, []))
         monkeypatch.setattr(secrets_hook, "find_snyk_binary", lambda: "/usr/bin/snyk")
         monkeypatch.setattr(secrets_hook, "check_snyk_auth", lambda: "token")
-        monkeypatch.setattr(secrets_hook, "run_secrets_scan", lambda *a, **kw: ("timeout", []))
+        monkeypatch.setattr(
+            secrets_hook,
+            "run_secrets_scan_with_retries",
+            lambda *a, **kw: snyk_cli.ScanAttempt("timeout", [], 1),
+        )
         snapshot_dir = tmp_path / "staged-snapshot"
         snapshot_dir.mkdir()
 
         @contextmanager
-        def _fake_snapshot(repo_root, files):
+        def _fake_snapshot(repo_root, files, deadline=None):
             yield snapshot_dir
 
         monkeypatch.setattr(
             secrets_hook, "staged_snapshot", lambda *a, **kw: _fake_snapshot(*a, **kw)
         )
 
-    def test_default_allows_commit(self, monkeypatch):
+    def test_default_blocks_commit(self, monkeypatch):
         monkeypatch.delenv("SECRETS_BLOCK_ON_SCAN_FAILURE", raising=False)
-        assert secrets_hook.main([]) == secrets_hook.EXIT_OK
-
-    def test_opt_in_blocks_commit(self, monkeypatch):
-        monkeypatch.setenv("SECRETS_BLOCK_ON_SCAN_FAILURE", "1")
         assert secrets_hook.main([]) == secrets_hook.EXIT_BLOCK
+
+    def test_opt_out_allows_commit(self, monkeypatch):
+        monkeypatch.setenv("SECRETS_BLOCK_ON_SCAN_FAILURE", "0")
+        assert secrets_hook.main([]) == secrets_hook.EXIT_OK
 
 
 class TestScanTimeoutParsing:
@@ -1620,7 +2805,13 @@ class TestScanTimeoutParsing:
         monkeypatch.setenv("SECRETS_SCAN_TIMEOUT", "0")
         assert secrets_hook._scan_timeout() == secrets_hook.MIN_SCAN_TIMEOUT
 
-    def test_negative_clamped_to_minimum(self, monkeypatch):
+    def test_negative_one_means_no_timeout(self, monkeypatch):
+        monkeypatch.setenv("SECRETS_SCAN_TIMEOUT", "-1")
+        assert secrets_hook._scan_timeout() is None
+
+    def test_other_negative_values_clamped_to_minimum(self, monkeypatch):
+        # Only the exact sentinel -1 means "no timeout" -- any other
+        # negative value is just clamped like 0 already is.
         monkeypatch.setenv("SECRETS_SCAN_TIMEOUT", "-5")
         assert secrets_hook._scan_timeout() == secrets_hook.MIN_SCAN_TIMEOUT
 
@@ -1634,14 +2825,15 @@ class TestBlocksOnlyOnAddedFindings:
         monkeypatch.chdir(tmp_path)
         (tmp_path / ".git").mkdir()
         monkeypatch.setattr(secrets_hook, "find_repo_root", lambda _: tmp_path)
-        monkeypatch.setattr(secrets_hook, "get_staged_files", lambda _: ["app.py"])
+        monkeypatch.setattr(secrets_hook, "get_staged_files", lambda *a, **kw: ["app.py"])
         monkeypatch.setattr(secrets_hook, "find_snyk_binary", lambda: "/usr/bin/snyk")
         monkeypatch.setattr(secrets_hook, "check_snyk_auth", lambda: "token")
         snapshot_dir = tmp_path / "staged-snapshot"
         snapshot_dir.mkdir()
 
-        @staticmethod
-        def _fake_snapshot(repo_root, files):
+        # Plain local helper: `staticmethod` objects aren't directly callable
+        # until Python 3.10, and this isn't a class attribute anyway.
+        def _fake_snapshot(repo_root, files, deadline=None):
             from contextlib import contextmanager
 
             @contextmanager
@@ -1656,25 +2848,29 @@ class TestBlocksOnlyOnAddedFindings:
 
     def test_pre_existing_only_does_not_block(self, monkeypatch):
         monkeypatch.setattr(
-            secrets_hook, "get_added_line_ranges", lambda _: ({"app.py": [(10, 10)]}, [])
+            secrets_hook, "get_added_line_ranges", lambda *a, **kw: ({"app.py": [(10, 10)]}, [])
         )
         finding = findings.Finding(
             id="x", title="X", severity="high", file_path="app.py", start_line=1, start_column=1
         )
         monkeypatch.setattr(
-            secrets_hook, "run_secrets_scan", lambda *a, **kw: ("success", [finding])
+            secrets_hook,
+            "run_secrets_scan_with_retries",
+            lambda *a, **kw: snyk_cli.ScanAttempt("success", [finding], 1),
         )
         assert secrets_hook.main([]) == secrets_hook.EXIT_OK
 
     def test_added_finding_blocks(self, monkeypatch):
         monkeypatch.setattr(
-            secrets_hook, "get_added_line_ranges", lambda _: ({"app.py": [(1, 1)]}, [])
+            secrets_hook, "get_added_line_ranges", lambda *a, **kw: ({"app.py": [(1, 1)]}, [])
         )
         finding = findings.Finding(
             id="x", title="X", severity="high", file_path="app.py", start_line=1, start_column=1
         )
         monkeypatch.setattr(
-            secrets_hook, "run_secrets_scan", lambda *a, **kw: ("success", [finding])
+            secrets_hook,
+            "run_secrets_scan_with_retries",
+            lambda *a, **kw: snyk_cli.ScanAttempt("success", [finding], 1),
         )
         assert secrets_hook.main([]) == secrets_hook.EXIT_BLOCK
 
@@ -1695,7 +2891,7 @@ class TestParseCliArgs:
 # ============================================================================
 
 
-def _write_lines(path: Path, lines: List[str]) -> None:
+def _write_lines(path: Path, lines: list[str]) -> None:
     path.write_text("\n".join(lines) + "\n")
 
 
@@ -1807,7 +3003,7 @@ class TestClassifyByContent:
             baseline_snapshot_dir=baseline_dir,
             baseline_files={"app.py"},
         )
-        added, pre_existing = baseline.classify_by_content(ctx)
+        added, pre_existing, _ = baseline.classify_by_content(ctx)
         assert added == []
         assert pre_existing == [current_finding]
 
@@ -1842,9 +3038,116 @@ class TestClassifyByContent:
             baseline_snapshot_dir=baseline_dir,
             baseline_files={"app.py"},
         )
-        added, pre_existing = baseline.classify_by_content(ctx)
+        added, pre_existing, _ = baseline.classify_by_content(ctx)
         assert added == [current_finding]
         assert pre_existing == []
+
+    def test_secret_removed_from_file_is_removed(self, tmp_path):
+        current_dir, baseline_dir = tmp_path / "current", tmp_path / "baseline"
+        current_dir.mkdir()
+        baseline_dir.mkdir()
+        _write_lines(current_dir / "app.py", ["KEY = 'clean now'"])
+        _write_lines(baseline_dir / "app.py", ['KEY = "abc123"'])
+
+        baseline_finding = findings.Finding(
+            id="generic-secret",
+            file_path="app.py",
+            start_line=1,
+            start_column=7,
+            end_line=1,
+            end_column=14,
+        )
+        ctx = self._ctx(
+            findings=[],
+            ranges={},
+            current_snapshot_dir=current_dir,
+            baseline_findings=[baseline_finding],
+            baseline_snapshot_dir=baseline_dir,
+            baseline_files={"app.py"},
+        )
+        added, pre_existing, removed = baseline.classify_by_content(ctx)
+        assert (added, pre_existing) == ([], [])
+        assert removed == [baseline_finding]
+
+    def test_removed_finding_retains_its_ignored_flag(self, tmp_path):
+        current_dir, baseline_dir = tmp_path / "current", tmp_path / "baseline"
+        current_dir.mkdir()
+        baseline_dir.mkdir()
+        _write_lines(current_dir / "app.py", ["KEY = 'clean now'"])
+        _write_lines(baseline_dir / "app.py", ['KEY = "abc123"'])
+
+        baseline_finding = findings.Finding(
+            id="generic-secret",
+            file_path="app.py",
+            start_line=1,
+            start_column=7,
+            end_line=1,
+            end_column=14,
+            suppression="accepted",
+        )
+        ctx = self._ctx(
+            current_snapshot_dir=current_dir,
+            baseline_findings=[baseline_finding],
+            baseline_snapshot_dir=baseline_dir,
+            baseline_files={"app.py"},
+        )
+        _, _, removed = baseline.classify_by_content(ctx)
+        assert removed == [baseline_finding]
+        assert removed[0].is_ignored is True
+
+    def test_not_removed_when_a_same_rule_current_finding_falls_back(self, tmp_path):
+        # The current finding for the same secret has a malformed location
+        # (extraction fails), so it's classified via the line-range
+        # fallback instead of by text -- it may be the very secret the
+        # baseline finding matches, so baseline mustn't be called
+        # "removed" just because it's invisible to the text index.
+        current_dir, baseline_dir = tmp_path / "current", tmp_path / "baseline"
+        current_dir.mkdir()
+        baseline_dir.mkdir()
+        _write_lines(current_dir / "app.py", ['KEY = "abc123"'])
+        _write_lines(baseline_dir / "app.py", ['KEY = "abc123"'])
+
+        baseline_finding = findings.Finding(
+            id="generic-secret",
+            file_path="app.py",
+            start_line=1,
+            start_column=7,
+            end_line=1,
+            end_column=14,
+        )
+        # Malformed: end_column < start_column makes extract_finding_text
+        # return None for the current finding.
+        current_finding = findings.Finding(
+            id="generic-secret",
+            file_path="app.py",
+            start_line=1,
+            start_column=14,
+            end_line=1,
+            end_column=7,
+        )
+        ctx = self._ctx(
+            findings=[current_finding],
+            ranges={"app.py": [(1, 1)]},
+            current_snapshot_dir=current_dir,
+            baseline_findings=[baseline_finding],
+            baseline_snapshot_dir=baseline_dir,
+            baseline_files={"app.py"},
+        )
+        _, _, removed = baseline.classify_by_content(ctx)
+        assert removed == []
+
+    def test_no_baseline_snapshot_yields_no_removed(self, tmp_path):
+        # Nothing to compare against -- must not report removed at all.
+        current_dir = tmp_path / "current"
+        current_dir.mkdir()
+        baseline_finding = findings.Finding(id="generic-secret", file_path="app.py", start_line=1)
+        ctx = self._ctx(
+            current_snapshot_dir=current_dir,
+            baseline_findings=[baseline_finding],
+            baseline_snapshot_dir=None,
+        )
+        _, _, removed = baseline.classify_by_content(ctx)
+        assert removed == []
 
     def test_new_file_falls_back_to_line_range(self, tmp_path):
         current_dir = tmp_path / "current"
@@ -1864,7 +3167,7 @@ class TestClassifyByContent:
             current_snapshot_dir=current_dir,
             baseline_files=set(),  # new.py has no baseline coverage at all
         )
-        added, pre_existing = baseline.classify_by_content(ctx)
+        added, pre_existing, _ = baseline.classify_by_content(ctx)
         assert added == [current_finding]
         assert pre_existing == []
 
@@ -1900,7 +3203,7 @@ class TestClassifyByContent:
             baseline_files={"old_name.py"},
             renames={"new_name.py": "old_name.py"},
         )
-        added, pre_existing = baseline.classify_by_content(ctx)
+        added, pre_existing, _ = baseline.classify_by_content(ctx)
         assert added == []
         assert pre_existing == [current_finding]
 
@@ -1939,7 +3242,7 @@ class TestClassifyByContent:
             baseline_files={"old_name.py"},
             renames={"new_name.py": "old_name.py"},
         )
-        added, pre_existing = baseline.classify_by_content(ctx)
+        added, pre_existing, _ = baseline.classify_by_content(ctx)
         assert added == []
         assert pre_existing == [current_finding]
 
@@ -1975,7 +3278,7 @@ class TestClassifyByContent:
             baseline_files={"old_name.py"},
             renames={"new_name.py": "old_name.py"},
         )
-        added, pre_existing = baseline.classify_by_content(ctx)
+        added, pre_existing, _ = baseline.classify_by_content(ctx)
         assert added == [current_finding]
         assert pre_existing == []
 
@@ -2001,52 +3304,184 @@ class TestClassifyByContent:
             baseline_files={"old_name.py"},  # exists, but nothing maps to it
             renames={},
         )
-        added, pre_existing = baseline.classify_by_content(ctx)
+        added, pre_existing, _ = baseline.classify_by_content(ctx)
         assert added == [current_finding]
         assert pre_existing == []
 
 
 # ============================================================================
-# 10. Strategy resolution (SECRETS_DIFF_STRATEGY) -- the extensibility
-# surface itself.
+# 10a. Terminal-width word-wrap
 # ============================================================================
 
 
-class TestResolveDiffStrategy:
-    def test_default_is_line(self, monkeypatch):
-        monkeypatch.delenv("SECRETS_DIFF_STRATEGY", raising=False)
-        strategy = secrets_hook._resolve_diff_strategy()
-        assert strategy.name == "line"
-        assert strategy.needs_baseline_scan is False
+class TestWrapForPrefix:
+    def test_short_message_is_not_wrapped(self):
+        assert secrets_hook._wrap_for_prefix(
+            "scan timed out after 1 attempt; blocking commit", ""
+        ) == ["scan timed out after 1 attempt; blocking commit"]
 
-    def test_content_selects_baseline_strategy(self, monkeypatch):
-        monkeypatch.setenv("SECRETS_DIFF_STRATEGY", "content")
-        strategy = secrets_hook._resolve_diff_strategy()
-        assert strategy.name == "content"
-        assert strategy.needs_baseline_scan is True
-
-    def test_unknown_value_falls_back_to_line(self, monkeypatch):
-        monkeypatch.setenv("SECRETS_DIFF_STRATEGY", "nonsense")
-        strategy = secrets_hook._resolve_diff_strategy()
-        assert strategy.name == "line"
-
-    def test_case_insensitive(self, monkeypatch):
-        monkeypatch.setenv("SECRETS_DIFF_STRATEGY", "CONTENT")
-        assert secrets_hook._resolve_diff_strategy().name == "content"
-
-    def test_registering_a_third_strategy_requires_no_main_changes(self, monkeypatch):
-        calls = []
-
-        def _fake_classify(ctx):
-            calls.append(ctx)
-            return [], []
-
-        fake_strategy = secrets_hook.DiffStrategy(
-            "fake", needs_baseline_scan=False, classify=_fake_classify
+    def test_long_message_wraps_at_width(self):
+        lines = secrets_hook._wrap_for_prefix(
+            "set SECRETS_BLOCK_ON_SCAN_FAILURE=0 to allow the commit through scan failures instead",
+            "",
+            width=80,
         )
-        monkeypatch.setitem(secrets_hook._DIFF_STRATEGIES, "fake", fake_strategy)
-        monkeypatch.setenv("SECRETS_DIFF_STRATEGY", "fake")
-        assert secrets_hook._resolve_diff_strategy() is fake_strategy
+        assert len(lines) > 1
+        assert all(len(line) <= 80 for line in lines)
+        # Re-joining with spaces reconstructs the original words in order.
+        assert (
+            " ".join(lines).split()
+            == (
+                "set SECRETS_BLOCK_ON_SCAN_FAILURE=0 to allow the commit through scan "
+                "failures instead"
+            ).split()
+        )
+
+    def test_backtick_command_never_split_even_if_it_alone_exceeds_width(self):
+        long_command = "`" + "x" * 90 + "`"
+        lines = secrets_hook._wrap_for_prefix(f"run {long_command} manually", "", width=80)
+        assert any(long_command in line for line in lines)
+
+    def test_punctuation_attached_to_a_command_stays_attached(self):
+        # No space between the closing backtick and ")" -- the wrap must not
+        # introduce one.
+        lines = secrets_hook._wrap_for_prefix("bypass with `git commit --no-verify`) now", "")
+        assert "`git commit --no-verify`)" in " ".join(lines)
+
+    def test_long_url_is_never_split_even_when_forced_narrower_than_itself(self, capsys):
+        # A bare long token (no backticks needed -- it just has no
+        # whitespace to split on) must stay intact even at a width many
+        # times narrower than the token itself, instead of being sliced
+        # mid-hostname/mid-path the way plain textwrap defaults would.
+        url = "https://docs.snyk.io/scan-fix-and-prevent/prevent/policies/security-policies"
+        message = f"see {url} for details"
+        lines = secrets_hook._wrap_for_prefix(message, "  ", width=20)
+        with capsys.disabled():
+            print("\n----- long URL forced onto one line (width=20) -----")
+            for line in lines:
+                print(f"[{line}]  len={len(line)}")
+        assert any(line.strip() == url for line in lines)
+
+    def test_preexisting_placeholder_byte_does_not_corrupt_output(self):
+        # A literal null byte (the internal space-protection sentinel)
+        # already in the input must not survive as a real character, and
+        # must not silently swallow a real space either.
+        lines = secrets_hook._wrap_for_prefix("weird\x00input `a command` here", "")
+        joined = " ".join(lines)
+        assert "\x00" not in joined
+        assert "`a command`" in joined
+
+    def test_preexisting_placeholder_byte_becomes_a_real_word_boundary(self):
+        # A pre-existing placeholder byte must be defused to a space before
+        # wrapping decides where words break, not after -- otherwise the
+        # wrapper treats it as one unbreakable token instead of two words.
+        assert secrets_hook._wrap_for_prefix("weird\x00input", "", width=6) == [
+            "weird",
+            "    input",
+        ]
+
+    def test_embedded_newlines_are_preserved_as_separate_lines(self):
+        # A real multi-line message (e.g. an exception with its own line
+        # breaks) must keep its original line structure -- each line is
+        # wrapped independently, not reflowed into one paragraph.
+        lines = secrets_hook._wrap_for_prefix("first line\nsecond line", "", width=80)
+        assert lines == ["first line", "    second line"]
+
+    def test_long_line_within_a_multiline_message_still_wraps(self):
+        lines = secrets_hook._wrap_for_prefix(
+            "short first line\n"
+            "set SECRETS_BLOCK_ON_SCAN_FAILURE=0 to allow the commit through scan "
+            "failures instead",
+            "",
+            width=80,
+        )
+        assert lines[0] == "short first line"
+        assert len(lines) > 2
+        assert all(len(line) <= 80 for line in lines)
+
+    def test_printed_line_including_prefix_stays_within_width(self, monkeypatch, capsys):
+        # The prefix ("[snyk] " or the continuation indent) counts against
+        # the 80-column budget too, not just the wrapped message text.
+        long_message = (
+            "set SECRETS_BLOCK_ON_SCAN_FAILURE=0 to allow the commit through scan "
+            "failures instead, a fairly long sentence on purpose"
+        )
+        secrets_hook.log(long_message)
+        secrets_hook.log_cont(long_message)
+        printed = capsys.readouterr().err
+        for line in printed.splitlines():
+            assert len(line) <= secrets_hook._WRAP_WIDTH, line
+
+    def test_continuation_line_uses_its_own_wider_budget(self):
+        # log()'s "[snyk] " prefix (7 chars) leaves less room than the
+        # continuation indent does -- a continuation line shouldn't be
+        # capped to the first line's tighter width just because they
+        # share one wrap call. This message needs 3 lines if every line
+        # were capped at the (narrower) first-line width, but only 2 once
+        # the continuation line gets its own (wider) budget.
+        words = [
+            "alpha",
+            "beta",
+            "gamma",
+            "delta",
+            "epsilon",
+            "zeta",
+            "eta",
+            "theta",
+            "iota",
+            "kappa",
+            "lambda",
+            "mu",
+            "nu",
+            "xi",
+            "omicron",
+            "pi",
+        ]
+        message_words: list[str] = []
+        length = 0
+        for i in range(40):
+            w = words[i % len(words)]
+            message_words.append(w)
+            length += len(w) + 1
+            if length >= 180:
+                break
+        message = " ".join(message_words)
+        first_width = secrets_hook._WRAP_WIDTH - len(secrets_hook._LOG_PREFIX)
+
+        # Uniform-width baseline: as if every line, including the first,
+        # were capped to the (narrower) first-line budget.
+        old_uniform = secrets_hook._wrap_for_prefix(message, "", width=first_width)
+        new = secrets_hook._wrap_for_prefix(message, secrets_hook._LOG_PREFIX)
+
+        assert len(new) < len(old_uniform)
+        assert all(len(line) <= secrets_hook._WRAP_WIDTH for line in new)
+
+
+class TestLogColor:
+    """`color=` is a display-only concern: it wraps the printed line, but
+    the persisted log line (via _LOG_FILE) always stays plain."""
+
+    def test_color_applied_to_display_line_when_supported(self, monkeypatch, capsys):
+        monkeypatch.setattr(secrets_hook, "supports_color", lambda: True)
+        secrets_hook.log("hello", color=secrets_hook._ANSI_GREEN)
+        err = capsys.readouterr().err
+        assert err == f"{secrets_hook._ANSI_GREEN}[snyk] hello{secrets_hook._ANSI_RESET}\n"
+
+    def test_no_color_when_not_supported(self, monkeypatch, capsys):
+        monkeypatch.setattr(secrets_hook, "supports_color", lambda: False)
+        secrets_hook.log("hello", color=secrets_hook._ANSI_GREEN)
+        err = capsys.readouterr().err
+        assert err == "[snyk] hello\n"
+        assert "\033" not in err
+
+    def test_persisted_log_line_is_never_colored(self, monkeypatch, capsys, tmp_path):
+        monkeypatch.setattr(secrets_hook, "supports_color", lambda: True)
+        log_file = str(tmp_path / "log.txt")
+        monkeypatch.setattr(secrets_hook, "_LOG_FILE", log_file)
+        secrets_hook.log_cont("hello", color=secrets_hook._ANSI_GREEN)
+        persisted = Path(log_file).read_text()
+        assert "\033" not in persisted
+        assert "hello" in persisted
 
 
 # ============================================================================
@@ -2059,10 +3494,8 @@ class TestResolveDiffStrategy:
 
 
 class TestOutputScenarios:
-    """Every scenario runs under both diff strategies (see
-    `_stub_prereqs`'s `params`) -- all cross-cutting concerns outside
-    `DiffStrategy.classify`, so "content" must match "line" here.
-    Classification differences are covered by `TestClassifyByContent` and
+    """Every cross-cutting concern outside `DiffStrategy.classify` itself --
+    classification differences are covered by `TestClassifyByContent` and
     `TestContentStrategyEndToEnd`."""
 
     SYNTHETIC_SCAN_EXCEPTION = (
@@ -2087,22 +3520,20 @@ class TestOutputScenarios:
         start_column=1,
     )
 
-    @pytest.fixture(autouse=True, params=["line", "content"])
-    def _stub_prereqs(self, request, monkeypatch, tmp_path):
+    @pytest.fixture(autouse=True)
+    def _stub_prereqs(self, monkeypatch, tmp_path):
         """A working setup by default -- individual tests override just the
         pieces that change for their scenario (snyk_bin, auth, scan
         result)."""
-        self.strategy_name: str = request.param
         monkeypatch.chdir(tmp_path)
         (tmp_path / ".git").mkdir()
-        monkeypatch.setenv("SECRETS_DIFF_STRATEGY", self.strategy_name)
         monkeypatch.delenv("SECRETS_BLOCK_ON_SCAN_FAILURE", raising=False)
         monkeypatch.delenv("SECRETS_FALLBACK_TO_WORKING_DIR", raising=False)
         monkeypatch.setattr(secrets_hook, "DEBUG", False)
         monkeypatch.setattr(secrets_hook, "find_repo_root", lambda _: tmp_path)
-        monkeypatch.setattr(secrets_hook, "get_staged_files", lambda _: ["config.py"])
+        monkeypatch.setattr(secrets_hook, "get_staged_files", lambda *a, **kw: ["config.py"])
         monkeypatch.setattr(
-            secrets_hook, "get_added_line_ranges", lambda _: ({"config.py": [(1, 1)]}, [])
+            secrets_hook, "get_added_line_ranges", lambda *a, **kw: ({"config.py": [(1, 1)]}, [])
         )
         monkeypatch.setattr(secrets_hook, "find_snyk_binary", lambda: "/usr/bin/snyk")
         monkeypatch.setattr(secrets_hook, "check_snyk_auth", lambda: "token")
@@ -2114,43 +3545,55 @@ class TestOutputScenarios:
         # Defaults to a successful snapshot; the snapshot failure tests
         # below override this to exercise that prerequisite path instead.
         @contextmanager
-        def _fake_snapshot(repo_root, files):
+        def _fake_snapshot(repo_root, files, deadline=None):
             yield self.current_snapshot_dir
 
         monkeypatch.setattr(
             secrets_hook, "staged_snapshot", lambda *a, **kw: _fake_snapshot(*a, **kw)
         )
 
-        if self.strategy_name == "content":
-            # No real files under tmp_path, so classify_by_content can't
-            # extract text and falls back to the same line-range check
-            # "line" uses -- the point being these tests assert the two
-            # strategies agree on everything except classification.
-            monkeypatch.setattr(secrets_hook, "get_rename_map", lambda _: {})
+        # No real files under tmp_path, so classify_by_content can't
+        # extract text and falls back to line-range classification for
+        # every finding.
+        monkeypatch.setattr(secrets_hook, "get_rename_map", lambda *a, **kw: {})
 
-            @contextmanager
-            def _fake_ref_snapshot(repo_root, ref, files):
-                yield self.baseline_snapshot_dir, set()
+        @contextmanager
+        def _fake_ref_snapshot(repo_root, ref, files, deadline=None):
+            yield self.baseline_snapshot_dir, set(), False
 
-            monkeypatch.setattr(
-                secrets_hook, "ref_snapshot", lambda *a, **kw: _fake_ref_snapshot(*a, **kw)
+        monkeypatch.setattr(
+            secrets_hook, "ref_snapshot", lambda *a, **kw: _fake_ref_snapshot(*a, **kw)
+        )
+
+        def _fake_concurrent(current_ws, baseline_ws, invocation, deadline):
+            # Delegates to whatever run_secrets_scan_with_retries a test
+            # method below mocks, looked up fresh each call.
+            status, current_findings = secrets_hook.run_secrets_scan_with_retries(
+                current_ws, invocation, deadline
+            )
+            return (
+                snyk_cli.ScanAttempt(status, current_findings, 1),
+                snyk_cli.ScanAttempt("success", [], 1),
             )
 
-            def _fake_concurrent(current_ws, baseline_ws, snyk_bin, timeout):
-                # Delegates to whatever run_secrets_scan a test method
-                # below mocks, looked up fresh each call.
-                current_result = secrets_hook.run_secrets_scan(current_ws, snyk_bin, timeout)
-                return current_result, ("success", [])
+        monkeypatch.setattr(secrets_hook, "run_concurrent_scans", _fake_concurrent)
 
-            monkeypatch.setattr(secrets_hook, "run_concurrent_scans", _fake_concurrent)
-
-    def _run(self, capsys, header: str, argv: List[str]):
+    def _run(self, capsys, header: str, argv: list[str]):
         rc = secrets_hook.main(argv)
         err = capsys.readouterr().err
         with capsys.disabled():
-            print(f"\n----- {header} [{self.strategy_name}] (exit={rc}) -----")
+            print(f"\n----- {header} (exit={rc}) -----")
             print(err, end="" if err.endswith("\n") else "\n")
         return rc, err
+
+    @staticmethod
+    def _dewrap(text: str) -> str:
+        """Collapses word-wrap continuation breaks back into one line, for
+        substring assertions that must not depend on exactly where a
+        message happened to wrap -- variable-length content earlier in the
+        same message (e.g. a tmp path, different length in CI than
+        locally) shifts the wrap point for everything after it."""
+        return re.sub(r"\n {4}", " ", text)
 
     @staticmethod
     def _persisted_log_text(tmp_path) -> str:
@@ -2161,32 +3604,47 @@ class TestOutputScenarios:
         return Path(log_file).read_text(encoding="utf-8")
 
     def test_clean_commit(self, monkeypatch, capsys, tmp_path):
-        monkeypatch.setattr(secrets_hook, "run_secrets_scan", lambda *a, **kw: ("success", []))
+        monkeypatch.setattr(
+            secrets_hook, "run_secrets_scan_with_retries", lambda *a, **kw: ("success", [])
+        )
         rc, err = self._run(capsys, "clean commit", [])
         assert rc == secrets_hook.EXIT_OK
-        assert re.search(
-            r"^\[snyk\] Scanning 1 staged file for secrets, up to \d+s\.\.\. "
-            r"\(bypass with `git commit --no-verify`\)$",
-            err,
-            re.M,
-        )
+        assert "[snyk] Scanning 1 staged file for secrets... (bypass with" in err
+        assert "`git commit --no-verify`)" in err
         assert re.search(r"^  done in [\d.]+s -- no secrets found$", err, re.M)
 
         # Same lines as stderr, minus the "[snyk] "/"  " prefixes, plus a
         # leading timestamp.
         log_text = self._persisted_log_text(tmp_path)
         assert re.search(
-            r"^\[[\d\-T:.]+\] Scanning 1 staged file for secrets, up to \d+s\.\.\. "
+            r"^\[[\d\-T:.]+\] Scanning 1 staged file for secrets\.\.\. "
             r"\(bypass with `git commit --no-verify`\)$",
             log_text,
             re.M,
         )
         assert re.search(r"^\[[\d\-T:.]+\] done in [\d.]+s -- no secrets found$", log_text, re.M)
 
+    def test_clean_commit_with_no_timeout_configured(self, monkeypatch, capsys):
+        # SECRETS_SCAN_TIMEOUT=-1 means no deadline at all -- confirm both
+        # the message and the actual deadline passed downstream reflect it.
+        monkeypatch.setenv("SECRETS_SCAN_TIMEOUT", "-1")
+        seen_deadlines = []
+
+        def fake_run_secrets_scan(*a, **kw):
+            seen_deadlines.append(a[-1] if a else kw.get("deadline"))
+            return ("success", [])
+
+        monkeypatch.setattr(secrets_hook, "run_secrets_scan_with_retries", fake_run_secrets_scan)
+        rc, err = self._run(capsys, "clean commit, no timeout configured", [])
+        assert rc == secrets_hook.EXIT_OK
+        assert "[snyk] Scanning 1 staged file for secrets... (bypass with" in err
+        assert "`git commit --no-verify`)" in err
+        assert seen_deadlines == [None]
+
     def test_clean_commit_with_pre_existing(self, monkeypatch, capsys):
         monkeypatch.setattr(
             secrets_hook,
-            "run_secrets_scan",
+            "run_secrets_scan_with_retries",
             lambda *a, **kw: ("success", [self.PRE_EXISTING_FINDING]),
         )
         rc, err = self._run(capsys, "clean commit, pre-existing secret", [])
@@ -2202,28 +3660,243 @@ class TestOutputScenarios:
             re.M,
         )
 
+    def _fake_classify(self, monkeypatch, added=(), pre_existing=(), removed=()):
+        """Bypasses classify_by_content's real matching -- these tests are
+        about the message per category, not the matching logic itself
+        (covered by TestClassifyByContent)."""
+        monkeypatch.setattr(
+            secrets_hook, "run_secrets_scan_with_retries", lambda *a, **kw: ("success", [])
+        )
+        monkeypatch.setitem(
+            secrets_hook._DIFF_STRATEGIES,
+            "content",
+            secrets_hook.DiffStrategy(
+                name="content",
+                needs_baseline_scan=True,
+                classify=lambda ctx: (list(added), list(pre_existing), list(removed)),
+            ),
+        )
+
+    def test_added_and_ignored_does_not_block(self, monkeypatch, capsys):
+        finding = findings.Finding(id="x", file_path="app.py", start_line=1, suppression="accepted")
+        self._fake_classify(monkeypatch, added=[finding])
+        rc, err = self._run(capsys, "added finding already ignored", [])
+        assert rc == secrets_hook.EXIT_OK
+        assert "1 new finding already covered by an ignore; not blocking this commit" in err
+
+    def test_added_and_ignored_still_shows_its_position(self, monkeypatch, capsys):
+        # The count-only notice above doesn't say *which* new instance it
+        # is -- print its file/line like a blocking finding would.
+        finding = findings.Finding(
+            id="aws-access-token",
+            title="Aws-Access-Token",
+            severity="high",
+            file_path="config.py",
+            start_line=1,
+            start_column=1,
+            suppression="accepted",
+        )
+        self._fake_classify(monkeypatch, added=[finding])
+        rc, err = self._run(capsys, "added finding already ignored, with position", [])
+        assert rc == secrets_hook.EXIT_OK
+        assert "config.py(1,1):" in err
+        assert "(already ignored)" in err
+        assert "snyk ignore create" not in err
+
+    def test_blocking_and_added_ignored_together_are_separated_and_reconciled(
+        self, monkeypatch, capsys
+    ):
+        blocking_finding = findings.Finding(
+            id="aws-access-token",
+            title="Aws-Access-Token",
+            severity="high",
+            file_path="new_secret.py",
+            start_line=3,
+            start_column=1,
+        )
+        ignored_finding = findings.Finding(
+            id="generic-secret",
+            title="Generic-Secret",
+            severity="high",
+            file_path="config.py",
+            start_line=12,
+            start_column=1,
+            suppression="accepted",
+        )
+        self._fake_classify(monkeypatch, added=[blocking_finding, ignored_finding])
+        rc, err = self._run(capsys, "blocking and added-ignored together", [])
+        assert rc == secrets_hook.EXIT_BLOCK
+        assert "done in 0.0s -- 2 new findings introduced, 1 blocking" in err
+        assert re.search(
+            r"new_secret\.py.*\n.*\(not blocking -- already covered by an existing ignore\)"
+            r"\n.*config\.py",
+            err,
+        )
+
+    def test_pre_existing_ignored_gets_its_own_notice(self, monkeypatch, capsys):
+        finding = findings.Finding(id="x", file_path="app.py", start_line=1, suppression="accepted")
+        self._fake_classify(monkeypatch, pre_existing=[finding])
+        rc, err = self._run(capsys, "pre-existing finding already ignored", [])
+        assert rc == secrets_hook.EXIT_OK
+        assert "1 previously-ignored finding still present; not blocking this commit" in err
+        assert "classified as pre-existing" not in err
+
+    def test_removed_finding_shows_cleanup_notice(self, monkeypatch, capsys):
+        finding = findings.Finding(id="x", file_path="app.py", start_line=1)
+        self._fake_classify(monkeypatch, removed=[finding])
+        rc, err = self._run(capsys, "pre-existing secret removed", [])
+        assert rc == secrets_hook.EXIT_OK
+        assert "cleaned up 1 pre-existing secret" in err
+
+    def test_removed_ignored_finding_shows_nice_job_notice(self, monkeypatch, capsys):
+        finding = findings.Finding(id="x", file_path="app.py", start_line=1, suppression="accepted")
+        self._fake_classify(monkeypatch, removed=[finding])
+        rc, err = self._run(capsys, "previously-ignored secret removed", [])
+        assert rc == secrets_hook.EXIT_OK
+        assert "cleaned up 1 previously-ignored secret, nice job" in err
+
+    def test_under_review_added_finding_still_blocks_but_is_flagged(self, monkeypatch, capsys):
+        finding = findings.Finding(
+            id="aws-access-token",
+            title="Aws-Access-Token",
+            severity="high",
+            file_path="config.py",
+            start_line=1,
+            start_column=1,
+            suppression="underReview",
+        )
+        self._fake_classify(monkeypatch, added=[finding])
+        rc, err = self._run(capsys, "added finding under review", [])
+        assert rc == secrets_hook.EXIT_BLOCK
+        assert "(ignore request pending review)" in err
+        assert re.search(
+            r"^  done in [\d.]+s -- 1 finding blocking commit \(1 already under review\)$",
+            err,
+            re.M,
+        )
+
+    def test_rejected_added_finding_blocks_without_under_review_parenthetical(
+        self, monkeypatch, capsys
+    ):
+        finding = findings.Finding(
+            id="aws-access-token",
+            title="Aws-Access-Token",
+            severity="high",
+            file_path="config.py",
+            start_line=1,
+            start_column=1,
+            suppression="rejected",
+        )
+        self._fake_classify(monkeypatch, added=[finding])
+        rc, err = self._run(capsys, "added finding previously rejected", [])
+        assert rc == secrets_hook.EXIT_BLOCK
+        assert "(a previous ignore request was rejected)" in err
+        assert re.search(
+            r"^  done in [\d.]+s -- 1 finding blocking commit$",
+            err,
+            re.M,
+        )
+
+    def test_pre_existing_under_review_gets_its_own_notice(self, monkeypatch, capsys):
+        finding = findings.Finding(
+            id="x", file_path="app.py", start_line=1, suppression="underReview"
+        )
+        self._fake_classify(monkeypatch, pre_existing=[finding])
+        rc, err = self._run(capsys, "pre-existing finding under review", [])
+        assert rc == secrets_hook.EXIT_OK
+        assert "1 pre-existing finding awaiting ignore review; not blocking this commit" in err
+        assert "classified as pre-existing" not in err
+
     def test_blocking_no_pre_existing(self, monkeypatch, capsys, tmp_path):
         monkeypatch.setattr(
-            secrets_hook, "run_secrets_scan", lambda *a, **kw: ("success", [self.NEW_FINDING])
+            secrets_hook,
+            "run_secrets_scan_with_retries",
+            lambda *a, **kw: ("success", [self.NEW_FINDING]),
         )
         rc, err = self._run(capsys, "blocking, no pre-existing", [])
         assert rc == secrets_hook.EXIT_BLOCK
         assert re.search(r"^  done in [\d.]+s -- 1 finding blocking commit$", err, re.M)
         assert "  - config.py(1,22): [high] [aws-access-token] [-] [Aws-Access-Token]" in err
+        # NEW_FINDING has no finding_id, so no ignore command is shown at all
+        # (no fallback text either -- see test_blocking_with_finding_id_but_no_remote_shows_no_ignore_command).
+        assert "snyk ignore create" not in err
 
-        # The blocking summary is persisted too; the raw finding list
+        # The blocking summary is persisted; the raw finding list
         # (print_findings, above) deliberately is not -- see
         # lib/persistent_log.py's module docstring.
         log_text = self._persisted_log_text(tmp_path)
         assert re.search(
             r"^\[[\d\-T:.]+\] done in [\d.]+s -- 1 finding blocking commit$", log_text, re.M
         )
+        assert "snyk ignore create" not in log_text
         assert "config.py(1,22)" not in log_text
+
+    def test_blocking_with_finding_id_shows_ready_command_not_generic_hint(
+        self, monkeypatch, capsys, tmp_path
+    ):
+        finding_with_id = dataclasses.replace(self.NEW_FINDING, finding_id="abc123-def456")
+        monkeypatch.setattr(
+            secrets_hook,
+            "run_secrets_scan_with_retries",
+            lambda *a, **kw: ("success", [finding_with_id]),
+        )
+        monkeypatch.setattr(
+            secrets_hook,
+            "get_remote_url",
+            lambda *a, **kw: git_ops.RemoteUrlDecision.ok("git@github.com:acme/repo.git"),
+        )
+        rc, err = self._run(capsys, "blocking, finding id available", [])
+        assert rc == secrets_hook.EXIT_BLOCK
+        assert (
+            "snyk ignore create --finding-id=abc123-def456 "
+            "--remote-repo-url=git@github.com:acme/repo.git" in err
+        )
+
+        # The ready-to-run command lives inside print_findings' output, which
+        # is never persisted (same as the finding list itself).
+        log_text = self._persisted_log_text(tmp_path)
+        assert "snyk ignore create" not in log_text
+
+    def test_blocking_with_finding_id_but_no_remote_shows_no_ignore_command(
+        self, monkeypatch, capsys
+    ):
+        # No fallback text either -- a command we know is incomplete isn't
+        # worth suggesting the user reconstruct by hand.
+        finding_with_id = dataclasses.replace(self.NEW_FINDING, finding_id="abc123-def456")
+        monkeypatch.setattr(
+            secrets_hook,
+            "run_secrets_scan_with_retries",
+            lambda *a, **kw: ("success", [finding_with_id]),
+        )
+        monkeypatch.setattr(
+            secrets_hook, "get_remote_url", lambda *a, **kw: git_ops.RemoteUrlDecision.unavailable()
+        )
+        rc, err = self._run(capsys, "blocking, finding id but no origin remote", [])
+        assert rc == secrets_hook.EXIT_BLOCK
+        assert "snyk ignore create" not in err
+
+    def test_blocking_with_undefined_prefixed_id_shows_no_ignore_command(self, monkeypatch, capsys):
+        # Confirmed against a real run: the CLI rejects UNDEFINED-<uuid>
+        # outright, so a remote being available doesn't help here either.
+        finding_with_id = dataclasses.replace(self.NEW_FINDING, finding_id="UNDEFINED-abc123")
+        monkeypatch.setattr(
+            secrets_hook,
+            "run_secrets_scan_with_retries",
+            lambda *a, **kw: ("success", [finding_with_id]),
+        )
+        monkeypatch.setattr(
+            secrets_hook,
+            "get_remote_url",
+            lambda *a, **kw: git_ops.RemoteUrlDecision.ok("git@github.com:acme/repo.git"),
+        )
+        rc, err = self._run(capsys, "blocking, undefined-prefixed finding id", [])
+        assert rc == secrets_hook.EXIT_BLOCK
+        assert "snyk ignore create" not in err
 
     def test_blocking_with_pre_existing(self, monkeypatch, capsys):
         monkeypatch.setattr(
             secrets_hook,
-            "run_secrets_scan",
+            "run_secrets_scan_with_retries",
             lambda *a, **kw: ("success", [self.NEW_FINDING, self.PRE_EXISTING_FINDING]),
         )
         rc, err = self._run(capsys, "blocking, with pre-existing also present", [])
@@ -2241,42 +3914,64 @@ class TestOutputScenarios:
 
     def test_snyk_cli_not_found(self, monkeypatch, capsys):
         monkeypatch.setattr(secrets_hook, "find_snyk_binary", lambda: None)
-        rc, err = self._run(capsys, "Snyk CLI not found (fail-open, default)", [])
-        assert rc == secrets_hook.EXIT_OK
-        assert (
-            "[snyk] Snyk CLI not found on PATH -- install with `npm install -g snyk`; "
-            "allowing commit (set SECRETS_BLOCK_ON_SCAN_FAILURE=1 to block instead)" in err
-        )
+        rc, err = self._run(capsys, "Snyk CLI not found (fail-closed, default)", [])
+        assert rc == secrets_hook.EXIT_BLOCK
+        assert "Snyk CLI not found on PATH -- install with `npm install -g snyk`;" in err
+        assert "blocking commit" in err
+        assert "set SECRETS_BLOCK_ON_SCAN_FAILURE=0 to allow the commit" in err
 
     def test_snyk_cli_not_authenticated(self, monkeypatch, capsys):
         monkeypatch.setattr(secrets_hook, "check_snyk_auth", lambda: None)
-        rc, err = self._run(capsys, "Snyk CLI not authenticated (fail-open, default)", [])
-        assert rc == secrets_hook.EXIT_OK
-        assert (
-            "[snyk] Snyk CLI not authenticated -- run `/usr/bin/snyk auth`; "
-            "allowing commit (set SECRETS_BLOCK_ON_SCAN_FAILURE=1 to block instead)" in err
-        )
+        rc, err = self._run(capsys, "Snyk CLI not authenticated (fail-closed, default)", [])
+        assert rc == secrets_hook.EXIT_BLOCK
+        assert "Snyk CLI not authenticated -- run `/usr/bin/snyk auth`" in err
+        assert "blocking commit" in err
+        assert "set SECRETS_BLOCK_ON_SCAN_FAILURE=0 to allow the commit" in err
 
     def test_scan_auth_failure_hint_names_the_resolved_binary(self, monkeypatch, capsys):
         # A standalone-pin user may have no `snyk` on PATH to run at all.
         monkeypatch.setattr(secrets_hook, "find_snyk_binary", lambda: "/opt/snyk/snyk")
         monkeypatch.setattr(
-            secrets_hook, "run_secrets_scan", lambda *a, **kw: ("auth_required", [])
+            secrets_hook, "run_secrets_scan_with_retries", lambda *a, **kw: ("auth_required", [])
         )
-        rc, err = self._run(capsys, "scan reported auth_required (fail-open)", [])
-        assert rc == secrets_hook.EXIT_OK
+        rc, err = self._run(capsys, "scan reported auth_required (fail-closed, default)", [])
+        assert rc == secrets_hook.EXIT_BLOCK
         assert re.search(
-            r"^  Snyk CLI not authenticated -- run `/opt/snyk/snyk auth`; allowing commit ",
+            r"^  Snyk CLI not authenticated -- run `/opt/snyk/snyk auth`; blocking commit$",
             err,
             re.M,
         )
 
     def test_scan_error_hint_names_the_resolved_binary(self, monkeypatch, capsys):
         monkeypatch.setattr(secrets_hook, "find_snyk_binary", lambda: "/opt/snyk/snyk")
-        monkeypatch.setattr(secrets_hook, "run_secrets_scan", lambda *a, **kw: ("error", []))
-        rc, err = self._run(capsys, "scan did not complete (fail-open)", [])
-        assert rc == secrets_hook.EXIT_OK
+        monkeypatch.setattr(
+            secrets_hook,
+            "run_secrets_scan_with_retries",
+            lambda *a, **kw: ("retries_exhausted", []),
+        )
+        rc, err = self._run(capsys, "scan did not complete (fail-closed, default)", [])
+        assert rc == secrets_hook.EXIT_BLOCK
         assert "run `/opt/snyk/snyk secrets test` manually to check" in err
+
+    def test_unparseable_scan_output_reports_distinct_message(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            secrets_hook, "run_secrets_scan_with_retries", lambda *a, **kw: ("unparseable", [])
+        )
+        rc, err = self._run(capsys, "scan output could not be parsed (fail-closed, default)", [])
+        assert rc == secrets_hook.EXIT_BLOCK
+        assert "scan output could not be parsed; blocking commit" in err
+
+    def test_exhausted_retries_message_reports_real_attempt_count(self, monkeypatch, capsys):
+        def fake_concurrent(current_ws, baseline_ws, invocation, deadline):
+            return (
+                snyk_cli.ScanAttempt("retries_exhausted", [], 3),
+                snyk_cli.ScanAttempt("success", [], 1),
+            )
+
+        monkeypatch.setattr(secrets_hook, "run_concurrent_scans", fake_concurrent)
+        rc, err = self._run(capsys, "scan errored after exhausting retries", [])
+        assert rc == secrets_hook.EXIT_BLOCK
+        assert "scan did not complete after 3 attempts" in err
 
     def test_stale_pin_falling_back_to_path_warns_outside_debug(self, monkeypatch, capsys):
         # Otherwise the user believes they're scanning with the pinned
@@ -2284,16 +3979,21 @@ class TestOutputScenarios:
         sidecar = Path(os.path.expanduser("~")) / ".snyk-studio" / "cli-path"
         sidecar.parent.mkdir(parents=True, exist_ok=True)
         sidecar.write_text("/gone/snyk", encoding="utf-8")
-        monkeypatch.setattr(secrets_hook, "run_secrets_scan", lambda *a, **kw: ("success", []))
+        monkeypatch.setattr(
+            secrets_hook, "run_secrets_scan_with_retries", lambda *a, **kw: ("success", [])
+        )
         rc, err = self._run(capsys, "stale pin, scanned with PATH fallback", [])
         assert rc == secrets_hook.EXIT_OK
+        assert f"[snyk] {sidecar}" in err
         assert (
-            f'[snyk] {sidecar} pins "/gone/snyk", which does not exist; '
-            "scanning with /usr/bin/snyk instead" in err
+            'pins "/gone/snyk", which does not exist; scanning with /usr/bin/snyk instead'
+            in self._dewrap(err)
         )
 
     def test_no_sidecar_emits_no_stale_pin_warning(self, monkeypatch, capsys):
-        monkeypatch.setattr(secrets_hook, "run_secrets_scan", lambda *a, **kw: ("success", []))
+        monkeypatch.setattr(
+            secrets_hook, "run_secrets_scan_with_retries", lambda *a, **kw: ("success", [])
+        )
         _, err = self._run(capsys, "no sidecar, no warning", [])
         assert "cli-path" not in err
 
@@ -2303,66 +4003,143 @@ class TestOutputScenarios:
         monkeypatch.setattr(
             secrets_hook, "find_snyk_binary", lambda: r"C:\Program Files\Snyk\snyk.exe"
         )
-        monkeypatch.setattr(secrets_hook, "run_secrets_scan", lambda *a, **kw: ("error", []))
+        monkeypatch.setattr(
+            secrets_hook,
+            "run_secrets_scan_with_retries",
+            lambda *a, **kw: ("retries_exhausted", []),
+        )
         _, err = self._run(capsys, "scan did not complete, spaced binary path", [])
-        assert r'run `"C:\Program Files\Snyk\snyk.exe" secrets test`' in err
+        assert r"run `'C:\Program Files\Snyk\snyk.exe' secrets test`" in err
 
-    def test_scan_timeout_fail_open(self, monkeypatch, capsys):
-        monkeypatch.setattr(secrets_hook, "run_secrets_scan", lambda *a, **kw: ("timeout", []))
-        rc, err = self._run(capsys, "scan timeout, fail-open (default)", [])
-        assert rc == secrets_hook.EXIT_OK
-        assert re.search(
-            r"^  scan timed out after \d+s; allowing commit \(run `/usr/bin/snyk secrets test` "
-            r"manually to check; set SECRETS_BLOCK_ON_SCAN_FAILURE=1 to block instead\)$",
-            err,
-            re.M,
+    def test_scan_timeout_fail_closed_by_default(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            secrets_hook, "run_secrets_scan_with_retries", lambda *a, **kw: ("timeout", [])
         )
-
-    def test_scan_timeout_fail_closed(self, monkeypatch, capsys):
-        monkeypatch.setenv("SECRETS_BLOCK_ON_SCAN_FAILURE", "1")
-        monkeypatch.setattr(secrets_hook, "run_secrets_scan", lambda *a, **kw: ("timeout", []))
-        rc, err = self._run(
-            capsys, "scan timeout, fail-closed (SECRETS_BLOCK_ON_SCAN_FAILURE=1)", []
-        )
+        rc, err = self._run(capsys, "scan timeout, fail-closed (default)", [])
         assert rc == secrets_hook.EXIT_BLOCK
-        assert re.search(
-            r"^  scan timed out after \d+s; blocking commit \(run `/usr/bin/snyk secrets test` "
-            r"manually to check\)$",
-            err,
-            re.M,
-        )
+        assert re.search(r"^  scan timed out after 1 attempt; blocking commit$", err, re.M)
+        assert "run `/usr/bin/snyk secrets test` manually to check" in err
+        assert "increase SECRETS_SCAN_TIMEOUT or set it to -1 for no timeout" in err
+        assert "set SECRETS_BLOCK_ON_SCAN_FAILURE=0 to allow the commit" in err
 
-    def test_unexpected_crash_fails_open_by_default(self, monkeypatch, capsys):
-        # A bug we didn't anticipate must still respect the fail-open
+    def test_scan_timeout_allows_when_opted_out(self, monkeypatch, capsys):
+        monkeypatch.setenv("SECRETS_BLOCK_ON_SCAN_FAILURE", "0")
+        monkeypatch.setattr(
+            secrets_hook, "run_secrets_scan_with_retries", lambda *a, **kw: ("timeout", [])
+        )
+        rc, err = self._run(capsys, "scan timeout, opted out (SECRETS_BLOCK_ON_SCAN_FAILURE=0)", [])
+        assert rc == secrets_hook.EXIT_OK
+        assert re.search(r"^  scan timed out after 1 attempt; allowing commit$", err, re.M)
+        assert "run `/usr/bin/snyk secrets test` manually to check" in err
+        assert "increase SECRETS_SCAN_TIMEOUT or set it to -1 for no timeout" in err
+        assert "SECRETS_BLOCK_ON_SCAN_FAILURE=0 to allow the commit" not in err
+
+    def test_scan_timeout_message_reports_real_attempt_count(self, monkeypatch, capsys):
+        def fake_concurrent(current_ws, baseline_ws, invocation, deadline):
+            return (
+                snyk_cli.ScanAttempt("timeout", [], 2),
+                snyk_cli.ScanAttempt("success", [], 1),
+            )
+
+        monkeypatch.setattr(secrets_hook, "run_concurrent_scans", fake_concurrent)
+        rc, err = self._run(capsys, "scan timeout after 2 attempts", [])
+        assert rc == secrets_hook.EXIT_BLOCK
+        assert "scan timed out after 2 attempts" in err
+
+    def test_scan_timeout_before_any_attempt_gets_its_own_message(self, monkeypatch, capsys):
+        # attempts==0 means the deadline was already gone before a scan
+        # ever launched (e.g. git operations used the whole budget) --
+        # "timed out after 0 attempts" would misleadingly imply one ran.
+        def fake_concurrent(current_ws, baseline_ws, invocation, deadline):
+            return (
+                snyk_cli.ScanAttempt("timeout", [], 0),
+                snyk_cli.ScanAttempt("success", [], 1),
+            )
+
+        monkeypatch.setattr(secrets_hook, "run_concurrent_scans", fake_concurrent)
+        rc, err = self._run(capsys, "scan timeout before any attempt", [])
+        assert rc == secrets_hook.EXIT_BLOCK
+        assert "scan timed out before it could start" in err
+        assert "0 attempts" not in err
+
+    def test_hints_each_land_on_their_own_line_not_crammed_together(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            secrets_hook, "run_secrets_scan_with_retries", lambda *a, **kw: ("timeout", [])
+        )
+        rc, err = self._run(capsys, "scan timeout, hints on separate lines", [])
+        assert rc == secrets_hook.EXIT_BLOCK
+        assert re.search(r"^  scan timed out after 1 attempt; blocking commit$", err, re.M)
+        assert re.search(r"^  run `/usr/bin/snyk secrets test` manually to check$", err, re.M)
+        assert re.search(
+            r"^  increase SECRETS_SCAN_TIMEOUT or set it to -1 for no timeout$", err, re.M
+        )
+        # None of the hints is parenthesized or semicolon-joined onto the
+        # problem line anymore.
+        assert "(run" not in err
+        assert "check;" not in err
+
+    def test_unexpected_crash_fails_closed_by_default(self, monkeypatch, capsys):
+        # A bug we didn't anticipate must still respect the fail-closed
         # default -- Python's own uncaught-exception exit code would
-        # otherwise coincide with EXIT_BLOCK and force-block every commit.
+        # otherwise coincidentally already be EXIT_BLOCK.
         def _raise_unexpected_scan_error(*a, **kw):
             raise RuntimeError(self.SYNTHETIC_SCAN_EXCEPTION)
 
-        monkeypatch.setattr(secrets_hook, "run_secrets_scan", _raise_unexpected_scan_error)
-        rc, err = self._run(capsys, "unexpected crash, fail-open (default)", [])
-        assert rc == secrets_hook.EXIT_OK
-        assert (
-            f"[snyk] internal error: RuntimeError: {self.SYNTHETIC_SCAN_EXCEPTION}; "
-            "allowing commit "
-            "(set SECRETS_BLOCK_ON_SCAN_FAILURE=1 to block instead)" in err
+        monkeypatch.setattr(
+            secrets_hook, "run_secrets_scan_with_retries", _raise_unexpected_scan_error
         )
-
-    def test_unexpected_crash_fails_closed_when_configured(self, monkeypatch, capsys):
-        monkeypatch.setenv("SECRETS_BLOCK_ON_SCAN_FAILURE", "1")
-
-        def _raise_unexpected_scan_error(*a, **kw):
-            raise RuntimeError(self.SYNTHETIC_SCAN_EXCEPTION)
-
-        monkeypatch.setattr(secrets_hook, "run_secrets_scan", _raise_unexpected_scan_error)
-        rc, err = self._run(
-            capsys, "unexpected crash, fail-closed (SECRETS_BLOCK_ON_SCAN_FAILURE=1)", []
-        )
+        rc, err = self._run(capsys, "unexpected crash, fail-closed (default)", [])
         assert rc == secrets_hook.EXIT_BLOCK
-        assert (
-            f"[snyk] internal error: RuntimeError: {self.SYNTHETIC_SCAN_EXCEPTION}; "
-            "blocking commit" in err
+        assert "[snyk] internal error: RuntimeError:" in err
+        assert self.SYNTHETIC_SCAN_EXCEPTION[:20] in err
+        assert "blocking" in err
+        assert "set SECRETS_BLOCK_ON_SCAN_FAILURE=0 to allow the commit" in err
+
+    def test_unexpected_crash_with_multiline_message_preserves_newlines(self, monkeypatch, capsys):
+        # An exception's own embedded newline must survive as a real,
+        # separately-indented continuation line -- not get reflowed into
+        # one paragraph the way word-wrapping would otherwise do.
+        multiline_message = (
+            "connection reset while talking to the Snyk backend\n"
+            "retrying was not attempted because SECRETS_SCAN_TIMEOUT=-1"
         )
+
+        def _raise_unexpected_scan_error(*a, **kw):
+            raise RuntimeError(multiline_message)
+
+        monkeypatch.setattr(
+            secrets_hook, "run_secrets_scan_with_retries", _raise_unexpected_scan_error
+        )
+        rc, err = self._run(capsys, "unexpected crash, multi-line exception message", [])
+        assert rc == secrets_hook.EXIT_BLOCK
+        assert re.search(
+            r"^\[snyk\] internal error: RuntimeError: connection reset while talking to the Snyk "
+            r"backend$",
+            err,
+            re.M,
+        )
+        assert re.search(
+            r"^    retrying was not attempted because SECRETS_SCAN_TIMEOUT=-1; blocking commit$",
+            err,
+            re.M,
+        )
+
+    def test_unexpected_crash_allows_when_opted_out(self, monkeypatch, capsys):
+        monkeypatch.setenv("SECRETS_BLOCK_ON_SCAN_FAILURE", "0")
+
+        def _raise_unexpected_scan_error(*a, **kw):
+            raise RuntimeError(self.SYNTHETIC_SCAN_EXCEPTION)
+
+        monkeypatch.setattr(
+            secrets_hook, "run_secrets_scan_with_retries", _raise_unexpected_scan_error
+        )
+        rc, err = self._run(
+            capsys, "unexpected crash, opted out (SECRETS_BLOCK_ON_SCAN_FAILURE=0)", []
+        )
+        assert rc == secrets_hook.EXIT_OK
+        assert "[snyk] internal error: RuntimeError:" in err
+        assert self.SYNTHETIC_SCAN_EXCEPTION[:20] in err
+        assert "allowing commit" in err
 
     def test_unexpected_crash_with_no_message_still_reports_the_exception_type(
         self, monkeypatch, capsys
@@ -2371,50 +4148,37 @@ class TestOutputScenarios:
             raise ValueError
 
         monkeypatch.setattr(
-            secrets_hook, "run_secrets_scan", _raise_unexpected_scan_error_without_message
+            secrets_hook,
+            "run_secrets_scan_with_retries",
+            _raise_unexpected_scan_error_without_message,
         )
         rc, err = self._run(capsys, "unexpected crash with no message", [])
-        assert rc == secrets_hook.EXIT_OK
-        assert "[snyk] internal error: ValueError; allowing commit" in err
+        assert rc == secrets_hook.EXIT_BLOCK
+        assert "[snyk] internal error: ValueError; blocking commit" in err
 
     def test_debug_mode(self, monkeypatch, capsys, tmp_path):
         monkeypatch.setattr(secrets_hook, "DEBUG", True)
         monkeypatch.setattr(
             secrets_hook,
-            "run_secrets_scan",
+            "run_secrets_scan_with_retries",
             lambda *a, **kw: ("success", [self.PRE_EXISTING_FINDING]),
         )
         rc, err = self._run(capsys, "debug mode, clean + pre-existing", [])
         assert rc == secrets_hook.EXIT_OK
-        assert re.search(rf"^  \[debug\] diff strategy: {self.strategy_name}$", err, re.M)
+        dewrapped = self._dewrap(err)
+        assert re.search(r"^  \[debug\] diff strategy: content$", err, re.M)
         assert re.search(r"^  \[debug\] scan scope: 1 file, 0 binary files$", err, re.M)
-        assert re.search(
-            rf"^  \[debug\] scan workspace: {re.escape(str(self.current_snapshot_dir))} "
-            r"\(staged snapshot\)$",
-            err,
-            re.M,
+        assert (
+            "[debug] remote-repo-url: (none -- no origin remote configured)" in dewrapped
+        )  # no origin remote in this fake repo fixture
+        assert f"[debug] scan workspace: {self.current_snapshot_dir} (staged snapshot)" in dewrapped
+        assert (
+            f"[debug] baseline scan workspace: {self.baseline_snapshot_dir} (0 files)" in dewrapped
         )
-        if self.strategy_name == "content":
-            assert re.search(
-                rf"^  \[debug\] baseline scan workspace: {re.escape(str(self.baseline_snapshot_dir))} "
-                r"\(0 files\)$",
-                err,
-                re.M,
-            )
-            assert re.search(
-                rf"^  \[debug\] running concurrent scans: "
-                rf"current_workspace={re.escape(str(self.current_snapshot_dir))} "
-                rf"baseline_workspace={re.escape(str(self.baseline_snapshot_dir))} target=\.$",
-                err,
-                re.M,
-            )
-        else:
-            assert re.search(
-                rf"^  \[debug\] running current scan: "
-                rf"workspace={re.escape(str(self.current_snapshot_dir))} target=\.$",
-                err,
-                re.M,
-            )
+        assert "[debug] running concurrent scans:" in err
+        assert f"current_workspace={self.current_snapshot_dir}" in err
+        assert f"baseline_workspace={self.baseline_snapshot_dir}" in err
+        assert "target=." in dewrapped
         assert re.search(r"^  \[debug\] scan took [\d.]+s \(total [\d.]+s\)$", err, re.M)
         log_text = self._persisted_log_text(tmp_path)
         assert "[debug] scan scope: 1 file, 0 binary files" in log_text
@@ -2430,47 +4194,211 @@ class TestOutputScenarios:
             re.M,
         )
 
+    def test_debug_mode_shows_configured_remote_url(self, monkeypatch, capsys):
+        """Direct visibility that the value fed into the scan (not just the
+        post-scan ignore hint) is the real repo's origin remote."""
+        monkeypatch.setattr(secrets_hook, "DEBUG", True)
+        monkeypatch.setattr(
+            secrets_hook,
+            "get_remote_url",
+            lambda *a, **kw: git_ops.RemoteUrlDecision.ok("git@github.com:acme/repo.git"),
+        )
+        monkeypatch.setattr(
+            secrets_hook,
+            "run_secrets_scan_with_retries",
+            lambda *a, **kw: ("success", [self.PRE_EXISTING_FINDING]),
+        )
+        rc, err = self._run(capsys, "debug mode, remote configured", [])
+        assert rc == secrets_hook.EXIT_OK
+        assert "[debug] remote-repo-url: git@github.com:acme/repo.git" in err
+
+    def test_unsafe_remote_url_is_rejected_when_resolved_cli_is_a_cmd(self, monkeypatch, capsys):
+        # The decision is made once, right after find_snyk_binary()
+        # resolves -- everything downstream (the scan invocation, the
+        # printed ignore hint) sees the same already-rejected value.
+        monkeypatch.setattr(secrets_hook, "find_snyk_binary", lambda: r"C:\snyk\snyk.cmd")
+        monkeypatch.setattr(proc, "IS_WINDOWS", True)
+        monkeypatch.setattr(
+            secrets_hook,
+            "get_remote_url",
+            lambda *a, **kw: git_ops.RemoteUrlDecision.ok("https://example.com&calc.exe"),
+        )
+        captured = {}
+
+        def fake_retries(workspace, invocation, deadline):
+            captured["invocation"] = invocation
+            return "success", [self.PRE_EXISTING_FINDING]
+
+        monkeypatch.setattr(secrets_hook, "run_secrets_scan_with_retries", fake_retries)
+        monkeypatch.setattr(secrets_hook, "DEBUG", True)
+        rc, err = self._run(capsys, "cmd-resolved CLI, unsafe remote", [])
+        assert rc == secrets_hook.EXIT_OK
+        assert captured["invocation"].remote_url is None
+        assert captured["invocation"].needs_shell is True
+        assert "[debug] remote-repo-url: (none -- origin remote unsafe" in err
+
+    def test_unsafe_looking_remote_url_is_kept_when_resolved_cli_is_a_native_exe(
+        self, monkeypatch, capsys
+    ):
+        # A native .exe never reaches a shell, even on Windows, so the
+        # same URL that gets rejected for a .cmd stays usable here.
+        monkeypatch.setattr(secrets_hook, "find_snyk_binary", lambda: r"C:\snyk\snyk.exe")
+        monkeypatch.setattr(proc, "IS_WINDOWS", True)
+        monkeypatch.setattr(
+            secrets_hook,
+            "get_remote_url",
+            lambda *a, **kw: git_ops.RemoteUrlDecision.ok("https://example.com&calc.exe"),
+        )
+        captured = {}
+
+        def fake_retries(workspace, invocation, deadline):
+            captured["invocation"] = invocation
+            return "success", [self.PRE_EXISTING_FINDING]
+
+        monkeypatch.setattr(secrets_hook, "run_secrets_scan_with_retries", fake_retries)
+        rc, _ = self._run(capsys, "exe-resolved CLI, unsafe-looking remote", [])
+        assert rc == secrets_hook.EXIT_OK
+        assert captured["invocation"].remote_url == "https://example.com&calc.exe"
+        assert captured["invocation"].needs_shell is False
+
     def test_empty_commit_skips_scan_entirely(self, monkeypatch, capsys):
         """An empty commit must skip the scan outright, not fall through
         to scanning something else (e.g. the whole workspace)."""
-        monkeypatch.setattr(secrets_hook, "get_staged_files", lambda _: [])
+        monkeypatch.setattr(secrets_hook, "get_staged_files", lambda *a, **kw: [])
         rc, err = self._run(capsys, "empty commit, nothing staged", [])
         assert rc == secrets_hook.EXIT_OK
         assert "[snyk] no staged files, skipping scan" in err
         assert "Scanning" not in err  # no scan of any kind should start
 
-    @staticmethod
-    def _stub_failing_snapshot(monkeypatch):
+    def test_deprecated_flag_warning_shown_even_on_early_exit(self, monkeypatch, capsys, tmp_path):
+        """A deprecated flag is a pure os.environ check with no repo
+        dependency -- it must still warn even when the scan itself never
+        starts (e.g. an empty commit), so a user doesn't keep a
+        deprecated env var set without ever seeing the notice. It must
+        also still be persisted to the per-repo log like any other
+        warning (requires _LOG_FILE to already be set when it's checked)."""
+        fake_flag = deprecated_flags.DeprecatedFlag(
+            name="SECRETS_TEMP_TEST_FLAG", message="test message"
+        )
+        monkeypatch.setitem(deprecated_flags._DEPRECATED_FLAGS, fake_flag.name, fake_flag)
+        monkeypatch.setenv(fake_flag.name, "1")
+        monkeypatch.setattr(secrets_hook, "get_staged_files", lambda *a, **kw: [])
+        rc, err = self._run(capsys, "deprecated flag warned on early exit", [])
+        assert rc == secrets_hook.EXIT_OK
+        assert "SECRETS_TEMP_TEST_FLAG is no longer supported" in err
+        log_text = self._persisted_log_text(tmp_path)
+        assert "SECRETS_TEMP_TEST_FLAG is no longer supported" in log_text
+
+    # A realistic checkout-index failure message -- same shape staged_snapshot's
+    # real code produces for a permission error, so this scenario's printed
+    # output (visible with `-s`) is representative, not a placeholder marker.
+    REALISTIC_CHECKOUT_INDEX_FAILURE = (
+        "could not snapshot staged content (git checkout-index failed): "
+        "error: unable to create file config.py (Permission denied)"
+    )
+
+    @classmethod
+    def _stub_failing_snapshot(cls, monkeypatch, detail=None):
+        detail = detail or cls.REALISTIC_CHECKOUT_INDEX_FAILURE
+
         @contextmanager
-        def _failing_snapshot(repo_root, files):
-            yield None
+        def _failing_snapshot(repo_root, files, deadline=None):
+            raise SnapshotError(detail)
+            yield  # pragma: no cover -- unreachable, satisfies the generator protocol
 
         monkeypatch.setattr(
             secrets_hook, "staged_snapshot", lambda *a, **kw: _failing_snapshot(*a, **kw)
         )
 
-    def test_snapshot_failure_blocks_by_default(self, monkeypatch, capsys):
+    def test_snapshot_failure_respects_fail_closed_default(self, monkeypatch, capsys):
+        # A snapshot failure is a runtime/environment problem (disk full,
+        # git subprocess issue), not a "don't know what to scan" case --
+        # it respects SECRETS_BLOCK_ON_SCAN_FAILURE like any other scan
+        # failure instead of always hard-blocking.
         called = []
         self._stub_failing_snapshot(monkeypatch)
         monkeypatch.setattr(
             secrets_hook,
-            "run_secrets_scan",
+            "run_secrets_scan_with_retries",
             lambda *a, **kw: called.append(1) or ("success", []),
         )
 
-        rc, err = self._run(capsys, "index snapshot failed, fail closed", [])
-        assert rc == secrets_hook.EXIT_PREREQ
+        rc, err = self._run(capsys, "index snapshot failed, fail-closed default", [])
+        assert rc == secrets_hook.EXIT_BLOCK
         assert called == []
-        assert re.search(
-            r"^  could not snapshot staged content \(git checkout-index failed\); "
-            r"cannot safely scan staged changes$",
-            err,
-            re.M,
+        dewrapped = self._dewrap(err)
+        assert "could not snapshot staged content (git checkout-index failed):" in dewrapped
+        assert "unable to create file config.py (Permission denied)" in dewrapped
+
+    def test_snapshot_failure_allows_when_opted_out(self, monkeypatch, capsys):
+        called = []
+        self._stub_failing_snapshot(monkeypatch)
+        monkeypatch.setenv("SECRETS_BLOCK_ON_SCAN_FAILURE", "0")
+        monkeypatch.setattr(
+            secrets_hook,
+            "run_secrets_scan_with_retries",
+            lambda *a, **kw: called.append(1) or ("success", []),
         )
+
+        rc, err = self._run(capsys, "index snapshot failed, opted out", [])
+        assert rc == secrets_hook.EXIT_OK
+        assert called == []
+        dewrapped = self._dewrap(err)
+        assert "could not snapshot staged content (git checkout-index failed):" in dewrapped
+        assert "unable to create file config.py (Permission denied)" in dewrapped
+
+    def test_scratch_dir_creation_failure_respects_fail_closed_default(
+        self, monkeypatch, capsys, tmp_path
+    ):
+        """Real staged_snapshot/_create_scratch_dir code path (only
+        tempfile.mkdtemp itself is mocked) -- shows the actual message for a
+        disk-full/permission scratch-dir failure, not a stand-in. _stub_prereqs
+        replaces staged_snapshot with a fixed fake by default; restore the
+        real one so the mocked tempfile.mkdtemp actually gets exercised."""
+        monkeypatch.setattr(secrets_hook, "staged_snapshot", staged_snapshot)
+        monkeypatch.setattr(tempfile, "gettempdir", lambda: "/private/tmp")
+        monkeypatch.setattr(
+            tempfile,
+            "mkdtemp",
+            lambda *a, **kw: (_ for _ in ()).throw(OSError(28, "No space left on device")),
+        )
+        called = []
+        monkeypatch.setattr(
+            secrets_hook,
+            "run_secrets_scan_with_retries",
+            lambda *a, **kw: called.append(1) or ("success", []),
+        )
+
+        rc, err = self._run(capsys, "scratch dir creation failed, disk full", [])
+        assert rc == secrets_hook.EXIT_BLOCK
+        assert called == []
+        assert "/private/tmp" in err
+        assert "No space left on" in err
+        assert "device" in err
+        assert "TMPDIR" in err
+
+    def test_fallback_flag_no_longer_changes_behavior(self, monkeypatch, capsys):
+        """SECRETS_FALLBACK_TO_WORKING_DIR is removed: setting it does not
+        restore the old fallback -- the snapshot failure still respects
+        SECRETS_BLOCK_ON_SCAN_FAILURE like any other scan failure, and a
+        deprecation warning is printed."""
+        called = []
+        self._stub_failing_snapshot(monkeypatch)
+        monkeypatch.setenv("SECRETS_FALLBACK_TO_WORKING_DIR", "1")
+        monkeypatch.setattr(
+            secrets_hook,
+            "run_secrets_scan_with_retries",
+            lambda *a, **kw: called.append(1) or ("success", []),
+        )
+
+        rc, err = self._run(capsys, "fallback flag set but ignored", [])
+        assert rc == secrets_hook.EXIT_BLOCK
+        assert called == []
+        assert "SECRETS_FALLBACK_TO_WORKING_DIR is no longer supported" in err
 
     def test_snapshot_returning_repo_root_blocks(self, monkeypatch, capsys):
         @contextmanager
-        def _repo_root_snapshot(repo_root, files):
+        def _repo_root_snapshot(repo_root, files, deadline=None):
             yield repo_root
 
         monkeypatch.setattr(
@@ -2479,86 +4407,16 @@ class TestOutputScenarios:
         called = []
         monkeypatch.setattr(
             secrets_hook,
-            "run_secrets_scan",
+            "run_secrets_scan_with_retries",
             lambda *a, **kw: called.append(1) or ("success", []),
         )
 
         rc, err = self._run(capsys, "snapshot returned repo root", [])
         assert rc == secrets_hook.EXIT_PREREQ
         assert called == []
-        assert re.search(
-            r"^  refusing to scan the repository working tree directly; "
-            r"scan workspace must be a prepared snapshot$",
-            err,
-            re.M,
-        )
-
-    def test_snapshot_fallback_warning_when_explicitly_enabled(self, monkeypatch, capsys, tmp_path):
-        """The accuracy caveat is visible whenever the legacy fallback is
-        explicitly enabled."""
-        self._stub_failing_snapshot(monkeypatch)
-        monkeypatch.setenv("SECRETS_FALLBACK_TO_WORKING_DIR", "1")
-        (tmp_path / "config.py").write_text("clean = True\n")
-        monkeypatch.setattr(secrets_hook, "run_secrets_scan", lambda *a, **kw: ("success", []))
-
-        rc, err = self._run(capsys, "index snapshot failed, explicit working-tree fallback", [])
-        assert rc == secrets_hook.EXIT_OK
-        assert re.search(
-            r"^  could not snapshot staged content \(git checkout-index failed\); "
-            r"scanning the working tree because SECRETS_FALLBACK_TO_WORKING_DIR=1 "
-            r"-- results may not match what's staged$",
-            err,
-            re.M,
-        )
-
-    def test_snapshot_fallback_scans_filtered_copy_not_repo_root(
-        self, monkeypatch, capsys, tmp_path
-    ):
-        self._stub_failing_snapshot(monkeypatch)
-        monkeypatch.setenv("SECRETS_FALLBACK_TO_WORKING_DIR", "1")
-        monkeypatch.setenv("SECRETS_IGNORE_PATHS", "ignored.py")
-        monkeypatch.setattr(secrets_hook, "get_staged_files", lambda _: ["config.py", "ignored.py"])
-        monkeypatch.setattr(
-            secrets_hook,
-            "get_added_line_ranges",
-            lambda _: ({"config.py": [(1, 1)], "ignored.py": [(1, 1)]}, []),
-        )
-        (tmp_path / "config.py").write_text("clean = True\n")
-        (tmp_path / "ignored.py").write_text('AWS_ACCESS_KEY_ID = "ignored"\n')
-        scanned_workspaces = []
-
-        def _scan(workspace, snyk_bin, timeout):
-            scanned_workspaces.append(workspace)
-            assert workspace != tmp_path
-            assert (workspace / "config.py").read_text(encoding="utf-8") == "clean = True\n"
-            assert not (workspace / "ignored.py").exists()
-            return "success", []
-
-        monkeypatch.setattr(secrets_hook, "run_secrets_scan", _scan)
-
-        rc, err = self._run(capsys, "fallback copies filtered working tree", [])
-        assert rc == secrets_hook.EXIT_OK
-        assert scanned_workspaces
-        assert "working tree because SECRETS_FALLBACK_TO_WORKING_DIR=1" in err
-
-    def test_snapshot_fallback_copy_failure_blocks(self, monkeypatch, capsys):
-        self._stub_failing_snapshot(monkeypatch)
-        monkeypatch.setenv("SECRETS_FALLBACK_TO_WORKING_DIR", "1")
-        called = []
-        monkeypatch.setattr(
-            secrets_hook,
-            "run_secrets_scan",
-            lambda *a, **kw: called.append(1) or ("success", []),
-        )
-
-        rc, err = self._run(capsys, "working-tree fallback copy failed", [])
-        assert rc == secrets_hook.EXIT_PREREQ
-        assert called == []
-        assert re.search(
-            r"^  could not snapshot working-tree fallback content; "
-            r"cannot safely scan staged changes$",
-            err,
-            re.M,
+        assert (
+            "refusing to scan the repository working tree directly; "
+            "scan workspace must be a prepared snapshot" in self._dewrap(err)
         )
 
     def test_binary_file_warning_and_blocks(self, monkeypatch, capsys):
@@ -2571,18 +4429,17 @@ class TestOutputScenarios:
             # "config.py" is just the default staged filename _stub_prereqs
             # already wires NEW_FINDING to -- not implying anything about
             # the extension, since binary-ness comes from binary_files here.
-            lambda _: ({"config.py": [diff_scope.BINARY_SENTINEL_RANGE]}, ["config.py"]),
+            lambda *a, **kw: ({"config.py": [diff_scope.BINARY_SENTINEL_RANGE]}, ["config.py"]),
         )
         monkeypatch.setattr(
-            secrets_hook, "run_secrets_scan", lambda *a, **kw: ("success", [self.NEW_FINDING])
+            secrets_hook,
+            "run_secrets_scan_with_retries",
+            lambda *a, **kw: ("success", [self.NEW_FINDING]),
         )
         rc, err = self._run(capsys, "binary file staged, finding blocks", [])
         assert rc == secrets_hook.EXIT_BLOCK
-        assert re.search(
-            r"^  1 binary file staged; can't diff line-by-line, treating the whole file as in scope$",
-            err,
-            re.M,
-        )
+        assert "1 binary file staged; can't diff line-by-line, treating the whole file" in err
+        assert "scope" in err
         assert re.search(r"^  done in [\d.]+s -- 1 finding blocking commit$", err, re.M)
 
 
@@ -2610,10 +4467,19 @@ class TestHookScriptSubprocessWithFakeSnyk:
             textwrap.dedent(
                 """
                 import json
+                import os
                 import sys
                 from pathlib import Path
 
-                files = [arg for arg in sys.argv[3:] if arg != "--json"]
+                argv_log = os.environ.get("FAKE_SNYK_ARGV_LOG")
+                if argv_log:
+                    with open(argv_log, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(sys.argv[1:]) + "\\n")
+
+                # Any flag (not just --json) must be excluded from the file list --
+                # a real --remote-repo-url=... would otherwise be treated as a scan
+                # target and blow up trying to stat it.
+                files = [arg for arg in sys.argv[3:] if not arg.startswith("--")]
                 results = []
                 for target in files:
                     target_path = Path(target)
@@ -2718,6 +4584,67 @@ class TestHookScriptSubprocessWithFakeSnyk:
         assert "no secrets found" in result.stderr
         assert "FAKE_SECRET" not in result.stderr
 
+    def test_passes_remote_repo_url_to_real_snyk_argv_when_origin_configured(
+        self, repo, fake_snyk_env, tmp_path
+    ):
+        """Proves the real scan invocation (not just the post-scan ignore
+        hint) carries --remote-repo-url, so scan and ignore resolve to the
+        same finding identity."""
+        subprocess.run(
+            ["git", "remote", "add", "origin", "git@github.com:acme/repo.git"],
+            cwd=repo,
+            check=True,
+        )
+        argv_log = tmp_path / "argv_log.jsonl"
+        fake_snyk_env = dict(fake_snyk_env, FAKE_SNYK_ARGV_LOG=str(argv_log))
+        _stage(repo, "config.py", 'TOKEN = "FAKE_SECRET"\n')
+
+        result = self._run_hook(repo, fake_snyk_env)
+
+        assert result.returncode == secrets_hook.EXIT_BLOCK
+        logged_argvs = [json.loads(line) for line in argv_log.read_text().splitlines()]
+        assert logged_argvs, "fake snyk was never invoked"
+        for argv in logged_argvs:
+            assert "--remote-repo-url=git@github.com:acme/repo.git" in argv
+
+    def test_no_remote_repo_url_flag_when_no_origin_configured(self, repo, fake_snyk_env, tmp_path):
+        argv_log = tmp_path / "argv_log.jsonl"
+        fake_snyk_env = dict(fake_snyk_env, FAKE_SNYK_ARGV_LOG=str(argv_log))
+        _stage(repo, "config.py", 'TOKEN = "FAKE_SECRET"\n')
+
+        result = self._run_hook(repo, fake_snyk_env)
+
+        assert result.returncode == secrets_hook.EXIT_BLOCK
+        logged_argvs = [json.loads(line) for line in argv_log.read_text().splitlines()]
+        assert logged_argvs, "fake snyk was never invoked"
+        for argv in logged_argvs:
+            assert not any(arg.startswith("--remote-repo-url=") for arg in argv)
+
+    def test_unsafe_looking_remote_url_reaches_snyk_argv_literally_without_a_shell(
+        self, repo, fake_snyk_env, tmp_path
+    ):
+        # The fake snyk here is a plain executable, not a .cmd/.bat, so
+        # needs_shell() is False -- shell=False means this value is never
+        # parsed by anything, just delivered as one literal argv element.
+        # The real proof of safety: it arrives unmangled, not split into
+        # separate shell-interpreted tokens (see lib.proc.needs_shell).
+        subprocess.run(
+            ["git", "remote", "add", "origin", "https://example.com&calc.exe"],
+            cwd=repo,
+            check=True,
+        )
+        argv_log = tmp_path / "argv_log.jsonl"
+        fake_snyk_env = dict(fake_snyk_env, FAKE_SNYK_ARGV_LOG=str(argv_log))
+        _stage(repo, "config.py", 'TOKEN = "FAKE_SECRET"\n')
+
+        result = self._run_hook(repo, fake_snyk_env)
+
+        assert result.returncode == secrets_hook.EXIT_BLOCK
+        logged_argvs = [json.loads(line) for line in argv_log.read_text().splitlines()]
+        assert logged_argvs, "fake snyk was never invoked"
+        for argv in logged_argvs:
+            assert "--remote-repo-url=https://example.com&calc.exe" in argv
+
 
 # ============================================================================
 # 13. End-to-end: the "content" diff strategy. Real git repos throughout
@@ -2728,14 +4655,11 @@ class TestHookScriptSubprocessWithFakeSnyk:
 class TestContentStrategyEndToEnd:
     @pytest.fixture(autouse=True)
     def _stub_snyk(self, monkeypatch):
-        monkeypatch.setenv("SECRETS_DIFF_STRATEGY", "content")
         monkeypatch.setattr(secrets_hook, "find_snyk_binary", lambda: "/usr/bin/snyk")
         monkeypatch.setattr(secrets_hook, "check_snyk_auth", lambda: "token")
 
     # The touched-line/unchanged-secret scenario itself is covered by
-    # TestLineStrategyKnownLimitation below, parametrized across both
-    # strategies (xfail for "line", genuine pass for "content") rather
-    # than duplicated here as a content-only test.
+    # TestLineStrategyKnownLimitation below.
 
     def test_genuinely_new_secret_still_blocks(self, repo, monkeypatch):
         _stage(repo, "app.py", "def add(a, b):\n    return a + b\n")
@@ -2755,8 +4679,11 @@ class TestContentStrategyEndToEnd:
             end_column=25,
         )
 
-        def fake_run_concurrent_scans(current_ws, baseline_ws, snyk_bin, timeout):
-            return ("success", [current_finding]), ("success", [])
+        def fake_run_concurrent_scans(current_ws, baseline_ws, invocation, deadline):
+            return (
+                snyk_cli.ScanAttempt("success", [current_finding], 1),
+                snyk_cli.ScanAttempt("success", [], 1),
+            )
 
         monkeypatch.setattr(secrets_hook, "run_concurrent_scans", fake_run_concurrent_scans)
         monkeypatch.chdir(repo)
@@ -2800,21 +4727,21 @@ class TestContentStrategyEndToEnd:
             end_column=19,
         )
 
-        def _workspace_files(workspace: Path) -> List[str]:
+        def _workspace_files(workspace: Path) -> list[str]:
             return sorted(
                 p.relative_to(workspace).as_posix() for p in workspace.rglob("*") if p.is_file()
             )
 
-        def fake_run_concurrent_scans(current_ws, baseline_ws, snyk_bin, timeout):
+        def fake_run_concurrent_scans(current_ws, baseline_ws, invocation, deadline):
             assert _workspace_files(current_ws) == ["config_3.py"]
             assert _workspace_files(baseline_ws) == ["config_3.py"]
             assert "brand-new-secret" in (current_ws / "config_3.py").read_text(encoding="utf-8")
             assert "brand-new-secret" not in (baseline_ws / "config_3.py").read_text(
                 encoding="utf-8"
             )
-            return ("success", [current_existing, current_new]), (
-                "success",
-                [baseline_existing],
+            return (
+                snyk_cli.ScanAttempt("success", [current_existing, current_new], 1),
+                snyk_cli.ScanAttempt("success", [baseline_existing], 1),
             )
 
         monkeypatch.setattr(secrets_hook, "run_concurrent_scans", fake_run_concurrent_scans)
@@ -2845,8 +4772,11 @@ class TestContentStrategyEndToEnd:
             end_column=14,
         )
 
-        def fake_run_concurrent_scans(current_ws, baseline_ws, snyk_bin, timeout):
-            return ("success", [current_finding]), ("success", [baseline_finding])
+        def fake_run_concurrent_scans(current_ws, baseline_ws, invocation, deadline):
+            return (
+                snyk_cli.ScanAttempt("success", [current_finding], 1),
+                snyk_cli.ScanAttempt("success", [baseline_finding], 1),
+            )
 
         monkeypatch.setattr(secrets_hook, "run_concurrent_scans", fake_run_concurrent_scans)
         monkeypatch.chdir(repo)
@@ -2870,17 +4800,62 @@ class TestContentStrategyEndToEnd:
             end_column=14,
         )
 
-        def fake_run_concurrent_scans(current_ws, baseline_ws, snyk_bin, timeout):
-            return ("success", [current_finding]), ("timeout", [])
+        def fake_run_concurrent_scans(current_ws, baseline_ws, invocation, deadline):
+            return (
+                snyk_cli.ScanAttempt("success", [current_finding], 1),
+                snyk_cli.ScanAttempt("timeout", [], 1),
+            )
 
         monkeypatch.setattr(secrets_hook, "run_concurrent_scans", fake_run_concurrent_scans)
-        monkeypatch.setattr(secrets_hook, "DEBUG", True)
         monkeypatch.chdir(repo)
         # Falls back to line-diff, which blocks on the touched line since
         # it can't know the secret text itself is unchanged.
         assert secrets_hook.main([]) == secrets_hook.EXIT_BLOCK
         err = capsys.readouterr().err
-        assert "baseline scan timeout; using line-diff classification for this run" in err
+        # A degraded-detection run must be visible without SECRETS_HOOK_DEBUG --
+        # dewrapped since the message is long enough to word-wrap.
+        assert "baseline scan timeout; falling back to line-diff classification" in re.sub(
+            r"\n\s+", " ", err
+        )
+
+    def test_ref_snapshot_failure_falls_back_gracefully_and_is_visible(
+        self, repo, monkeypatch, capsys
+    ):
+        # Distinct from the test above: here ref_snapshot itself fails
+        # (e.g. git archive/extraction broke), not the baseline scan run
+        # against an already-successful snapshot. Both must be equally
+        # visible, not just the latter.
+        _stage(repo, "app.py", 'KEY = "abc123"\n')
+        subprocess.run(["git", "commit", "-q", "-m", "add app"], cwd=repo, check=True)
+        (repo / "app.py").write_text('KEY = "abc123"  # rotated soon\n')
+        subprocess.run(["git", "add", "app.py"], cwd=repo, check=True)
+
+        current_finding = findings.Finding(
+            id="generic-secret",
+            severity="high",
+            file_path="app.py",
+            start_line=1,
+            start_column=7,
+            end_line=1,
+            end_column=14,
+        )
+
+        @contextmanager
+        def _failed_ref_snapshot(repo_root, ref, files, deadline=None):
+            yield None, set(), True
+
+        monkeypatch.setattr(secrets_hook, "ref_snapshot", _failed_ref_snapshot)
+        monkeypatch.setattr(
+            secrets_hook,
+            "run_secrets_scan_with_retries",
+            lambda *a, **kw: snyk_cli.ScanAttempt("success", [current_finding], 1),
+        )
+        monkeypatch.chdir(repo)
+        assert secrets_hook.main([]) == secrets_hook.EXIT_BLOCK
+        err = capsys.readouterr().err
+        assert "baseline scan unavailable; falling back to line-diff classification" in re.sub(
+            r"\n\s+", " ", err
+        )
 
     def test_get_rename_map_failure_does_not_abort_commit(self, repo, monkeypatch):
         # An empty rename map (as on git failure) must not fail-closed
@@ -2890,11 +4865,14 @@ class TestContentStrategyEndToEnd:
         (repo / "app.py").write_text('KEY = "abc123"\nEXTRA = 1\n')
         subprocess.run(["git", "add", "app.py"], cwd=repo, check=True)
 
-        monkeypatch.setattr(secrets_hook, "get_rename_map", lambda _: {})
+        monkeypatch.setattr(secrets_hook, "get_rename_map", lambda *a, **kw: {})
         monkeypatch.setattr(
             secrets_hook,
             "run_concurrent_scans",
-            lambda *a, **kw: (("success", []), ("success", [])),
+            lambda *a, **kw: (
+                snyk_cli.ScanAttempt("success", [], 1),
+                snyk_cli.ScanAttempt("success", [], 1),
+            ),
         )
         monkeypatch.chdir(repo)
         assert secrets_hook.main([]) == secrets_hook.EXIT_OK
@@ -2909,32 +4887,18 @@ class TestContentStrategyEndToEnd:
 
 
 class TestLineStrategyKnownLimitation:
+    """The line-diff heuristic (still used internally whenever there's no
+    real baseline to compare against -- see lib/baseline.py's module
+    docstring) blocks on any touched line, even when the secret's own
+    matched text is unchanged. The "content" strategy, which has a real
+    baseline here, does not have this limitation."""
+
     @pytest.fixture(autouse=True)
     def _stub_snyk(self, monkeypatch):
         monkeypatch.setattr(secrets_hook, "find_snyk_binary", lambda: "/usr/bin/snyk")
         monkeypatch.setattr(secrets_hook, "check_snyk_auth", lambda: "token")
 
-    @pytest.mark.parametrize(
-        "strategy_name",
-        [
-            pytest.param(
-                "line",
-                marks=pytest.mark.xfail(
-                    reason=(
-                        "known limitation: the line-diff heuristic blocks on any "
-                        "touched line, even when the secret's own matched text is "
-                        "unchanged -- see lib/baseline.py's module docstring"
-                    ),
-                    strict=True,
-                ),
-            ),
-            "content",
-        ],
-    )
-    def test_touched_line_with_unchanged_secret_does_not_block(
-        self, repo, monkeypatch, strategy_name
-    ):
-        monkeypatch.setenv("SECRETS_DIFF_STRATEGY", strategy_name)
+    def test_touched_line_with_unchanged_secret_does_not_block(self, repo, monkeypatch):
         _stage(repo, "app.py", 'KEY = "abc123"\n')
         subprocess.run(["git", "commit", "-q", "-m", "add app"], cwd=repo, check=True)
         (repo / "app.py").write_text('KEY = "abc123"  # rotated soon\n')
@@ -2958,13 +4922,12 @@ class TestLineStrategyKnownLimitation:
             end_line=1,
             end_column=14,
         )
-        # Only one of these two actually gets called, depending on strategy_name.
-        monkeypatch.setattr(
-            secrets_hook, "run_secrets_scan", lambda *a, **kw: ("success", [current_finding])
-        )
 
-        def fake_run_concurrent_scans(current_ws, baseline_ws, snyk_bin, timeout):
-            return ("success", [current_finding]), ("success", [baseline_finding])
+        def fake_run_concurrent_scans(current_ws, baseline_ws, invocation, deadline):
+            return (
+                snyk_cli.ScanAttempt("success", [current_finding], 1),
+                snyk_cli.ScanAttempt("success", [baseline_finding], 1),
+            )
 
         monkeypatch.setattr(secrets_hook, "run_concurrent_scans", fake_run_concurrent_scans)
         monkeypatch.chdir(repo)
@@ -3041,6 +5004,46 @@ class TestPersistentLog:
 
     def test_missing_log_file_is_a_no_op(self):
         persistent_log.append_log("hello", "")  # must not raise
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="posix flock only")
+    def test_unix_lock_gives_up_instead_of_hanging_forever(self, tmp_path, monkeypatch):
+        import fcntl
+
+        monkeypatch.setattr(persistent_log, "_LOCK_TIMEOUT_SECONDS", 0.2)
+        monkeypatch.setattr(persistent_log, "_LOCK_POLL_INTERVAL_SECONDS", 0.01)
+        lock_path = str(tmp_path / "log.txt.lock")
+
+        # Simulates a stuck sibling process holding the lock indefinitely.
+        blocker_fd = open(lock_path, "w")
+        fcntl.flock(blocker_fd, fcntl.LOCK_EX)
+        try:
+            start = time.monotonic()
+            with persistent_log.file_lock(lock_path):
+                pass
+            assert time.monotonic() - start < 2.0
+        finally:
+            fcntl.flock(blocker_fd, fcntl.LOCK_UN)
+            blocker_fd.close()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="posix flock only")
+    def test_unix_lock_gives_up_immediately_on_non_retryable_error(self, tmp_path, monkeypatch):
+        import fcntl
+
+        # A non-contention OSError (e.g. flock unsupported on this
+        # filesystem) will never clear -- must not be retried for the
+        # full timeout like real lock contention is.
+        monkeypatch.setattr(persistent_log, "_LOCK_TIMEOUT_SECONDS", 5.0)
+
+        def _always_unsupported(*a, **kw):
+            raise OSError("Operation not supported")
+
+        monkeypatch.setattr(fcntl, "flock", _always_unsupported)
+        lock_path = str(tmp_path / "log.txt.lock")
+
+        start = time.monotonic()
+        with persistent_log.file_lock(lock_path):
+            pass
+        assert time.monotonic() - start < 1.0
 
     def test_unwritable_path_does_not_raise(self, tmp_path):
         # A file where a parent dir needs to be created makes os.makedirs

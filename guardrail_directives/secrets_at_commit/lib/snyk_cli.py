@@ -1,19 +1,20 @@
 """Snyk CLI discovery, auth, and the secrets-scan subprocess invocation."""
 
-import fnmatch
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor
+import time
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Literal, Optional, Tuple
 
 from .findings import Finding, parse_secrets_results
-from .proc import IS_WINDOWS, run_text
+from .proc import IS_WINDOWS, needs_shell, run_text
 
 # CLI integration metadata published in _snyk_env() as SNYK_INTEGRATION_*.
 # Other Studio hooks carry the same literal today; there is no shared generated
@@ -21,7 +22,16 @@ from .proc import IS_WINDOWS, run_text
 SNYK_STUDIO_VERSION = "1.0.6"
 _SNYK_BINARY_NAMES = ["snyk.cmd", "snyk.exe", "snyk"] if IS_WINDOWS else ["snyk"]
 
-ScanStatus = Literal["success", "timeout", "error", "auth_required"]
+# A resolved path becomes cmd[0] in a shell=True subprocess call when it's a
+# .cmd/.bat that needs one (see needs_shell) -- a real path can contain
+# spaces/parens/backslashes, but never these, so reject them there rather
+# than let cmd.exe reinterpret one. Off that path (native .exe, POSIX),
+# there's no shell involved and these characters are just literal bytes.
+_SHELL_UNSAFE_RE = re.compile(r'[&|^<>%!"`$;\r\n]')
+
+ScanStatus = Literal[
+    "success", "timeout", "error", "auth_required", "unparseable", "retries_exhausted"
+]
 
 _AUTH_ERROR_PATTERNS = (
     "missingapitokenerror",
@@ -95,6 +105,8 @@ def _pin_problem(pinned: str) -> Optional[str]:
     a message, or None when it is usable."""
     if not pinned:
         return "is empty or unreadable"
+    if needs_shell(pinned) and _SHELL_UNSAFE_RE.search(pinned):
+        return f'pins "{pinned}", which contains unsafe characters'
     expanded = os.path.expanduser(pinned)
     if not os.path.isabs(expanded):
         # A relative pin would resolve against the scan workspace -- a
@@ -171,7 +183,7 @@ def find_snyk_binary() -> Optional[str]:
     _augment_path_for_snyk(env)
     for name in _SNYK_BINARY_NAMES:
         found = shutil.which(name, path=env.get("PATH", ""))
-        if found:
+        if found and not (needs_shell(found) and _SHELL_UNSAFE_RE.search(found)):
             return found
     return None
 
@@ -230,29 +242,38 @@ def _classify_failure(stderr: str, stdout: str) -> ScanStatus:
     return "error"
 
 
-def resolve_scan_files(candidate_files: List[str]) -> List[str]:
-    """Drops files matching SECRETS_IGNORE_PATHS (comma-separated globs,
-    matched against the full relative path)."""
-    patterns = [
-        p.strip() for p in os.environ.get("SECRETS_IGNORE_PATHS", "").split(",") if p.strip()
-    ]
-    if not patterns:
-        return candidate_files
-    return [f for f in candidate_files if not any(fnmatch.fnmatch(f, p) for p in patterns)]
+@dataclass(frozen=True)
+class ScanInvocation:
+    """Settings constant across every scan in one hook run. `remote_url`
+    is passed explicitly since the scan workspace has no `.git` to
+    auto-detect a remote from. `needs_shell` is decided once from
+    `snyk_bin` (see lib.proc.needs_shell) -- carried here rather than
+    recomputed so every consumer of this invocation agrees."""
+
+    snyk_bin: str
+    remote_url: Optional[str] = None
+    needs_shell: bool = False
 
 
 def run_secrets_scan(
-    workspace: Path, snyk_bin: str, timeout: float
+    workspace: Path, invocation: ScanInvocation, timeout: Optional[float]
 ) -> Tuple[ScanStatus, List[Finding]]:
-    """Scans the prepared workspace."""
+    """Scans the prepared workspace. `timeout=None` means no timeout at
+    all (SECRETS_SCAN_TIMEOUT=-1) -- passed straight through to
+    subprocess.run, which treats None the same way."""
+    cmd = [invocation.snyk_bin, "secrets", "test", ".", "--json"]
+    if invocation.remote_url:
+        cmd.append(f"--remote-repo-url={invocation.remote_url}")
     try:
-        # shell=True on Windows lets cmd.exe launch npm's snyk.cmd shim.
+        # shell=True only for a .cmd/.bat snyk_bin (see invocation.needs_shell)
+        # -- that's what lets cmd.exe launch npm's snyk.cmd shim; a native
+        # .exe/extensionless binary never needs one.
         result = run_text(
-            [snyk_bin, "secrets", "test", ".", "--json"],
+            cmd,
             cwd=workspace,
             env=_snyk_env(),
             timeout=timeout,
-            shell=IS_WINDOWS,
+            shell=invocation.needs_shell,
         )
     except subprocess.TimeoutExpired:
         return "timeout", []
@@ -264,20 +285,94 @@ def run_secrets_scan(
         return status, []
     findings = parse_secrets_results(result.stdout)
     if findings is None:
-        return "error", []
+        return "unparseable", []
     return "success", findings
+
+
+# Only "error" (didn't launch, or a non-auth non-zero exit) is treated as
+# possibly transient; "unparseable"/"auth_required" won't change on retry.
+MAX_SCAN_ATTEMPTS = 3  # one initial attempt plus up to two retries
+_RETRYABLE_STATUSES = frozenset({"error"})
+
+
+@dataclass(frozen=True)
+class ScanAttempt:
+    status: ScanStatus
+    findings: List[Finding]
+    attempts: int
+
+
+def run_secrets_scan_with_retries(
+    workspace: Path, invocation: ScanInvocation, deadline: Optional[float]
+) -> ScanAttempt:
+    """Retries a transient "error" up to twice, all attempts sharing one
+    wall-clock `deadline` instead of each getting a fresh timeout.
+    `deadline=None` (SECRETS_SCAN_TIMEOUT=-1) means no per-attempt timeout
+    either; MAX_SCAN_ATTEMPTS still bounds the retry count. Returns
+    "retries_exhausted" (not "error") if every attempt failed."""
+    status: ScanStatus = "error"
+    findings: List[Finding] = []
+    attempts = 0
+    while attempts < MAX_SCAN_ATTEMPTS:
+        if deadline is None:
+            remaining: Optional[float] = None
+        else:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return ScanAttempt("timeout", [], attempts)
+        attempts += 1
+        status, findings = run_secrets_scan(workspace, invocation, remaining)
+        if status not in _RETRYABLE_STATUSES:
+            return ScanAttempt(status, findings, attempts)
+    return ScanAttempt("retries_exhausted", findings, attempts)
+
+
+# Extra time beyond `deadline` to let a lane's thread return before we give
+# up on it (subprocess kill/cleanup overhead).
+RESULT_GRACE_SECONDS = 5.0
 
 
 def run_concurrent_scans(
     current_workspace: Path,
     baseline_workspace: Path,
-    snyk_bin: str,
-    timeout: float,
-) -> Tuple[Tuple[ScanStatus, List[Finding]], Tuple[ScanStatus, List[Finding]]]:
-    """Runs the current and baseline scans concurrently. Threads work here
-    despite the GIL because subprocess.run() releases it while blocked on
-    the child process -- total time is ~= max(scan_a, scan_b)."""
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        current_future = pool.submit(run_secrets_scan, current_workspace, snyk_bin, timeout)
-        baseline_future = pool.submit(run_secrets_scan, baseline_workspace, snyk_bin, timeout)
-        return current_future.result(), baseline_future.result()
+    invocation: ScanInvocation,
+    deadline: Optional[float],
+) -> Tuple[ScanAttempt, ScanAttempt]:
+    """Runs the current and baseline scans concurrently, each retrying
+    independently against the shared `deadline`.
+
+    Both futures are waited on together for at most `RESULT_GRACE_SECONDS`
+    beyond `deadline` -- a lane still not done by then is treated as timed
+    out rather than blocking forever; the pool shuts down without waiting
+    on it (subprocess.run's own timeout is what actually kills the child).
+
+    `deadline=None` (SECRETS_SCAN_TIMEOUT=-1) waits for both lanes to
+    finish, however long that takes. Both lanes share one `invocation`,
+    so they resolve to the same `--remote-repo-url`."""
+    pool = ThreadPoolExecutor(max_workers=2)
+    try:
+        current_future = pool.submit(
+            run_secrets_scan_with_retries, current_workspace, invocation, deadline
+        )
+        baseline_future = pool.submit(
+            run_secrets_scan_with_retries, baseline_workspace, invocation, deadline
+        )
+        wait_budget = (
+            None
+            if deadline is None
+            else max(0.0, deadline - time.monotonic()) + RESULT_GRACE_SECONDS
+        )
+        _done, not_done = wait([current_future, baseline_future], timeout=wait_budget)
+
+        def _result_or_timeout(future: "Future[ScanAttempt]") -> ScanAttempt:
+            if future in not_done:
+                # The lane's own attempt count is unknown (its thread never
+                # returned), but it was actively scanning, not idle -- report
+                # 1 rather than 0, which would misleadingly read as "no work
+                # happened at all."
+                return ScanAttempt("timeout", [], 1)
+            return future.result()
+
+        return _result_or_timeout(current_future), _result_or_timeout(baseline_future)
+    finally:
+        pool.shutdown(wait=False)

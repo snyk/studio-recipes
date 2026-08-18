@@ -6,6 +6,8 @@ intentionally clear the sidecar and remain dynamic: future runs should use the
 current ``snyk`` found on PATH.
 """
 
+from __future__ import annotations
+
 import contextlib
 import os
 import re
@@ -14,7 +16,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, NamedTuple, Optional
+from typing import Any, Callable, NamedTuple
 
 SNYK_CLI_SOURCE_NPM = "npm"
 SNYK_CLI_SOURCE_PATH = "path"
@@ -32,7 +34,7 @@ class SnykCliSelection(NamedTuple):
     """A resolved Snyk CLI plus the installer contract for managing it."""
 
     path: str
-    version: Optional[str]
+    version: str | None
     source: str
 
 
@@ -57,7 +59,7 @@ def cli_source_sidecar() -> Path:
     return Path.home() / ".snyk-studio" / "cli-source"
 
 
-def _no_win_npm_executable(_name: str) -> Optional[str]:
+def _no_win_npm_executable(_name: str) -> str | None:
     return None
 
 
@@ -66,11 +68,11 @@ class SnykCliResolver:
     runner: Callable[..., Any] = subprocess.run
     is_windows: bool = _IS_WINDOWS
     creationflags: int = 0
-    find_win_npm_executable: Callable[[str], Optional[str]] = _no_win_npm_executable
+    find_win_npm_executable: Callable[[str], str | None] = _no_win_npm_executable
     cli_path_sidecar: Callable[[], Path] = cli_path_sidecar
     cli_source_sidecar: Callable[[], Path] = cli_source_sidecar
 
-    def npm_global_prefix(self) -> Optional[Path]:
+    def npm_global_prefix(self) -> Path | None:
         try:
             result = self.runner(
                 ["npm", "prefix", "-g"],
@@ -101,10 +103,10 @@ class SnykCliResolver:
             prefix = prefix.parent
         return os.access(prefix, os.W_OK)
 
-    def snyk_cli_from_path(self) -> Optional[str]:
+    def snyk_cli_from_path(self) -> str | None:
         return shutil.which("snyk") or self.find_win_npm_executable("snyk")
 
-    def sync_cli_sidecars(self, cli_path: Optional[str], source: Optional[str]) -> None:
+    def sync_cli_sidecars(self, cli_path: str | None, source: str | None) -> None:
         sidecar = self.cli_path_sidecar()
         source_sidecar = self.cli_source_sidecar()
         if source == SNYK_CLI_SOURCE_PATH:
@@ -126,7 +128,7 @@ class SnykCliResolver:
                 with contextlib.suppress(FileNotFoundError):
                     path.unlink()
 
-    def read_cli_path_sidecar(self) -> Optional[str]:
+    def read_cli_path_sidecar(self) -> str | None:
         try:
             raw = self.cli_path_sidecar().read_text(encoding="utf-8-sig").strip()
         except (OSError, UnicodeDecodeError):
@@ -141,7 +143,7 @@ class SnykCliResolver:
             return cli_path
         return None
 
-    def read_cli_source_sidecar(self) -> Optional[str]:
+    def read_cli_source_sidecar(self) -> str | None:
         try:
             raw = self.cli_source_sidecar().read_text(encoding="utf-8").strip()
         except (OSError, UnicodeDecodeError):
@@ -168,7 +170,7 @@ class SnykCliResolver:
         """
         return self.read_cli_source_sidecar() or SNYK_CLI_SOURCE_USER_SPECIFIED
 
-    def npm_global_snyk_cli(self) -> Optional[str]:
+    def npm_global_snyk_cli(self) -> str | None:
         """Return the Snyk executable path npm would update globally, if present."""
         bin_dirs = self.current_npm_global_bin_dirs()
         if not bin_dirs:
@@ -181,7 +183,7 @@ class SnykCliResolver:
                     return str(candidate)
         return None
 
-    def read_snyk_version(self, cli_path: str) -> Optional[str]:
+    def read_snyk_version(self, cli_path: str) -> str | None:
         try:
             result = self.runner(
                 [cli_path, "--version"],
@@ -204,15 +206,13 @@ class SnykCliResolver:
         cli_path: str,
         source: str,
         require_version: bool = False,
-    ) -> Optional[SnykCliSelection]:
+    ) -> SnykCliSelection | None:
         version = self.read_snyk_version(cli_path)
         if require_version and not version:
             return None
         return SnykCliSelection(absolute_cli_path(cli_path), version, source)
 
-    def selected_snyk_cli_from_path(
-        self, require_version: bool = False
-    ) -> Optional[SnykCliSelection]:
+    def selected_snyk_cli_from_path(self, require_version: bool = False) -> SnykCliSelection | None:
         snyk_path = self.snyk_cli_from_path()
         if not snyk_path:
             return None
@@ -224,7 +224,7 @@ class SnykCliResolver:
 
     def selected_snyk_cli_from_sidecar(
         self, require_version: bool = False
-    ) -> Optional[SnykCliSelection]:
+    ) -> SnykCliSelection | None:
         sidecar_path = self.read_cli_path_sidecar()
         if not sidecar_path:
             return None
@@ -239,7 +239,7 @@ class SnykCliResolver:
 
     def selected_snyk_cli_from_npm_global(
         self, require_version: bool = False
-    ) -> Optional[SnykCliSelection]:
+    ) -> SnykCliSelection | None:
         snyk_path = self.npm_global_snyk_cli()
         if not snyk_path:
             return None

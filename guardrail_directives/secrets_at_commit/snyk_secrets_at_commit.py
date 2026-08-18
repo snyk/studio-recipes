@@ -8,9 +8,10 @@ Snyk Secrets At Commit
 
 Scans staged changes for hardcoded secrets before they reach a commit.
 Only findings classified as part of this commit block it; pre-existing
-findings are called out separately without file-level detail. Classification is
-pluggable via SECRETS_DIFF_STRATEGY -- see DiffStrategy/`_DIFF_STRATEGIES`
-below.
+findings are called out separately without file-level detail.
+Classification compares matched secret text against a HEAD baseline scan
+(see DiffStrategy/`_DIFF_STRATEGIES` below), falling back to a line-range
+heuristic per finding when there's no baseline to compare against.
 
 EXIT CODES:
   0  no blocking secrets
@@ -27,47 +28,63 @@ test_secrets_precommit_hooks.py's _fake_aws_access_key). Broaden to a
 representative set of rules before relying on it more generally.
 
 ENVIRONMENT:
-  SECRETS_MIN_BLOCK_SEVERITY     min severity that blocks (default: medium)
   SECRETS_SCAN_TIMEOUT           seconds before giving up on the scan (default: 90)
-  SECRETS_BLOCK_ON_SCAN_FAILURE  block instead of warn+allow on scan failure (default: 0)
-  SECRETS_IGNORE_PATHS           comma-separated glob patterns for staged paths to skip
-  SECRETS_FALLBACK_TO_WORKING_DIR
-                                  allow working-tree scan if staged snapshot fails (default: 0)
+  SECRETS_BLOCK_ON_SCAN_FAILURE  block instead of warn+allow on scan failure (default: 1)
   SECRETS_HOOK_DEBUG=1           verbose logging to stderr
-  SECRETS_DIFF_STRATEGY          "line" (default) or "content" -- see DiffStrategy below
 """
 
 import argparse
 import os
+import re
 import sys
+import textwrap
+import time
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from lib.baseline import classify_by_content
+from lib.deprecated_flags import get_deprecated_flag_warnings
 from lib.diff_scope import ClassificationContext, LineRanges, split_added_vs_pre_existing
-from lib.findings import Finding, filter_by_severity
-from lib.git_ops import find_repo_root, get_added_line_ranges, get_rename_map, get_staged_files
-from lib.index_snapshot import ref_snapshot, staged_snapshot, working_tree_snapshot
+from lib.findings import Finding
+from lib.git_ops import (
+    RemoteUrlDecision,
+    find_repo_root,
+    get_added_line_ranges,
+    get_remote_url,
+    get_rename_map,
+    get_staged_files,
+    is_safe_for_shell,
+)
+from lib.index_snapshot import SnapshotError, ref_snapshot, staged_snapshot
 from lib.persistent_log import append_log, resolve_log_file
-from lib.report import print_findings
+from lib.proc import needs_shell, quote_for_paste
+from lib.report import print_findings, supports_color
 from lib.snyk_cli import (
+    ScanInvocation,
     ScanStatus,
     check_snyk_auth,
     find_snyk_binary,
-    resolve_scan_files,
     run_concurrent_scans,
-    run_secrets_scan,
+    run_secrets_scan_with_retries,
     stale_sidecar_pin,
 )
-from lib.timing import Timer, pre_existing_notice, summary_line
+from lib.timing import (
+    Timer,
+    added_ignored_notice,
+    pre_existing_ignored_notice,
+    pre_existing_notice,
+    pre_existing_under_review_notice,
+    removed_ignored_notice,
+    removed_notice,
+    summary_line,
+)
 
 DEBUG = os.environ.get("SECRETS_HOOK_DEBUG", "0") == "1"
 
 DEFAULT_SCAN_TIMEOUT = 90.0
 MIN_SCAN_TIMEOUT = 1.0
-DEFAULT_DIFF_STRATEGY = "line"
 
 EXIT_OK = 0
 EXIT_BLOCK = 1
@@ -84,71 +101,124 @@ class PrerequisiteFailure(Exception):
         self.indent = indent
 
 
-def log(message: str) -> None:
-    """The one leading `[snyk] ...` line per phase."""
-    print(f"[snyk] {message}", file=sys.stderr)
+_WRAP_WIDTH = 100
+_LOG_PREFIX = "[snyk] "
+_LOG_CONT_PREFIX = "  "
+_WRAP_CONTINUATION_INDENT = "    "
+
+# A placeholder unlikely to appear in a real message, used to protect
+# spaces inside backtick-quoted commands from whitespace-splitting below.
+_SPACE_PLACEHOLDER = "\x00"
+_BACKTICK_SPAN_RE = re.compile(r"`[^`]*`")
+
+_ANSI_RESET = "\033[0m"
+_ANSI_DIM = "\033[2m"
+_ANSI_GREEN = "\033[32m"
+_ANSI_BOLD_RED = "\033[1;31m"
+
+
+def _wrap_for_prefix(message: str, prefix: str, width: int = _WRAP_WIDTH) -> List[str]:
+    """Word-wraps `message` to `width` columns, prefix/indent included.
+    The first line is indented with `prefix`, every continuation line
+    (including further wraps of a long first line) with
+    `_WRAP_CONTINUATION_INDENT`. A backtick-quoted command is one atomic
+    token and is never split, even if it alone exceeds `width`. `message`'s
+    own line breaks (e.g. a multi-line exception) are preserved -- each is
+    wrapped independently, not reflowed into the next."""
+    lines: List[str] = []
+    for i, raw_line in enumerate(message.split("\n")):
+        indent = prefix if i == 0 else _WRAP_CONTINUATION_INDENT
+        # Defuse any pre-existing placeholder byte first -- a real message
+        # never intentionally contains one, so this can only prevent it
+        # from being treated as a non-splittable character below, never
+        # lose real content.
+        raw_line = raw_line.replace(_SPACE_PLACEHOLDER, " ")
+        protected = _BACKTICK_SPAN_RE.sub(
+            lambda m: m.group(0).replace(" ", _SPACE_PLACEHOLDER), raw_line
+        )
+        wrapper = textwrap.TextWrapper(
+            width=width,
+            initial_indent=indent,
+            subsequent_indent=_WRAP_CONTINUATION_INDENT,
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+        wrapped = wrapper.wrap(protected) or [indent]
+        lines.extend(line.replace(_SPACE_PLACEHOLDER, " ") for line in wrapped)
+    return lines
+
+
+def _paint(line: str, color: Optional[str]) -> str:
+    """Wraps an already-wrapped display line -- never call before
+    word-wrapping, or escape codes would count toward line width."""
+    if not color or not supports_color():
+        return line
+    return f"{color}{line}{_ANSI_RESET}"
+
+
+def log(message: str, *, color: Optional[str] = None) -> None:
+    """The one leading `[snyk] ...` line per phase, word-wrapped for
+    display; the persisted log line stays whole, unwrapped, and uncolored."""
+    for line in _wrap_for_prefix(message, _LOG_PREFIX):
+        print(_paint(line, color), file=sys.stderr)
     if _LOG_FILE:
         append_log(message, _LOG_FILE)
 
 
-def log_cont(message: str) -> None:
-    """A continuation line under the most recent log() line."""
-    print(f"  {message}", file=sys.stderr)
+def log_cont(message: str, *, color: Optional[str] = None) -> None:
+    """A continuation line under the most recent log() line, word-wrapped
+    for display; the persisted log line stays whole, unwrapped, and uncolored."""
+    for line in _wrap_for_prefix(message, _LOG_CONT_PREFIX):
+        print(_paint(line, color), file=sys.stderr)
     if _LOG_FILE:
         append_log(message, _LOG_FILE)
 
 
 def debug(message: str) -> None:
     if DEBUG:
-        log_cont(f"[debug] {message}")
+        log_cont(f"[debug] {message}", color=_ANSI_DIM)
 
 
 def _plural(count: int, noun: str) -> str:
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
-def _scan_timeout() -> float:
+def _scan_timeout() -> Optional[float]:
+    """Seconds to allow for the scan, or None for no timeout at all --
+    SECRETS_SCAN_TIMEOUT=-1 is the documented way to opt out entirely.
+    Any other value is clamped to MIN_SCAN_TIMEOUT as before."""
     try:
         value = float(os.environ.get("SECRETS_SCAN_TIMEOUT", DEFAULT_SCAN_TIMEOUT))
     except ValueError:
         return DEFAULT_SCAN_TIMEOUT
+    if value == -1:
+        return None
     return value if value >= MIN_SCAN_TIMEOUT else MIN_SCAN_TIMEOUT
 
 
 def _block_on_scan_failure() -> bool:
-    return os.environ.get("SECRETS_BLOCK_ON_SCAN_FAILURE", "0") == "1"
+    return os.environ.get("SECRETS_BLOCK_ON_SCAN_FAILURE", "1") == "1"
 
 
-def _fallback_to_working_dir() -> bool:
-    return os.environ.get("SECRETS_FALLBACK_TO_WORKING_DIR", "0") == "1"
-
-
-def _fail_open_or_block(
-    problem: str, *, action_hint: Optional[str] = None, indent: bool = False
-) -> int:
-    """Logs `problem` with a fail-open/fail-closed suffix and returns the
-    matching exit code."""
+def _fail_open_or_block(problem: str, *hints: str, indent: bool = False) -> int:
+    """Logs `problem` with a fail-open/fail-closed suffix, then each hint
+    on its own continuation line (never crammed onto the same line as
+    `problem`), and returns the matching exit code."""
     emit = log_cont if indent else log
     blocking = _block_on_scan_failure()
-    hints = [action_hint] if action_hint else []
+    verdict = "blocking commit" if blocking else "allowing commit"
+    emit(f"{problem}; {verdict}")
+    for hint in hints:
+        log_cont(hint)
     if blocking:
-        verdict = "blocking commit"
-    else:
-        verdict = "allowing commit"
-        hints.append("set SECRETS_BLOCK_ON_SCAN_FAILURE=1 to block instead")
-    suffix = f" ({'; '.join(hints)})" if hints else ""
-    emit(f"{problem}; {verdict}{suffix}")
+        log_cont(
+            "set SECRETS_BLOCK_ON_SCAN_FAILURE=0 to allow the commit through scan failures instead"
+        )
     return EXIT_BLOCK if blocking else EXIT_OK
 
 
-def _shell_quoted(path: str) -> str:
-    """Quotes a path with whitespace so the hint stays copy-pasteable -- the
-    probed Windows location is `C:\\Program Files\\Snyk`."""
-    return f'"{path}"' if any(c.isspace() for c in path) else path
-
-
 def _auth_hint(snyk_bin: str) -> str:
-    return f"Snyk CLI not authenticated -- run `{_shell_quoted(snyk_bin)} auth`"
+    return f"Snyk CLI not authenticated -- run `{quote_for_paste(snyk_bin)} auth`"
 
 
 def _cli_not_found_message() -> str:
@@ -165,21 +235,36 @@ def _cli_not_found_message() -> str:
     return "Snyk CLI not found on PATH -- install with `npm install -g snyk`"
 
 
-def _handle_scan_failure(status: ScanStatus, snyk_bin: str) -> int:
+def _handle_scan_failure(status: ScanStatus, attempts: int, snyk_bin: str) -> int:
     """`snyk_bin` is interpolated into the hints: after a user-specified install
     there may be no `snyk` on PATH to suggest running."""
     if status == "auth_required":
         return _fail_open_or_block(_auth_hint(snyk_bin), indent=True)
-    manual_hint = f"run `{_shell_quoted(snyk_bin)} secrets test` manually to check"
+    manual_hint = f"run `{quote_for_paste(snyk_bin)} secrets test` manually to check"
     if status == "timeout":
+        # attempts==0 means git operations alone ate the whole deadline
+        # before a scan ever launched.
+        timeout_msg = (
+            "scan timed out before it could start (git operations used the full budget)"
+            if attempts == 0
+            else f"scan timed out after {_plural(attempts, 'attempt')}"
+        )
         return _fail_open_or_block(
-            f"scan timed out after {_scan_timeout():.0f}s",
-            action_hint=manual_hint,
+            timeout_msg,
+            manual_hint,
+            "increase SECRETS_SCAN_TIMEOUT or set it to -1 for no timeout",
             indent=True,
         )
+    if status == "unparseable":
+        return _fail_open_or_block(
+            "scan output could not be parsed",
+            manual_hint,
+            indent=True,
+        )
+    # Only "retries_exhausted" remains -- every attempt failed the same way.
     return _fail_open_or_block(
-        "scan did not complete",
-        action_hint=manual_hint,
+        f"scan did not complete after {_plural(attempts, 'attempt')}",
+        manual_hint,
         indent=True,
     )
 
@@ -187,20 +272,52 @@ def _handle_scan_failure(status: ScanStatus, snyk_bin: str) -> int:
 def _log_summary(
     timer: Timer,
     status: ScanStatus,
-    findings_count: int,
-    *,
-    pre_existing_count: int = 0,
+    added: List[Finding],
+    pre_existing: List[Finding],
+    removed: List[Finding],
 ) -> None:
-    """Prints the closing "done in ..." line for a successful scan only --
-    a failed scan already got its own message from _handle_scan_failure."""
+    """One notice per non-empty category, then the closing "done in ..."
+    line. Only for a successful scan -- a failure logs its own message."""
     timer.mark("end")
-    if status == "success":
-        scan_ms = timer.segment_ms("prereqs_checked", "scan_done")
-        if scan_ms is not None:
-            debug(f"scan took {scan_ms / 1000:.1f}s (total {timer.total_ms() / 1000:.1f}s)")
-        if pre_existing_count:
-            log_cont(pre_existing_notice(pre_existing_count))
-        log_cont(summary_line(timer, findings_count, pre_existing_count=pre_existing_count))
+    if status != "success":
+        return
+    scan_ms = timer.segment_ms("prereqs_checked", "scan_done")
+    if scan_ms is not None:
+        debug(f"scan took {scan_ms / 1000:.1f}s (total {timer.total_ms() / 1000:.1f}s)")
+
+    blocking = [f for f in added if not f.is_ignored]
+    added_ignored = [f for f in added if f.is_ignored]
+    under_review_count = len([f for f in blocking if f.is_under_review])
+    # "Nothing to do" notices are dimmed; cleanup notices are green.
+    categories = [
+        (added_ignored, added_ignored_notice, _ANSI_DIM),
+        (
+            [f for f in pre_existing if not f.is_ignored and not f.is_under_review],
+            pre_existing_notice,
+            _ANSI_DIM,
+        ),
+        (
+            [f for f in pre_existing if f.is_under_review],
+            pre_existing_under_review_notice,
+            _ANSI_DIM,
+        ),
+        ([f for f in pre_existing if f.is_ignored], pre_existing_ignored_notice, _ANSI_DIM),
+        ([f for f in removed if not f.is_ignored], removed_notice, _ANSI_GREEN),
+        ([f for f in removed if f.is_ignored], removed_ignored_notice, _ANSI_GREEN),
+    ]
+    for group, notice, color in categories:
+        if group:
+            log_cont(notice(len(group)), color=color)
+    log_cont(
+        summary_line(
+            timer,
+            len(blocking),
+            pre_existing_count=len(pre_existing),
+            under_review_count=under_review_count,
+            added_ignored_count=len(added_ignored),
+        ),
+        color=_ANSI_BOLD_RED if blocking else _ANSI_GREEN,
+    )
 
 
 @dataclass(frozen=True)
@@ -213,14 +330,40 @@ class ScanScope:
     ranges: LineRanges
     renames: Dict[str, str] = field(default_factory=dict)
     binary_files: List[str] = field(default_factory=list)
+    remote_url: RemoteUrlDecision = field(default_factory=RemoteUrlDecision.unavailable)
+    needs_shell: bool = False
+
+
+_REMOTE_URL_STATUS_LABELS = {
+    "unavailable": "no origin remote configured",
+    "rejected_unsafe": "origin remote unsafe for the resolved Snyk CLI invocation",
+}
+
+
+def _remote_url_debug_label(decision: RemoteUrlDecision) -> str:
+    return decision.url or f"(none -- {_REMOTE_URL_STATUS_LABELS[decision.status]})"
 
 
 def resolve_scan_scope(
-    cwd: Path, *, needs_renames: bool = False
+    cwd: Path, deadline: Optional[float], *, needs_renames: bool = False
 ) -> Tuple[Optional[ScanScope], Optional[int]]:
     """Returns (scope, None) to proceed, or (None, exit_code) to exit
     immediately. `needs_renames` skips the extra `get_rename_map` git call
-    when the resolved strategy has no use for it."""
+    when the resolved strategy has no use for it.
+
+    Deprecated-flag warnings are checked right after `_LOG_FILE` is set --
+    early enough that every later early-return branch (no staged files, a
+    prerequisite failure) still warns a user who's kept a deprecated env
+    var set, but late enough that the warning is actually persisted (log()
+    only appends to the per-repo log once _LOG_FILE is non-None). Only the
+    "not inside a git repository" case (no _LOG_FILE possible at all) misses
+    this warning -- nothing is lost there, since there's nowhere to persist
+    it anyway.
+
+    `deadline` bounds every git call here to the same shared wall-clock
+    budget the scan step uses (see `_run`) -- these calls happen first, so
+    without this they'd add unbounded time on top of the scan's own
+    deadline instead of eating into it."""
     repo_root = find_repo_root(cwd)
 
     if repo_root is None:
@@ -230,7 +373,10 @@ def resolve_scan_scope(
     global _LOG_FILE
     _LOG_FILE = resolve_log_file(str(repo_root))
 
-    staged = get_staged_files(repo_root)
+    for warning in get_deprecated_flag_warnings():
+        log(warning)
+
+    staged = get_staged_files(repo_root, deadline)
     if staged is None:
         log("could not determine staged files; cannot safely scan staged changes")
         return None, EXIT_PREREQ
@@ -238,56 +384,49 @@ def resolve_scan_scope(
         log("no staged files, skipping scan")
         return None, EXIT_OK
 
-    scan_files = resolve_scan_files(staged)
-    if not scan_files:
-        log("no scannable files staged, skipping scan")
-        return None, EXIT_OK
-
-    line_ranges_result = get_added_line_ranges(repo_root)
+    line_ranges_result = get_added_line_ranges(repo_root, deadline)
     if line_ranges_result is None:
         log("could not determine added lines; cannot safely classify staged changes")
         return None, EXIT_PREREQ
     ranges, binary_files = line_ranges_result
 
-    renames = get_rename_map(repo_root) if needs_renames else {}
+    renames = get_rename_map(repo_root, deadline) if needs_renames else {}
+    remote_url = get_remote_url(repo_root, deadline)
     scope = ScanScope(
         repo_root=repo_root,
-        files=scan_files,
+        files=staged,
         ranges=ranges,
         renames=renames,
         binary_files=binary_files,
+        remote_url=remote_url,
     )
     return scope, None
 
 
-def _classify_by_line_range(ctx: ClassificationContext) -> Tuple[List[Finding], List[Finding]]:
+ClassifyResult = Tuple[List[Finding], List[Finding], List[Finding]]  # added, pre_existing, removed
+
+
+def _classify_by_line_range(ctx: ClassificationContext) -> ClassifyResult:
     """The "line" DiffStrategy's classify function."""
     # Explicit annotation: mypy infers Any here otherwise.
-    result: Tuple[List[Finding], List[Finding]] = split_added_vs_pre_existing(
-        ctx.findings, ctx.ranges
-    )
+    result: ClassifyResult = split_added_vs_pre_existing(ctx.findings, ctx.ranges)
     return result
 
 
 @dataclass(frozen=True)
 class DiffStrategy:
-    """A pluggable way to classify findings as added-vs-pre-existing. New
-    strategy: a `classify` function plus one `_DIFF_STRATEGIES` entry."""
+    """A pluggable way to classify findings. New strategy: a `classify`
+    function plus one `_DIFF_STRATEGIES` entry."""
 
     name: str
     needs_baseline_scan: bool
-    classify: Callable[[ClassificationContext], Tuple[List[Finding], List[Finding]]]
+    classify: Callable[[ClassificationContext], ClassifyResult]
 
 
 _DIFF_STRATEGIES: Dict[str, DiffStrategy] = {
     "line": DiffStrategy("line", needs_baseline_scan=False, classify=_classify_by_line_range),
     "content": DiffStrategy("content", needs_baseline_scan=True, classify=classify_by_content),
 }
-
-
-def _resolve_diff_strategy() -> DiffStrategy:
-    name = os.environ.get("SECRETS_DIFF_STRATEGY", DEFAULT_DIFF_STRATEGY).lower()
-    return _DIFF_STRATEGIES.get(name, _DIFF_STRATEGIES[DEFAULT_DIFF_STRATEGY])
 
 
 def parse_cli_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -317,56 +456,34 @@ def _scan_prepared_workspace(
     current_workspace: Path,
     workspace_source: str,
     snyk_bin: str,
-    timeout: float,
+    deadline: Optional[float],
     timer: Timer,
-) -> Tuple[ScanStatus, List[Finding], List[Finding]]:
+) -> Tuple[ScanStatus, int, List[Finding], List[Finding], List[Finding]]:
     _ensure_not_repo_workspace(scope, current_workspace)
     debug(f"scan workspace: {current_workspace} ({workspace_source})")
 
     if not strategy.needs_baseline_scan:
-        return _scan_without_baseline(scope, strategy, current_workspace, snyk_bin, timeout, timer)
-    return _scan_with_baseline(scope, strategy, current_workspace, snyk_bin, timeout, timer)
+        return _scan_without_baseline(scope, strategy, current_workspace, snyk_bin, deadline, timer)
+    return _scan_with_baseline(scope, strategy, current_workspace, snyk_bin, deadline, timer)
 
 
 def _scan_and_classify(
-    scope: ScanScope, strategy: DiffStrategy, snyk_bin: str, timeout: float, timer: Timer
-) -> Tuple[ScanStatus, List[Finding], List[Finding]]:
+    scope: ScanScope, strategy: DiffStrategy, snyk_bin: str, deadline: Optional[float], timer: Timer
+) -> Tuple[ScanStatus, int, List[Finding], List[Finding], List[Finding]]:
     """Runs whichever scan(s) `strategy` needs and classifies the
-    findings. A non-"success" status means empty, meaningless lists."""
-    with staged_snapshot(scope.repo_root, scope.files) as snapshot_dir:
-        if snapshot_dir is not None:
-            return _scan_prepared_workspace(
-                scope, strategy, Path(snapshot_dir), "staged snapshot", snyk_bin, timeout, timer
-            )
+    findings. A non-"success" status means empty, meaningless lists. The
+    `int` is how many attempts the (possibly retried) current-workspace
+    scan actually took.
 
-        if not _fallback_to_working_dir():
-            raise PrerequisiteFailure(
-                "could not snapshot staged content (git checkout-index failed); "
-                "cannot safely scan staged changes",
-                indent=True,
-            )
-
-        log_cont(
-            "could not snapshot staged content (git checkout-index failed); "
-            "scanning the working tree because SECRETS_FALLBACK_TO_WORKING_DIR=1 "
-            "-- results may not match what's staged"
+    Raises `SnapshotError` (not `PrerequisiteFailure`) if the staged
+    snapshot itself can't be prepared -- that's a runtime/environment
+    failure (disk full, git subprocess issue), not a case where we don't
+    know what to scan, so it should respect the user's fail-open/closed
+    choice like any other scan failure. The caller (`_run`) handles it."""
+    with staged_snapshot(scope.repo_root, scope.files, deadline) as snapshot_dir:
+        return _scan_prepared_workspace(
+            scope, strategy, snapshot_dir, "staged snapshot", snyk_bin, deadline, timer
         )
-        with working_tree_snapshot(scope.repo_root, scope.files) as fallback_dir:
-            if fallback_dir is None:
-                raise PrerequisiteFailure(
-                    "could not snapshot working-tree fallback content; "
-                    "cannot safely scan staged changes",
-                    indent=True,
-                )
-            return _scan_prepared_workspace(
-                scope,
-                strategy,
-                Path(fallback_dir),
-                "working-tree fallback snapshot",
-                snyk_bin,
-                timeout,
-                timer,
-            )
 
 
 def _scan_without_baseline(
@@ -374,22 +491,26 @@ def _scan_without_baseline(
     strategy: DiffStrategy,
     current_workspace: Path,
     snyk_bin: str,
-    timeout: float,
+    deadline: Optional[float],
     timer: Timer,
-) -> Tuple[ScanStatus, List[Finding], List[Finding]]:
+) -> Tuple[ScanStatus, int, List[Finding], List[Finding], List[Finding]]:
     """A strategy with no baseline scan (e.g. "line"): one scan, classified
     by `strategy.classify` directly against the diff's own added-line
     ranges."""
     debug(f"running current scan: workspace={current_workspace} target=.")
-    status, findings = run_secrets_scan(current_workspace, snyk_bin, timeout)
+    invocation = ScanInvocation(
+        snyk_bin=snyk_bin, remote_url=scope.remote_url.url, needs_shell=scope.needs_shell
+    )
+    attempt = run_secrets_scan_with_retries(current_workspace, invocation, deadline)
+    status, findings = attempt.status, attempt.findings
     timer.mark("scan_done")
     if status != "success":
-        return status, [], []
+        return status, attempt.attempts, [], [], []
     ctx = ClassificationContext(
         findings=findings, ranges=scope.ranges, current_snapshot_dir=current_workspace
     )
-    added, pre_existing = strategy.classify(ctx)
-    return status, added, pre_existing
+    added, pre_existing, removed = strategy.classify(ctx)
+    return status, attempt.attempts, added, pre_existing, removed
 
 
 def _scan_with_baseline(
@@ -397,24 +518,32 @@ def _scan_with_baseline(
     strategy: DiffStrategy,
     current_workspace: Path,
     snyk_bin: str,
-    timeout: float,
+    deadline: Optional[float],
     timer: Timer,
-) -> Tuple[ScanStatus, List[Finding], List[Finding]]:
+) -> Tuple[ScanStatus, int, List[Finding], List[Finding], List[Finding]]:
     """A strategy that needs a baseline scan (e.g. "content"): also scans
     HEAD's version of the same files (concurrently, so no added wall-clock
     latency) before handing both result sets to `strategy.classify`."""
     baseline_lookup_paths = [scope.renames.get(f, f) for f in scope.files]
-    with ref_snapshot(scope.repo_root, "HEAD", baseline_lookup_paths) as (
+    invocation = ScanInvocation(
+        snyk_bin=snyk_bin, remote_url=scope.remote_url.url, needs_shell=scope.needs_shell
+    )
+    with ref_snapshot(scope.repo_root, "HEAD", baseline_lookup_paths, deadline) as (
         baseline_dir,
         baseline_files,
+        baseline_failed,
     ):
         if baseline_dir is None:
             # Nothing to compare against; classify_by_content degrades to
             # line-diff for an empty baseline_files.
-            debug("baseline scan skipped: no scoped files exist at HEAD")
+            if baseline_failed:
+                baseline_status = "unavailable"
+            else:
+                debug("baseline scan skipped: no scoped files exist at HEAD")
+                baseline_status = "success"
             debug(f"running current scan: workspace={current_workspace} target=.")
-            status, findings = run_secrets_scan(current_workspace, snyk_bin, timeout)
-            baseline_status: ScanStatus = "success"
+            current_attempt = run_secrets_scan_with_retries(current_workspace, invocation, deadline)
+            status, findings = current_attempt.status, current_attempt.findings
             baseline_findings: List[Finding] = []
         else:
             _ensure_not_repo_workspace(scope, baseline_dir)
@@ -423,21 +552,27 @@ def _scan_with_baseline(
                 f"running concurrent scans: current_workspace={current_workspace} "
                 f"baseline_workspace={baseline_dir} target=."
             )
-            (status, findings), (baseline_status, baseline_findings) = run_concurrent_scans(
+            current_attempt, baseline_attempt = run_concurrent_scans(
                 current_workspace,
                 baseline_dir,
-                snyk_bin,
-                timeout,
+                invocation,
+                deadline,
             )
+            status, findings = current_attempt.status, current_attempt.findings
+            baseline_status, baseline_findings = baseline_attempt.status, baseline_attempt.findings
         timer.mark("scan_done")
         if status != "success":
-            return status, [], []
+            return status, current_attempt.attempts, [], [], []
 
         effective_strategy = strategy
         effective_baseline_dir = baseline_dir
         effective_baseline_files = baseline_files
         if baseline_status != "success":
-            debug(f"baseline scan {baseline_status}; using line-diff classification for this run")
+            log_cont(
+                f"baseline scan {baseline_status}; falling back to line-diff classification "
+                "(weaker detection, won't report removed secrets)",
+                color=_ANSI_DIM,
+            )
             effective_strategy = _DIFF_STRATEGIES["line"]
             effective_baseline_dir = None
             effective_baseline_files = set()
@@ -451,8 +586,8 @@ def _scan_with_baseline(
             baseline_files=effective_baseline_files,
             renames=scope.renames,
         )
-        added, pre_existing = effective_strategy.classify(ctx)
-        return status, added, pre_existing
+        added, pre_existing, removed = effective_strategy.classify(ctx)
+        return status, current_attempt.attempts, added, pre_existing, removed
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -480,8 +615,23 @@ def main(argv: Optional[List[str]] = None) -> int:
 def _run() -> int:
     timer = Timer()
 
-    strategy = _resolve_diff_strategy()
-    scope, early_exit = resolve_scan_scope(Path.cwd(), needs_renames=strategy.needs_baseline_scan)
+    timeout = _scan_timeout()
+    # A single process-wide monotonic clock, computed before any git or scan
+    # work starts, so that work (not just the snyk subprocess itself) shares
+    # one wall-clock budget instead of each having its own separate timeout
+    # on top. Safe to read from multiple threads later (see
+    # run_concurrent_scans): time.monotonic() isn't perturbed by wall-clock
+    # adjustments, and reading it needs no extra locking.
+    #
+    # None (SECRETS_SCAN_TIMEOUT=-1) means no deadline at all -- every git
+    # call still falls back to its own flat GIT_TIMEOUT, but nothing here
+    # imposes an overall wall-clock ceiling.
+    deadline = None if timeout is None else time.monotonic() + timeout
+
+    strategy = _DIFF_STRATEGIES["content"]
+    scope, early_exit = resolve_scan_scope(
+        Path.cwd(), deadline, needs_renames=strategy.needs_baseline_scan
+    )
     if early_exit is not None:
         return early_exit
     if scope is None:
@@ -492,6 +642,18 @@ def _run() -> int:
     snyk_bin = find_snyk_binary()
     if snyk_bin is None:
         return _fail_open_or_block(_cli_not_found_message())
+
+    # Decided once, right here: whether this run's remote_url is safe to
+    # send anywhere (the scan's --remote-repo-url, the printed ignore
+    # hint) depends on whether the resolved snyk_bin needs a shell at all
+    # (see lib.proc.needs_shell) -- not known until now. Every consumer
+    # from this point on reads the same already-decided scope.remote_url.
+    shell_needed = needs_shell(snyk_bin)
+    remote_url = scope.remote_url
+    if remote_url.url and shell_needed and not is_safe_for_shell(remote_url.url):
+        remote_url = remote_url.rejected()
+    scope = replace(scope, remote_url=remote_url, needs_shell=shell_needed)
+
     # Warned once here, not in the resolver: that runs per scan thread.
     stale = stale_sidecar_pin()
     if stale:
@@ -500,10 +662,9 @@ def _run() -> int:
         return _fail_open_or_block(_auth_hint(snyk_bin))
     timer.mark("prereqs_checked")
 
-    timeout = _scan_timeout()
     log(
-        f"Scanning {_plural(len(scope.files), 'staged file')} for secrets, up to "
-        f"{timeout:.0f}s... (bypass with `git commit --no-verify`)"
+        f"Scanning {_plural(len(scope.files), 'staged file')} for secrets... "
+        "(bypass with `git commit --no-verify`)"
     )
     if scope.binary_files:
         log_cont(
@@ -515,26 +676,38 @@ def _run() -> int:
         f"scan scope: {_plural(len(scope.files), 'file')}, "
         f"{_plural(len(scope.binary_files), 'binary file')}"
     )
+    debug(f"remote-repo-url: {_remote_url_debug_label(scope.remote_url)}")
 
-    status, added, pre_existing = _scan_and_classify(scope, strategy, snyk_bin, timeout, timer)
-
-    if status != "success":
-        exit_code = _handle_scan_failure(status, snyk_bin)
-        _log_summary(timer, status, 0)
+    try:
+        status, attempts, added, pre_existing, removed = _scan_and_classify(
+            scope, strategy, snyk_bin, deadline, timer
+        )
+    except SnapshotError as e:
+        exit_code = _fail_open_or_block(str(e), indent=True)
+        _log_summary(timer, "error", [], [], [])
         return exit_code
 
-    blocking = filter_by_severity(added)
-    timer.mark("filtered")
+    if status != "success":
+        exit_code = _handle_scan_failure(status, attempts, snyk_bin)
+        _log_summary(timer, status, [], [], [])
+        return exit_code
+
+    blocking = [f for f in added if not f.is_ignored]
+    added_ignored = [f for f in added if f.is_ignored]
 
     exit_code = EXIT_BLOCK if blocking else EXIT_OK
-    _log_summary(
-        timer,
-        status,
-        len(blocking),
-        pre_existing_count=len(pre_existing),
-    )
+    _log_summary(timer, status, added, pre_existing, removed)
     if blocking:
-        print_findings(blocking)
+        print_findings(blocking, scope.remote_url.url)
+    if added_ignored:
+        if blocking:
+            # Mark the boundary, or "3 blocking" next to 4 printed lines
+            # reads as a contradiction.
+            print(
+                _paint("  (not blocking -- already covered by an existing ignore)", _ANSI_DIM),
+                file=sys.stderr,
+            )
+        print_findings(added_ignored, scope.remote_url.url, dim=True)
 
     return exit_code
 

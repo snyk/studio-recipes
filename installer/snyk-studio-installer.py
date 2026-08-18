@@ -14,13 +14,14 @@ Usage:
     python snyk-studio-installer.py [options]
 
 Options:
-    --profile <name>                           Installation profile (default, minimal, experimental)
+    --profile <name>                           Installation profile (default, minimal, experimental, ads)
     --ade <cursor|claude|gemini|windsurf|kiro> Target specific ADE (auto-detect if omitted)
     --workspace <path>                         Workspace root for workspace-scoped recipes
                                                (e.g. commit-time hooks)
                                                (defaults to the enclosing git repo; skipped if neither)
     --dry-run                                  Show what would be installed without making changes
-    --uninstall                                Remove Snyk recipes from detected ADEs and any resolved workspace
+    --uninstall                                Remove all recipes managed by this installer from detected
+                                               ADEs, git-global scope, and any resolved workspace
     --verify                                   Verify installed files and merged configs match manifest
     --read-only                                With --verify, only report prerequisite versions instead
                                                of offering to install/upgrade them
@@ -31,8 +32,8 @@ Options:
                                                Node.js/npm/nvm checks. If omitted, uses a suitable
                                                PATH Snyk CLI or asks to manage Snyk via npm.
     --recipes <a,b,c>                          Install exactly these recipes instead of the
-                                               profile's own list (requires
-                                               --profile experimental)
+                                               profile's own list (unavailable with --profile
+                                               default or --profile minimal)
     --control-identifier <id>                  Machine/control identifier to record
     --diag-dump                                Create a diagnostic zip for Snyk support and print its path.
     --out-file <path>                          Output path for the diagnostic zip (default: timestamped zip in cwd).
@@ -83,8 +84,8 @@ WORKSPACE = "workspace"
 GIT_GLOBAL = "git-global"
 SECRETS_HOOK_RECIPE_ID = "secrets-precommit-hook"
 SECRETS_HOOK_GLOBAL_RECIPE_ID = "secrets-precommit-hook-global"
-# The only profile under which --recipes may name an explicit selection.
-RECIPE_SELECTION_PROFILE = "experimental"
+# Profiles with fixed recipe sets; other profiles may be filtered with --recipes.
+STATIC_RECIPE_SELECTION_PROFILES = ("default", "minimal")
 
 _IS_WINDOWS = sys.platform == "win32"
 _SNYK_VERSION_RE = re.compile(r"(\d+\.\d+\.\d+)")
@@ -217,7 +218,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--uninstall",
         action="store_true",
-        help="Remove Snyk recipes from detected ADEs and any resolved workspace",
+        help="Remove all recipes managed by this installer from detected ADEs, git-global scope, "
+        "and any resolved workspace",
     )
     parser.add_argument(
         "--verify",
@@ -275,7 +277,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="A,B,C",
         help=(
             "Comma-separated recipe identifiers to install in place of the "
-            f"profile's own recipe list. Requires --profile {RECIPE_SELECTION_PROFILE}; "
+            "profile's own recipe list. Unavailable with "
+            f"{' or '.join('--profile ' + p for p in STATIC_RECIPE_SELECTION_PROFILES)}; "
             "run --list to see the available identifiers."
         ),
     )
@@ -326,6 +329,9 @@ def _parse_recipe_selection(
     if len(values) > 1:
         parser.error("--recipes may be given only once; pass one comma-separated list")
 
+    if not values[0].strip():
+        return []
+
     selection: list[str] = []
     for element in values[0].split(","):
         name = element.strip()
@@ -342,7 +348,7 @@ def notify_unused_recipe_selection(args: argparse.Namespace) -> None:
     These modes never validate the selection, so without the notice a typed
     flag would be swallowed in silence.
     """
-    if not args.recipes:
+    if args.recipes is None:
         return
     modes = [
         flag
@@ -824,16 +830,18 @@ def validate_recipe_selection(
 ) -> None:
     """Reject an explicit ``--recipes`` selection the manifest cannot satisfy.
 
-    The profile gate is checked before name eligibility: opt-in recipes belong
-    to no profile, so the eligibility rule alone would make them nameable under
-    every profile.
+    Profiles with fixed recipe sets are rejected before name eligibility. Opt-in
+    recipes belong to no profile, so the eligibility rule alone would make them
+    nameable under every profile.
     """
-    if not selection:
+    if selection is None:
         return
 
-    if profile != RECIPE_SELECTION_PROFILE:
+    if profile in STATIC_RECIPE_SELECTION_PROFILES:
         print(
-            f"  Error: --recipes requires --profile {RECIPE_SELECTION_PROFILE} (got '{profile}').",
+            "  Error: --recipes cannot be used with "
+            f"{' or '.join('--profile ' + p for p in STATIC_RECIPE_SELECTION_PROFILES)} "
+            f"(got '{profile}').",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -3535,11 +3543,11 @@ def main() -> None:
     validate_recipe_selection(manifest, args.profile, args.recipes)
     recipes = manifest.resolve_recipes(args.profile, args.recipes)
 
-    # Both exits must precede the stale-conflict cleanup below, which under -y
-    # uninstalls without prompting -- failing after it would leave the machine
-    # with fewer recipes than it started with. Emptiness is checked first
-    # because `all()` over an empty list is True.
+    # An empty profile is invalid; an explicit empty selection is a no-op.
     if not recipes:
+        if args.recipes == []:
+            print("  No recipes selected; nothing to install.")
+            return
         print(
             "  Error: recipe resolution produced no recipes to install.",
             file=sys.stderr,

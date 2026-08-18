@@ -457,6 +457,17 @@
         "mcp-config"
       ]
     },
+    "ads": {
+      "recipes": [
+        "sai-hooks-async",
+        "snyk-fix-command",
+        "snyk-batch-fix-command",
+        "snyk-fix-skill",
+        "secure-dependency-health-check-skill",
+        "mcp-config",
+        "secrets-precommit-hook-global"
+      ]
+    },
     "minimal": {
       "recipes": [
         "sai-hooks-async",
@@ -470,7 +481,8 @@
         "snyk-batch-fix-command",
         "snyk-fix-skill",
         "secure-dependency-health-check-skill",
-        "mcp-config"
+        "mcp-config",
+        "secrets-precommit-hook-global"
       ]
     }
   }

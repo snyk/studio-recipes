@@ -1076,9 +1076,12 @@ class TestParseArgs:
         args = installer.parse_args(["--recipes", "secure-at-commit,secure-at-commit"])
         assert args.recipes == ["secure-at-commit"]
 
-    def test_recipes_rejects_empty_value(self):
-        with pytest.raises(SystemExit):
-            installer.parse_args(["--recipes", ""])
+    def test_recipes_accepts_empty_value_as_empty_selection(self):
+        args = installer.parse_args(["--recipes", ""])
+        assert args.recipes == []
+
+        equals_args = installer.parse_args(["--recipes="])
+        assert equals_args.recipes == []
 
     def test_recipes_rejects_empty_element(self):
         with pytest.raises(SystemExit):
@@ -2035,6 +2038,13 @@ class TestManifest:
         assert "snyk-fix-command" in recipes
         assert len(recipes) == 6
 
+    def test_ads_profile_is_a_superset_of_default_with_global_secrets(self, manifest):
+        default = set(manifest.resolve_recipes("default"))
+        ads = set(manifest.resolve_recipes("ads"))
+
+        assert default <= ads
+        assert "secrets-precommit-hook-global" in ads
+
     def test_resolve_minimal_profile(self, manifest):
         recipes = manifest.resolve_recipes("minimal")
         assert recipes == ["sai-hooks-async", "mcp-config"]
@@ -2044,11 +2054,15 @@ class TestManifest:
         assert "secure-at-commit" in recipes
         assert "sai-hooks-async" not in recipes
         assert "secrets-precommit-hook" not in recipes
-        assert len(recipes) == 6
+        assert "secrets-precommit-hook-global" in recipes
+        assert len(recipes) == 7
 
     def test_selection_replaces_profile_list(self, manifest):
         recipes = manifest.resolve_recipes("experimental", ["secrets-precommit-hook"])
         assert recipes == ["secrets-precommit-hook"]
+
+    def test_empty_selection_replaces_profile_list(self, manifest):
+        assert manifest.resolve_recipes("ads", []) == []
 
     def test_selection_of_both_commit_hooks_follows_manifest_order(self, manifest):
         # Typed in the opposite order to the manifest's declaration order.
@@ -2084,10 +2098,7 @@ class TestManifest:
     def test_unprofiled_recipes_is_pinned(self, manifest):
         # A recipe left out of every profile silently becomes user-selectable,
         # so adding one has to be a deliberate decision rather than an omission.
-        assert manifest.unprofiled_recipes() == [
-            "secrets-precommit-hook",
-            "secrets-precommit-hook-global",
-        ]
+        assert manifest.unprofiled_recipes() == ["secrets-precommit-hook"]
 
     def test_unprofiled_recipes_empty_when_a_profile_lists_everything(self, manifest, monkeypatch):
         monkeypatch.setitem(manifest.profiles, "everything", {"recipes": ["*"]})
@@ -2095,7 +2106,7 @@ class TestManifest:
 
     def test_nameable_recipes_under_experimental(self, manifest):
         # Every recipe but the Secure at Inception hooks: the profile's own
-        # members plus the unprofiled secrets hooks (local + global).
+        # members plus the unprofiled local secrets hook.
         assert manifest.nameable_recipes("experimental") == [
             "snyk-fix-command",
             "snyk-batch-fix-command",
@@ -2398,26 +2409,49 @@ class TestValidateRecipeSelection:
     def test_no_selection_is_always_accepted(self, manifest):
         installer.validate_recipe_selection(manifest, "default", None)
         installer.validate_recipe_selection(manifest, "experimental", None)
+        installer.validate_recipe_selection(manifest, "ads", None)
+
+    def test_empty_selection_is_accepted_for_selection_profiles(self, manifest):
+        installer.validate_recipe_selection(manifest, "experimental", [])
+        installer.validate_recipe_selection(manifest, "ads", [])
+
+    def test_empty_selection_still_requires_a_selection_profile(self, manifest, capsys):
+        self._validate(manifest, "default", [])
+        assert (
+            "cannot be used with --profile default or --profile minimal" in capsys.readouterr().err
+        )
 
     def test_eligible_selection_is_accepted(self, manifest):
         installer.validate_recipe_selection(
             manifest, "experimental", ["secure-at-commit", "secrets-precommit-hook"]
         )
 
-    def test_non_experimental_profile_rejects_selection(self, manifest, capsys):
-        self._validate(manifest, "default", ["secure-at-commit"])
-        assert "--recipes requires --profile experimental" in capsys.readouterr().err
+    @pytest.mark.parametrize("profile", ["default", "minimal"])
+    def test_static_profile_rejects_selection(self, manifest, profile, capsys):
+        self._validate(manifest, profile, ["secure-at-commit"])
+        assert (
+            "--recipes cannot be used with --profile default or --profile minimal"
+            in capsys.readouterr().err
+        )
 
     def test_gate_precedes_eligibility(self, manifest, capsys):
         # secrets-precommit-hook belongs to no profile, so it satisfies the
         # eligibility rule everywhere; only the gate can reject it here.
         self._validate(manifest, "default", ["secrets-precommit-hook"])
         err = capsys.readouterr().err
-        assert "--recipes requires --profile experimental" in err
+        assert "--recipes cannot be used with --profile default or --profile minimal" in err
         assert "not selectable" not in err
+
+    def test_future_profile_accepts_selection(self, manifest):
+        manifest.profiles["future"] = {"recipes": ["mcp-config"]}
+
+        installer.validate_recipe_selection(manifest, "future", ["mcp-config"])
 
     def test_profile_member_is_accepted(self, manifest):
         installer.validate_recipe_selection(manifest, "experimental", ["mcp-config"])
+
+    def test_ads_profile_member_is_accepted(self, manifest):
+        installer.validate_recipe_selection(manifest, "ads", ["secrets-precommit-hook-global"])
 
     def test_sai_hooks_not_nameable_under_experimental(self, manifest, capsys):
         # sai-hooks-async belongs to default and minimal but not experimental,
@@ -2528,8 +2562,14 @@ class TestRecipeSelectionInMain:
         monkeypatch.setattr(installer, "print_banner", lambda: None)
         monkeypatch.setattr(installer, "install_recipe", lambda *a, **kw: None)
         monkeypatch.setattr(installer, "install_workspace_recipe", lambda *a, **kw: None)
+        monkeypatch.setattr(installer, "install_git_global_recipe", lambda *a, **kw: None)
         monkeypatch.setattr(installer, "verify_recipe", lambda *a, **kw: True)
         monkeypatch.setattr(installer, "verify_workspace_recipe", lambda *a, **kw: True)
+        monkeypatch.setattr(installer, "verify_git_global_recipe", lambda *a, **kw: True)
+        monkeypatch.setattr(installer, "_has_installed_git_global_hook_files", lambda *a: False)
+        monkeypatch.setattr(
+            installer, "_has_installed_git_global_hook_integration", lambda *a: False
+        )
         # The ADE conflict sweeps read the real home directory and shell out to
         # the Snyk CLI; neither is under test here.
         monkeypatch.setattr(manifest, "are_extension_settings_conflicting", lambda ade: [])
@@ -2657,6 +2697,20 @@ class TestRecipeSelectionInMain:
         assert "produced no recipes" in err
         assert "workspace-scoped" not in err
 
+    def test_explicit_empty_selection_installs_no_recipes(self, monkeypatch, manifest, capsys):
+        args = self._args(profile="ads", recipes=[])
+        self._stub_main(monkeypatch, manifest, args)
+
+        monkeypatch.setattr(
+            installer,
+            "get_target_ades",
+            lambda *a, **kw: pytest.fail("empty selection must not detect ADEs"),
+        )
+
+        installer.main()
+
+        assert "No recipes selected; nothing to install." in capsys.readouterr().out
+
     def test_aborted_run_leaves_a_stale_conflict_in_place(self, monkeypatch, manifest, capsys):
         # Under -y the stale-conflict block uninstalls without prompting, so the
         # guards above have to fire before it ever runs.
@@ -2687,11 +2741,14 @@ class TestRecipeSelectionInMain:
 
         assert "skipping workspace-scoped recipes: secure-at-commit" in capsys.readouterr().out
 
-    def test_git_global_only_selection_does_not_require_an_ade(self, monkeypatch, manifest, capsys):
+    @pytest.mark.parametrize("profile", ["experimental", "ads"])
+    def test_git_global_only_selection_does_not_require_an_ade(
+        self, monkeypatch, manifest, profile
+    ):
         """A pure git-global recipe selection must install even when this
         machine has no ADE and none was passed - get_target_ades must never
         even be called."""
-        args = self._args(recipes=["secrets-precommit-hook-global"], ade=None)
+        args = self._args(profile=profile, recipes=["secrets-precommit-hook-global"], ade=None)
         self._stub_main(monkeypatch, manifest, args)
 
         def _must_not_be_called(*_a, **_kw):

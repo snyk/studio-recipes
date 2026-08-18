@@ -302,7 +302,8 @@
             { "src": "guardrail_directives/secrets_at_commit/lib/snyk_cli.py", "dest": ".snyk-studio/components/scripts/lib/snyk_cli.py" },
             { "src": "guardrail_directives/secrets_at_commit/lib/report.py", "dest": ".snyk-studio/components/scripts/lib/report.py" },
             { "src": "guardrail_directives/secrets_at_commit/lib/timing.py", "dest": ".snyk-studio/components/scripts/lib/timing.py" },
-            { "src": "guardrail_directives/secrets_at_commit/lib/persistent_log.py", "dest": ".snyk-studio/components/scripts/lib/persistent_log.py" }
+            { "src": "guardrail_directives/secrets_at_commit/lib/persistent_log.py", "dest": ".snyk-studio/components/scripts/lib/persistent_log.py" },
+            { "src": "guardrail_directives/secrets_at_commit/lib/deprecated_flags.py", "dest": ".snyk-studio/components/scripts/lib/deprecated_flags.py" }
           ],
           "pre_commit_integration": {
             "tag": "snyk-secrets-at-commit",
@@ -331,7 +332,8 @@
             { "src": "guardrail_directives/secrets_at_commit/lib/snyk_cli.py", "dest": "secrets_at_commit/lib/snyk_cli.py" },
             { "src": "guardrail_directives/secrets_at_commit/lib/report.py", "dest": "secrets_at_commit/lib/report.py" },
             { "src": "guardrail_directives/secrets_at_commit/lib/timing.py", "dest": "secrets_at_commit/lib/timing.py" },
-            { "src": "guardrail_directives/secrets_at_commit/lib/persistent_log.py", "dest": "secrets_at_commit/lib/persistent_log.py" }
+            { "src": "guardrail_directives/secrets_at_commit/lib/persistent_log.py", "dest": "secrets_at_commit/lib/persistent_log.py" },
+            { "src": "guardrail_directives/secrets_at_commit/lib/deprecated_flags.py", "dest": "secrets_at_commit/lib/deprecated_flags.py" }
           ],
           "pre_commit_integration": {
             "tag": "snyk-secrets-at-commit",

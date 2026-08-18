@@ -57,7 +57,22 @@ def extract_finding_text(snapshot_dir: Path, file_path: str, finding: Finding) -
     return "\n".join([first, *middle, last])
 
 
-def _baseline_text_index(ctx: ClassificationContext) -> Dict[str, Set[str]]:
+# id(finding) is a safe cache key: each Finding is only ever extracted
+# against one snapshot dir, so this lets "removed" reuse text the main
+# pass already read instead of re-reading the same file.
+_TextCache = Dict[int, Optional[str]]
+
+
+def _cached_extract(
+    snapshot_dir: Path, file_path: str, finding: Finding, cache: _TextCache
+) -> Optional[str]:
+    key = id(finding)
+    if key not in cache:
+        cache[key] = extract_finding_text(snapshot_dir, file_path, finding)
+    return cache[key]
+
+
+def _baseline_text_index(ctx: ClassificationContext, cache: _TextCache) -> Dict[str, Set[str]]:
     """Maps rule id -> matched texts seen anywhere in the baseline scan
     (not scoped per file -- an identical secret is "known" regardless of
     which file it was in)."""
@@ -65,15 +80,39 @@ def _baseline_text_index(ctx: ClassificationContext) -> Dict[str, Set[str]]:
     if ctx.baseline_snapshot_dir is None:
         return index
     for bf in ctx.baseline_findings:
-        text = extract_finding_text(ctx.baseline_snapshot_dir, bf.file_path, bf)
+        text = _cached_extract(ctx.baseline_snapshot_dir, bf.file_path, bf, cache)
         if text is not None:
             index.setdefault(bf.id, set()).add(text)
     return index
 
 
-def classify_by_content(ctx: ClassificationContext) -> Tuple[List[Finding], List[Finding]]:
-    """The "content" DiffStrategy's classify function."""
-    baseline_text_by_rule = _baseline_text_index(ctx)
+def _current_text_index(
+    ctx: ClassificationContext, cache: _TextCache
+) -> Tuple[Dict[str, Set[str]], Set[str]]:
+    """Mirror of `_baseline_text_index`, over the current scan instead.
+    Also returns the rule ids of current findings whose text couldn't be
+    extracted (e.g. a malformed location) -- those findings still went
+    through fallback classification in the main loop above and may well
+    still be present, just invisible to this text index, so a baseline
+    finding sharing that rule id can't be confidently called "removed"."""
+    index: Dict[str, Set[str]] = {}
+    unconfirmed_rule_ids: Set[str] = set()
+    for f in ctx.findings:
+        text = _cached_extract(ctx.current_snapshot_dir, f.file_path, f, cache)
+        if text is not None:
+            index.setdefault(f.id, set()).add(text)
+        else:
+            unconfirmed_rule_ids.add(f.id)
+    return index, unconfirmed_rule_ids
+
+
+def classify_by_content(
+    ctx: ClassificationContext,
+) -> Tuple[List[Finding], List[Finding], List[Finding]]:
+    """The "content" DiffStrategy's classify function. `removed` is a
+    baseline finding whose text no longer appears in the current scan."""
+    text_cache: _TextCache = {}
+    baseline_text_by_rule = _baseline_text_index(ctx, text_cache)
 
     added: List[Finding] = []
     pre_existing: List[Finding] = []
@@ -88,7 +127,7 @@ def classify_by_content(ctx: ClassificationContext) -> Tuple[List[Finding], List
             fallback.append(f)
             continue
 
-        current_text = extract_finding_text(ctx.current_snapshot_dir, f.file_path, f)
+        current_text = _cached_extract(ctx.current_snapshot_dir, f.file_path, f, text_cache)
         if current_text is None:
             fallback.append(f)
             continue
@@ -99,8 +138,22 @@ def classify_by_content(ctx: ClassificationContext) -> Tuple[List[Finding], List
             added.append(f)
 
     if fallback:
-        fallback_added, fallback_pre_existing = split_added_vs_pre_existing(fallback, ctx.ranges)
+        fallback_added, fallback_pre_existing, _ = split_added_vs_pre_existing(fallback, ctx.ranges)
         added.extend(fallback_added)
         pre_existing.extend(fallback_pre_existing)
 
-    return added, pre_existing
+    removed: List[Finding] = []
+    if ctx.baseline_snapshot_dir is not None:
+        current_text_by_rule, unconfirmed_rule_ids = _current_text_index(ctx, text_cache)
+        for bf in ctx.baseline_findings:
+            if bf.id in unconfirmed_rule_ids:
+                # A current finding sharing this rule id fell back to
+                # line-range classification (its own text couldn't be
+                # extracted) -- it may be the very secret bf matches, so
+                # bf can't be confidently called "removed".
+                continue
+            text = _cached_extract(ctx.baseline_snapshot_dir, bf.file_path, bf, text_cache)
+            if text is not None and text not in current_text_by_rule.get(bf.id, set()):
+                removed.append(bf)
+
+    return added, pre_existing, removed

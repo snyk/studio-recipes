@@ -9,6 +9,7 @@ commits against the same repo don't clobber each other.
 
 import os
 import sys
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Generator, Iterator
@@ -44,7 +45,14 @@ def _file_lock_windows(lock_path: str) -> Generator[None, None, None]:
         fd.close()
 
 
+_LOCK_TIMEOUT_SECONDS = 5.0
+_LOCK_POLL_INTERVAL_SECONDS = 0.05
+
+
 def _file_lock_unix(lock_path: str) -> Generator[None, None, None]:
+    """A plain blocking `flock` has no timeout, unlike Windows' `LK_LOCK`
+    -- gives up past `_LOCK_TIMEOUT_SECONDS` and proceeds without the
+    lock rather than risk hanging a commit."""
     try:
         import fcntl
     except ImportError:
@@ -53,10 +61,26 @@ def _file_lock_unix(lock_path: str) -> Generator[None, None, None]:
 
     fd = open(lock_path, "w")
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                # The only retryable case: another process holds the lock.
+                # Any other OSError (e.g. flock unsupported on this
+                # filesystem) will never clear no matter how long we wait.
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(_LOCK_POLL_INTERVAL_SECONDS)
+            except OSError:
+                break
         yield
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
         fd.close()
 
 

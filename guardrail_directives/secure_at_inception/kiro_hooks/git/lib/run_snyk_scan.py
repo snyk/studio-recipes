@@ -17,13 +17,14 @@ Usage:
     from run_snyk_scan import run_sast_scan, run_sca_scan
 """
 
+from __future__ import annotations
+
 import json
 import os
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
 
 SNYK_STUDIO_VERSION = "1.0.6"
 SNYK_CLI_NOT_FOUND_MESSAGE = (
@@ -55,7 +56,7 @@ def _snyk_config_path() -> str:
     return os.path.join(os.path.expanduser("~"), ".config", "configstore", "snyk.json")
 
 
-def check_snyk_auth() -> Optional[str]:
+def check_snyk_auth() -> str | None:
     """Return the API token (or an oauth sentinel) when authenticated, else None.
 
     Checks SNYK_TOKEN first, then the Snyk CLI config file for a stored API
@@ -88,7 +89,7 @@ def _debug(message: str) -> None:
         print(f"  [debug] {message}", file=sys.stderr)
 
 
-def _snyk_cli_from_sidecar() -> Optional[str]:
+def _snyk_cli_from_sidecar() -> str | None:
     """Return the installer-selected CLI path, or None if unpinned/stale."""
     sidecar = _cli_path_sidecar()
     try:
@@ -108,12 +109,12 @@ def _snyk_cli_from_sidecar() -> Optional[str]:
     return None
 
 
-def _prepend_to_path(env: Dict[str, str], bin_dir: str) -> None:
+def _prepend_to_path(env: dict[str, str], bin_dir: str) -> None:
     entries = [p for p in env.get("PATH", "").split(os.pathsep) if p and p != bin_dir]
     env["PATH"] = os.pathsep.join([bin_dir, *entries])
 
 
-def check_snyk_cli() -> Optional[str]:
+def check_snyk_cli() -> str | None:
     """Return the installer-selected Snyk CLI or the current PATH binary."""
     return _snyk_cli_from_sidecar() or shutil.which("snyk")
 
@@ -125,7 +126,7 @@ class CodeVulnerability:
     id: str  # e.g., "javascript/PT", "python/SQLi"
     title: str  # e.g., "Path Traversal"
     severity: str  # "critical", "high", "medium", "low"
-    cwe: Optional[str]  # e.g., "CWE-22"
+    cwe: str | None  # e.g., "CWE-22"
     file_path: str  # e.g., "src/server.ts"
     start_line: int  # Line number where vulnerability starts
     end_line: int  # Line number where vulnerability ends
@@ -150,11 +151,11 @@ class DependencyVulnerability:
     severity: str  # "critical", "high", "medium", "low"
     package_name: str  # e.g., "lodash"
     installed_version: str  # e.g., "4.17.15"
-    fixed_version: Optional[str]  # e.g., "4.17.21" or None if no fix
-    cve: Optional[str]  # e.g., "CVE-2021-23337"
-    cvss_score: Optional[float]  # e.g., 7.2
+    fixed_version: str | None  # e.g., "4.17.21" or None if no fix
+    cve: str | None  # e.g., "CVE-2021-23337"
+    cvss_score: float | None  # e.g., 7.2
     is_direct: bool  # True if direct dependency, False if transitive
-    dependency_path: List[str]  # Path from root to vulnerable package
+    dependency_path: list[str]  # Path from root to vulnerable package
 
     @property
     def severity_rank(self) -> int:
@@ -173,8 +174,8 @@ class SastScanResult:
     """Results from a SAST (code) scan."""
 
     success: bool
-    vulnerabilities: List[CodeVulnerability] = field(default_factory=list)
-    error_message: Optional[str] = None
+    vulnerabilities: list[CodeVulnerability] = field(default_factory=list)
+    error_message: str | None = None
 
     @property
     def critical_count(self) -> int:
@@ -198,8 +199,8 @@ class ScaScanResult:
     """Results from an SCA (dependency) scan."""
 
     success: bool
-    vulnerabilities: List[DependencyVulnerability] = field(default_factory=list)
-    error_message: Optional[str] = None
+    vulnerabilities: list[DependencyVulnerability] = field(default_factory=list)
+    error_message: str | None = None
 
     @property
     def critical_count(self) -> int:
@@ -209,7 +210,7 @@ class ScaScanResult:
     def high_count(self) -> int:
         return sum(1 for v in self.vulnerabilities if v.severity.lower() == "high")
 
-    def get_vulns_for_package_tree(self, package_name: str) -> List[DependencyVulnerability]:
+    def get_vulns_for_package_tree(self, package_name: str) -> list[DependencyVulnerability]:
         """
         Get all vulnerabilities for a package and its transitive dependencies.
 
@@ -229,7 +230,7 @@ class ScaScanResult:
             if any(package_name == dep.rsplit("@", 1)[0] for dep in v.dependency_path)
         ]
 
-    def count_severity_for_package_tree(self, package_name: str) -> Dict[str, int]:
+    def count_severity_for_package_tree(self, package_name: str) -> dict[str, int]:
         """Count vulnerabilities by severity for a package and its transitive dependencies."""
         vulns = self.get_vulns_for_package_tree(package_name)
         return {
@@ -240,7 +241,7 @@ class ScaScanResult:
         }
 
 
-def run_snyk_cli(args: List[str], timeout: int = 300) -> tuple[int, str, str]:
+def run_snyk_cli(args: list[str], timeout: int = 300) -> tuple[int, str, str]:
     """
     Run snyk CLI command and return exit code, stdout, stderr.
 
@@ -288,9 +289,9 @@ def run_snyk_cli(args: List[str], timeout: int = 300) -> tuple[int, str, str]:
         return -1, "", SNYK_CLI_NOT_FOUND_MESSAGE
 
 
-def parse_sast_json(output: str) -> List[CodeVulnerability]:
+def parse_sast_json(output: str) -> list[CodeVulnerability]:
     """Parse Snyk Code (SAST) JSON output into vulnerability objects."""
-    vulnerabilities: List[CodeVulnerability] = []
+    vulnerabilities: list[CodeVulnerability] = []
 
     try:
         data = json.loads(output)
@@ -356,9 +357,9 @@ def parse_sast_json(output: str) -> List[CodeVulnerability]:
     return vulnerabilities
 
 
-def parse_sca_json(output: str) -> List[DependencyVulnerability]:
+def parse_sca_json(output: str) -> list[DependencyVulnerability]:
     """Parse Snyk SCA JSON output into vulnerability objects."""
-    vulnerabilities: List[DependencyVulnerability] = []
+    vulnerabilities: list[DependencyVulnerability] = []
 
     try:
         data = json.loads(output)

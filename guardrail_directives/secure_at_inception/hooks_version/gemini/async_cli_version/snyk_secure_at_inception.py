@@ -28,7 +28,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional, Tuple, cast
+from typing import Any, Dict, Generator, List, Optional, Set, Tuple, cast
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 LIB_DIR = SCRIPT_DIR / "lib"
@@ -450,7 +450,7 @@ def _sast_remediation_hints(vulns: List[Dict[str, Any]]) -> List[str]:
 def _sca_remediation_hints(vulns: List[Dict[str, Any]]) -> List[str]:
     """Concrete package upgrade hints for common dependency findings."""
     hints: List[str] = []
-    seen: set[tuple[str, str]] = set()
+    seen: Set[Tuple[str, str]] = set()
     for vuln in vulns:
         package_name = str(vuln.get("package_name", ""))
         version = str(vuln.get("version", ""))

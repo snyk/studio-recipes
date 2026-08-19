@@ -43,15 +43,22 @@ Use `git commit --no-verify` to bypass the hook.
 
 | Variable | Default | Description |
 |---|---:|---|
-| `SECRETS_MIN_BLOCK_SEVERITY` | `medium` | Lowest severity that blocks a commit: `low`, `medium`, `high`, or `critical`. |
-| `SECRETS_SCAN_TIMEOUT` | `90` | Seconds to wait for the Snyk CLI scan before treating it as a scan failure. |
-| `SECRETS_BLOCK_ON_SCAN_FAILURE` | `0` | By default, scan failures warn and allow the commit. Set to `1` to block on scan failures. |
-| `SECRETS_FALLBACK_TO_WORKING_DIR` | `0` | By default, failure to snapshot staged content blocks the commit because the hook cannot confirm it scanned the index. Set to `1` to scan the working tree instead, with a warning. |
-| `SECRETS_IGNORE_PATHS` | unset | Comma-separated glob patterns for staged relative paths to skip. |
+| `SECRETS_SCAN_TIMEOUT` | `90` | Seconds to wait for the scan before treating it as a scan failure. Set to `-1` for no timeout at all. |
+| `SECRETS_BLOCK_ON_SCAN_FAILURE` | `1` | By default, a scan failure (after retries) blocks the commit. Set to `0` to warn and allow instead. |
 | `SECRETS_HOOK_DEBUG` | `0` | Set to `1` for verbose stderr logging. |
-| `SECRETS_DIFF_STRATEGY` | `line` | `line` classifies findings by overlap with added/changed lines. `content` also scans baseline content and compares matched secret text, which can reduce false positives when an existing secret's line is edited for unrelated reasons. |
 
-`SECRETS_SCAN_TIMEOUT` only applies to the Snyk CLI scan. Git operations used to inspect and snapshot the staged index have fixed internal timeouts; a timeout or Git error is treated as a prerequisite failure.
+`SECRETS_SCAN_TIMEOUT` bounds the whole hook, not just the Snyk CLI scan: the git operations used to inspect and snapshot the staged index share the same wall-clock budget, so the total run time is `SECRETS_SCAN_TIMEOUT` plus a small, fixed amount of non-subprocess overhead. Running out of budget (or a Git error) while determining what to scan is a prerequisite failure; running out of budget while preparing a snapshot of that content to scan respects `SECRETS_BLOCK_ON_SCAN_FAILURE` like any other scan failure.
+
+Findings are classified as added-by-this-commit or pre-existing by comparing
+matched secret text against a `HEAD` baseline scan, run concurrently with the
+staged-content scan. A finding falls back to line-range overlap when there's
+no baseline content to compare against (a new file, an unresolved rename, or
+text that can't be re-extracted).
+
+To suppress a specific secret finding (a known placeholder, a revoked key, a
+won't-fix case), use Snyk's own per-finding ignore instead of excluding a
+whole path: a blocked commit prints the ignore request command for findings
+that can be ignored (requires Code Consistent Ignores enabled for your org).
 
 ## Logging
 

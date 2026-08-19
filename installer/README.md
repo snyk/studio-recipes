@@ -52,8 +52,11 @@ For non-interactive setups (CI, containers, shared workstations), set the `SNYK_
 | **default** *(used if `--profile` is omitted)* | Secure at Inception guardrails, on-demand fix commands (`/snyk-fix`, `/snyk-batch-fix`), secure dependency health-check skill, and MCP configuration. |
 | **minimal** | Secure at Inception guardrails and MCP configuration only |
 | **experimental** *(early access)* | [Secure at **Commit**](../guardrail_directives/secure_at_commit/) (SAST + SCA) guardrails, on-demand fix commands (`/snyk-fix`, `/snyk-batch-fix`), secure dependency health-check skill, and MCP configuration — run inside the target repo or pass `--workspace`. |
+| **ads** | Secure at Inception recipes plus the global Secrets At Commit hook. |
 
-Choose with `--profile <name>`. Under `--profile experimental` you can also install individual recipes instead of the whole profile with `--recipes` (see below). [Secrets At Commit](../guardrail_directives/secrets_at_commit/) is opt-in: it belongs to no profile and installs only when named there.
+Choose with `--profile <name>`. Under profiles other than `default` and `minimal`, you can also install individual recipes instead of the whole profile with `--recipes` (see below). The workspace-scoped [Secrets At Commit](../guardrail_directives/secrets_at_commit/) recipe is opt-in; the global variant is included in the `experimental` and `ads` profiles.
+
+An explicit empty selection (`--recipes ""` or `--recipes=`) installs no recipes but still runs the installer's normal prerequisite checks. Omit `--recipes` to install the profile's full recipe set.
 
 ---
 
@@ -64,11 +67,11 @@ Choose with `--profile <name>`. Under `--profile experimental` you can also inst
 | Preview without writing files | `--dry-run` |
 | Install for one assistant only | `--ade <cursor\|claude\|gemini\|kiro\|codex\|windsurf\|copilot-cli\|copilot-vscode>` |
 | Choose the repo for workspace-scoped commit-time hooks | `--workspace <path>` |
-| Install exactly the named recipes instead of the profile's own list | `--recipes <a,b,c>` (requires `--profile experimental`; run `--list` for the identifiers) |
+| Install exactly the named recipes instead of the profile's own list | `--recipes <a,b,c>` (unavailable with `--profile default` or `--profile minimal`; run `--list` for the identifiers) |
 | Skip confirmation prompts | `-y`, `--yes` |
 | Re-verify a previous install | `--verify` |
 | Verify without installing/upgrading prerequisites | `--verify --read-only` |
-| Remove what was installed | `--uninstall` (add `--workspace <path>` for workspace-scoped hooks) |
+| Remove all recipes managed by this installer | `--uninstall` (ignores `--profile` and `--recipes`; add `--workspace <path>` for workspace-scoped hooks) |
 | List available recipes | `--list` |
 
 Examples:
@@ -95,7 +98,7 @@ bash ./snyk-studio-install.sh --profile experimental --recipes secrets-precommit
 # Experimental: both commit-time hooks into a specific repo
 bash ./snyk-studio-install.sh --profile experimental --recipes secure-at-commit,secrets-precommit-hook --workspace /path/to/repo -y
 
-# Cleanly remove assistant-scoped recipes
+# Remove all recipes managed by this installer
 bash ./snyk-studio-install.sh --uninstall -y
 
 # Remove workspace-scoped hooks from a specific repo too

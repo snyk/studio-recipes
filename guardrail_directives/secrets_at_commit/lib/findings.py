@@ -1,11 +1,13 @@
-"""Secrets-finding type, SARIF parsing, and severity filtering."""
+"""Secrets-finding type and SARIF parsing."""
 
 import json
-import os
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+# Mirrors SARIF's `suppression.status` enum, plus "none" for no suppression.
+SuppressionStatus = Literal["none", "accepted", "underReview", "rejected"]
 
 
 @dataclass(frozen=True)
@@ -19,6 +21,21 @@ class Finding:
     start_column: int = 0
     end_line: int = 0
     end_column: int = 0
+    # `snyk ignore create --finding-id=` -- absent on older CLI versions.
+    finding_id: Optional[str] = None
+    suppression: SuppressionStatus = "none"
+
+    @property
+    def is_ignored(self) -> bool:
+        return self.suppression == "accepted"
+
+    @property
+    def is_under_review(self) -> bool:
+        return self.suppression == "underReview"
+
+    @property
+    def is_rejected(self) -> bool:
+        return self.suppression == "rejected"
 
     def __post_init__(self) -> None:
         # 0 is never a real line/column (both are 1-indexed), so it's safe
@@ -102,8 +119,30 @@ def _title_from_rule_id(rule_id: str) -> str:
     return rule_id.replace("/", " - ").replace("_", " ").title()
 
 
+def _finding_id_from_result(result: Dict[str, Any]) -> Optional[str]:
+    """Reads the finding ID for `snyk ignore create --finding-id=` from
+    `fingerprints["snyk/asset/finding/v1"]` (singular "asset" -- Snyk
+    Code's own docs use the plural "assets" at the same key name for that
+    product, so don't assume they match). An unexpected shape here
+    degrades to "no ignore hint available" rather than aborting the whole
+    scan over a hint-only field."""
+    fingerprints = result.get("fingerprints")
+    if not isinstance(fingerprints, dict):
+        return None
+    finding_id = fingerprints.get("snyk/asset/finding/v1")
+    if not isinstance(finding_id, str):
+        return None
+    return finding_id
+
+
 def _finding_from_location(
-    location: Any, *, rule_id: str, severity: str, cwe: Optional[str]
+    location: Any,
+    *,
+    rule_id: str,
+    severity: str,
+    cwe: Optional[str],
+    finding_id: Optional[str],
+    suppression: SuppressionStatus,
 ) -> Finding:
     physical_location = _optional_object(_as_dict(location), "physicalLocation")
     artifact = _optional_object(physical_location, "artifactLocation")
@@ -118,7 +157,31 @@ def _finding_from_location(
         start_column=_optional_int(region, "startColumn"),
         end_line=_optional_int(region, "endLine"),
         end_column=_optional_int(region, "endColumn"),
+        finding_id=finding_id,
+        suppression=suppression,
     )
+
+
+# Highest-priority status wins if a result somehow carries more than one --
+# matches Snyk's own GetHighestSuppression (go-application-framework).
+_SUPPRESSION_PRIORITY: Dict[str, int] = {"accepted": 3, "underReview": 2, "rejected": 1}
+
+
+def _suppression_status(result: Dict[str, Any]) -> SuppressionStatus:
+    best: SuppressionStatus = "none"
+    best_rank = 0
+    for suppression in _optional_list(result, "suppressions"):
+        if not isinstance(suppression, dict):
+            continue
+        status = suppression.get("status")
+        if not isinstance(status, str):
+            # SARIF 2.1's suppression.status defaults to "accepted" when absent.
+            status = "accepted"
+        rank = _SUPPRESSION_PRIORITY.get(status, 0)
+        if rank > best_rank:
+            best_rank = rank
+            best = status  # type: ignore[assignment]
+    return best
 
 
 def _findings_from_result(result_value: Any) -> List[Finding]:
@@ -126,8 +189,17 @@ def _findings_from_result(result_value: Any) -> List[Finding]:
     rule_id = _optional_string(result, "ruleId", "unknown")
     severity = _severity_from_result(result)
     cwe = _cwe_from_result(result)
+    finding_id = _finding_id_from_result(result)
+    suppression = _suppression_status(result)
     return [
-        _finding_from_location(location, rule_id=rule_id, severity=severity, cwe=cwe)
+        _finding_from_location(
+            location,
+            rule_id=rule_id,
+            severity=severity,
+            cwe=cwe,
+            finding_id=finding_id,
+            suppression=suppression,
+        )
         for location in _optional_list(result, "locations")
     ]
 
@@ -161,14 +233,3 @@ def parse_secrets_results(json_output: str) -> Optional[List[Finding]]:
         # what SARIF promises (e.g. "runs" isn't a list of objects).
         return None
     return findings
-
-
-def _min_block_severity() -> str:
-    threshold = os.environ.get("SECRETS_MIN_BLOCK_SEVERITY", "medium").lower()
-    return threshold if threshold in SEVERITY_ORDER else "medium"
-
-
-def filter_by_severity(findings: List[Finding]) -> List[Finding]:
-    """Keep findings at/above SECRETS_MIN_BLOCK_SEVERITY."""
-    threshold = SEVERITY_ORDER[_min_block_severity()]
-    return [f for f in findings if SEVERITY_ORDER.get(f.severity.lower(), 4) <= threshold]

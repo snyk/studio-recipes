@@ -184,12 +184,10 @@ def parse_added_line_ranges(diff_text: str) -> LineRanges:
 
 def split_added_vs_pre_existing(
     findings: List[Finding], ranges: LineRanges
-) -> Tuple[List[Finding], List[Finding]]:
+) -> Tuple[List[Finding], List[Finding], List[Finding]]:
     """Findings whose [start_line, end_line] span overlaps an added range
-    are treated as part of this commit; everything else is classified as
-    pre-existing. Checking the whole span (not just start_line) still
-    catches a multi-line finding (e.g. a PEM block) whose start is
-    untouched but whose end falls inside an edit."""
+    are added; everything else is pre-existing. `removed` is always empty
+    here -- no baseline text to detect a deletion against."""
     added: List[Finding] = []
     pre_existing: List[Finding] = []
     for f in findings:
@@ -203,4 +201,4 @@ def split_added_vs_pre_existing(
         overlaps = any(f.start_line <= hi and f.end_line >= lo for lo, hi in file_ranges)
         bucket = added if overlaps else pre_existing
         bucket.append(f)
-    return added, pre_existing
+    return added, pre_existing, []

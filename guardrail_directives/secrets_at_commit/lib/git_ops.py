@@ -2,13 +2,15 @@
 ranges, and rename detection."""
 
 import os
+import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Literal, Optional, Set, Tuple
 
 from .diff_scope import BINARY_SENTINEL_RANGE, LineRanges, parse_added_line_ranges
-from .proc import GIT_TIMEOUT, run_text
+from .proc import bounded_git_timeout, run_text
 
 
 def find_repo_root(start: Path) -> Optional[Path]:
@@ -27,12 +29,17 @@ def _debug_git_failure(cmd: List[str], detail: str) -> None:
         print(f"  [debug] {' '.join(cmd)} {detail}", file=sys.stderr)
 
 
-def _run_git(args: List[str], cwd: Path) -> Optional[str]:
+def _run_git(args: List[str], cwd: Path, deadline: Optional[float] = None) -> Optional[str]:
     """Runs `git <args>` and returns stdout, or None on failure (including
-    a hung/too-slow git process -- see GIT_TIMEOUT)."""
+    a hung/too-slow git process, or a shared `deadline` with no time left
+    -- see `bounded_git_timeout`)."""
     cmd = ["git", *args]
+    timeout = bounded_git_timeout(deadline)
+    if timeout is None:
+        _debug_git_failure(cmd, "skipped: shared deadline already passed")
+        return None
     try:
-        result = run_text(cmd, cwd=cwd, timeout=GIT_TIMEOUT)
+        result = run_text(cmd, cwd=cwd, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as e:
         _debug_git_failure(cmd, f"failed: {e}")
         return None
@@ -43,19 +50,21 @@ def _run_git(args: List[str], cwd: Path) -> Optional[str]:
     return stdout
 
 
-def get_staged_files(repo_root: Path) -> Optional[List[str]]:
+def get_staged_files(repo_root: Path, deadline: Optional[float] = None) -> Optional[List[str]]:
     """None means git failed (fail-closed); [] means nothing staged.
 
     Expected `git diff --name-only -z` output:
     `app.py\0src/lib.py\0`.
     """
-    stdout = _run_git(["diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"], repo_root)
+    stdout = _run_git(
+        ["diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"], repo_root, deadline
+    )
     if stdout is None:
         return None
     return [p for p in stdout.split("\0") if p]
 
 
-def get_binary_files(repo_root: Path) -> Set[str]:
+def get_binary_files(repo_root: Path, deadline: Optional[float] = None) -> Set[str]:
     """Return staged files Git reports as binary, using each file's new path.
 
     Git calls this output "numstat" because it is the numeric diff-stat
@@ -74,6 +83,7 @@ def get_binary_files(repo_root: Path) -> Set[str]:
     stdout = _run_git(
         ["-c", "core.quotePath=false", "diff", "--cached", "--numstat", "-z", "--diff-filter=ACMR"],
         repo_root,
+        deadline,
     )
     if stdout is None:
         return set()
@@ -138,7 +148,9 @@ def _numstat_record_is_binary(added: str, deleted: str) -> bool:
     return added == "-" and deleted == "-"
 
 
-def get_added_line_ranges(repo_root: Path) -> Optional[Tuple[LineRanges, List[str]]]:
+def get_added_line_ranges(
+    repo_root: Path, deadline: Optional[float] = None
+) -> Optional[Tuple[LineRanges, List[str]]]:
     """None means git failed (fail-closed). Second element: paths git
     reports as binary -- already merged into the returned ranges via
     BINARY_SENTINEL_RANGE, returned separately too so callers can warn
@@ -154,24 +166,29 @@ def get_added_line_ranges(repo_root: Path) -> Optional[Tuple[LineRanges, List[st
     paths to exact hunk ranges, so this call reads unified patch headers.
     """
     stdout = _run_git(
-        ["-c", "core.quotePath=false", "diff", "--cached", "--diff-filter=ACMR", "-U0"], repo_root
+        ["-c", "core.quotePath=false", "diff", "--cached", "--diff-filter=ACMR", "-U0"],
+        repo_root,
+        deadline,
     )
     if stdout is None:
         return None
     ranges = parse_added_line_ranges(stdout)
 
-    binary_files = sorted(get_binary_files(repo_root))
+    binary_files = sorted(get_binary_files(repo_root, deadline))
     for path in binary_files:
         ranges[path] = [BINARY_SENTINEL_RANGE]
     return ranges, binary_files
 
 
-def get_rename_map(repo_root: Path) -> Dict[str, str]:
-    """Maps {new_path: old_path} for staged renames/copies. Fails soft to
-    `{}` -- a renamed file just falls back to line-diff.
+def get_rename_map(repo_root: Path, deadline: Optional[float] = None) -> Dict[str, str]:
+    """Maps {new_path: old_path} for staged renames. Fails soft to `{}` --
+    a renamed file just falls back to line-diff.
+
+    Copies aren't detected -- that needs `-C -C`, too expensive to add
+    given the scan's own timeout budget.
 
     Expected `git diff --name-status -z --find-renames` output:
-    `R100\0old.py\0new.py\0` or `C087\0old.py\0copy.py\0`.
+    `R100\0old.py\0new.py\0`.
     """
     stdout = _run_git(
         [
@@ -180,22 +197,71 @@ def get_rename_map(repo_root: Path) -> Dict[str, str]:
             "diff",
             "--cached",
             "--find-renames",
-            "--diff-filter=RC",
+            "--diff-filter=R",
             "--name-status",
             "-z",
         ],
         repo_root,
+        deadline,
     )
     if stdout is None:
         return {}
 
-    # --diff-filter=RC: every entry is "STATUS_WITH_SCORE\0old\0new\0".
+    # --diff-filter=R: every entry is "R<score>\0old\0new\0".
     parts = [p for p in stdout.split("\0") if p]
     renames: Dict[str, str] = {}
     i = 0
     while i + 2 < len(parts):
         status, old_path, new_path = parts[i], parts[i + 1], parts[i + 2]
-        if status[:1] in ("R", "C"):
+        if status[:1] == "R":
             renames[new_path] = old_path
         i += 3
     return renames
+
+
+_SAFE_REMOTE_URL_RE = re.compile(r"^[A-Za-z0-9.:/@_~+-]+$")
+
+RemoteUrlStatus = Literal["ok", "unavailable", "rejected_unsafe"]
+
+
+@dataclass(frozen=True)
+class RemoteUrlDecision:
+    """What we know about the repo's `origin` remote and whether it's
+    usable. `url` is set only when status == "ok" -- callers that just
+    need "is there something usable" can check `url` directly; callers
+    that care why can check `status`."""
+
+    url: Optional[str]
+    status: RemoteUrlStatus
+
+    @staticmethod
+    def unavailable() -> "RemoteUrlDecision":
+        return RemoteUrlDecision(None, "unavailable")
+
+    @staticmethod
+    def ok(url: str) -> "RemoteUrlDecision":
+        return RemoteUrlDecision(url, "ok")
+
+    def rejected(self) -> "RemoteUrlDecision":
+        """Downgrades an "ok" decision once the resolved CLI's shell-need
+        is known and this URL isn't safe for one."""
+        return RemoteUrlDecision(None, "rejected_unsafe")
+
+
+def is_safe_for_shell(url: str) -> bool:
+    """Whether `url` is safe to hand to a shell=True subprocess or embed
+    literally in a printed shell command. Only meaningful to check when a
+    shell is actually involved -- see lib.proc.needs_shell."""
+    return bool(_SAFE_REMOTE_URL_RE.match(url))
+
+
+def get_remote_url(repo_root: Path, deadline: Optional[float] = None) -> RemoteUrlDecision:
+    """The `origin` remote's URL, decided as far as we can here -- whether
+    it's also safe for a shell-launched CLI depends on which Snyk binary
+    gets resolved, not known yet at this point (see RemoteUrlDecision.rejected,
+    applied once that's known)."""
+    stdout = _run_git(["config", "--get", "remote.origin.url"], repo_root, deadline)
+    if stdout is None:
+        return RemoteUrlDecision.unavailable()
+    url = stdout.strip()
+    return RemoteUrlDecision.ok(url) if url else RemoteUrlDecision.unavailable()

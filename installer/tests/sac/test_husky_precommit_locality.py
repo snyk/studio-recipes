@@ -31,6 +31,15 @@ from tests.sac.conftest import (
 )
 
 
+def _is_relative_to(path: Path, other: Path) -> bool:
+    """Path.is_relative_to requires Python 3.9+; back-port via relative_to."""
+    try:
+        path.relative_to(other)
+    except ValueError:
+        return False
+    return True
+
+
 @requires_git
 class TestPreCommitFrameworkNeverTouchesHooksPath:
     """No amount of core.hooksPath tampering should change what this
@@ -77,7 +86,9 @@ class TestPreCommitFrameworkNeverTouchesHooksPath:
         strategy = pre_commit.PreCommitFrameworkStrategy()
         path = strategy.file_hook_path(workspace)
         assert path is not None
-        assert git_native.normalize_path(path).is_relative_to(git_native.normalize_path(workspace))
+        assert _is_relative_to(
+            git_native.normalize_path(path), git_native.normalize_path(workspace)
+        )
 
 
 @requires_git
@@ -178,4 +189,6 @@ class TestHuskyOnlyEverActivatesForThisWorkspacesOwnHuskyDir:
         workspace-relative join, not derived from any config value."""
         path = husky.HuskyStrategy().file_hook_path(workspace)
         assert path is not None
-        assert git_native.normalize_path(path).is_relative_to(git_native.normalize_path(workspace))
+        assert _is_relative_to(
+            git_native.normalize_path(path), git_native.normalize_path(workspace)
+        )

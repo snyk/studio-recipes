@@ -2,6 +2,7 @@
 
 import importlib.util
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,7 +25,14 @@ def kiro_snyk():
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
-    spec.loader.exec_module(module)
+    # Register before exec: dataclasses resolves string annotations via
+    # sys.modules[cls.__module__], which is None without this.
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(spec.name, None)
+        raise
     return module
 
 

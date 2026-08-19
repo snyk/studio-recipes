@@ -124,24 +124,31 @@ class TestGitGlobalPathHelpers:
 
 
 class TestRecipeSelectionEligibility:
-    """secrets-precommit-hook-global follows the exact same opt-in pattern
-    as secrets-precommit-hook: unprofiled, so nameable only under
-    --profile experimental, and never auto-installed by a bare profile."""
+    """secrets-precommit-hook-global is installed by the ADS or experimental profile."""
 
     def test_selectable_under_experimental(self, manifest):
         installer.validate_recipe_selection(manifest, "experimental", [GLOBAL_RECIPE_ID])
+
+    def test_selectable_under_ads(self, manifest):
+        installer.validate_recipe_selection(manifest, "ads", [GLOBAL_RECIPE_ID])
 
     def test_rejected_under_default_profile(self, manifest, capsys):
         with pytest.raises(SystemExit) as excinfo:
             installer.validate_recipe_selection(manifest, "default", [GLOBAL_RECIPE_ID])
         assert excinfo.value.code != 0
-        assert "--recipes requires --profile experimental" in capsys.readouterr().err
+        assert (
+            "--recipes cannot be used with --profile default or --profile minimal"
+            in capsys.readouterr().err
+        )
 
-    def test_not_installed_by_a_bare_experimental_profile(self, manifest):
-        assert GLOBAL_RECIPE_ID not in manifest.resolve_recipes("experimental")
+    def test_installed_by_bare_experimental_profile(self, manifest):
+        assert GLOBAL_RECIPE_ID in manifest.resolve_recipes("experimental")
+
+    def test_installed_by_bare_ads_profile(self, manifest):
+        assert GLOBAL_RECIPE_ID in manifest.resolve_recipes("ads")
 
     def test_installed_when_explicitly_named(self, manifest):
-        assert manifest.resolve_recipes("experimental", [GLOBAL_RECIPE_ID]) == [GLOBAL_RECIPE_ID]
+        assert manifest.resolve_recipes("ads", [GLOBAL_RECIPE_ID]) == [GLOBAL_RECIPE_ID]
 
     def test_is_git_global_scoped(self, manifest):
         assert manifest.is_git_global_scoped(GLOBAL_RECIPE_ID) is True
@@ -151,7 +158,7 @@ class TestRecipeSelectionEligibility:
 
 class TestVerifyAutoDetectsGitGlobalInstall:
     """``--verify`` (bare, no ``--recipes``) must still catch a real global
-    install even though the recipe is unprofiled - mirrors the existing
+    install even though the recipe is not in the default profile - mirrors the existing
     auto-detection for the workspace-scoped secrets hook."""
 
     def test_verify_includes_existing_global_hook_without_a_selection(

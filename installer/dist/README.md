@@ -39,14 +39,14 @@ Assistant-scoped recipes install into paths under `$HOME` (for example `~/.curso
 
 | Option | Description |
 |--------|-------------|
-| `--profile <name>` | Installation profile: `default`, `minimal`, or `experimental` |
+| `--profile <name>` | Installation profile: `default`, `minimal`, `experimental`, or `ads` |
 | `--ade <cursor\|claude\|gemini\|kiro\|codex\|windsurf\|copilot-cli\|copilot-vscode>` | Install only for that ADE (otherwise auto-detect or prompt) |
 | `--workspace <path>` | Choose the repo for workspace-scoped commit-time hooks |
 | `--dry-run` | Show what would happen without writing files |
-| `--uninstall` | Remove Snyk recipe artifacts installed by this installer; add `--workspace <path>` for workspace-scoped hooks |
+| `--uninstall` | Remove all recipes managed by this installer, regardless of profile or `--recipes`; add `--workspace <path>` for workspace-scoped hooks |
 | `--verify` | Verify the install: files on disk and merged JSON match the manifest. Also checks Node.js/Snyk CLI versions and, like a normal install, may offer to upgrade them |
 | `--read-only` | With `--verify`, only report prerequisite versions instead of offering to install/upgrade them — guarantees no changes are made |
-| `--recipes <a,b,c>` | Install exactly the named recipes instead of the profile's own list; requires `--profile experimental`. Run `--list` for the identifiers |
+| `--recipes <a,b,c>` | Install exactly the named recipes instead of the profile's own list; unavailable with `--profile default` or `--profile minimal`. Run `--list` for the identifiers |
 | `--list` | List recipes and profiles bundled in the script |
 | `-y`, `--yes` | Skip confirmation prompts |
 | `-h`, `--help` | Show built-in help |
@@ -71,8 +71,11 @@ By default `--verify` also checks Node.js/Snyk CLI versions the same way a norma
 | **default** | Secure-at-inception hooks, `/snyk-fix` and `/snyk-batch-fix` commands (Cursor/Claude), secure dependency health skill, MCP config |
 | **minimal** | Hooks and MCP only |
 | **experimental** | Secure-at-commit hooks (SAST + SCA), `/snyk-fix` and `/snyk-batch-fix` commands (Cursor/Claude), secure dependency health skill, MCP config |
+| **ads** | Secure-at-inception recipes plus the global Secrets At Commit hook |
 
-Under `--profile experimental` you can install individual recipes instead of the whole profile with `--recipes`. Secrets At Commit belongs to no profile, so it installs only when named there. Both commit-time hooks are workspace-scoped: run the installer inside the target repository or pass `--workspace <path>`.
+Under profiles other than `default` and `minimal`, you can install individual recipes instead of the whole profile with `--recipes`. The workspace-scoped Secrets At Commit recipe is opt-in; the global variant is included in the `experimental` and `ads` profiles. The local hook is workspace-scoped: run the installer inside the target repository or pass `--workspace <path>`.
+
+An explicit empty selection (`--recipes ""` or `--recipes=`) installs no recipes but still runs the installer's normal prerequisite checks. Omit `--recipes` to install the profile's full recipe set.
 
 ### Examples
 

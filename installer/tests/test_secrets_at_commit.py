@@ -688,9 +688,33 @@ class TestExtractDefensively:
         mode = (tmp_path / "app.sh").stat().st_mode
         assert not mode & stat.S_ISUID
 
-    def test_extract_archive_end_to_end_rejects_traversal(self, tmp_path, monkeypatch):
-        # Forces the pre-3.12 fallback path regardless of the actual interpreter.
-        monkeypatch.setattr(index_snapshot.sys, "version_info", (3, 8, 0))
+    def test_directory_uses_sanitized_permissions(self, tmp_path):
+        info = tarfile.TarInfo("private")
+        info.type = tarfile.DIRTYPE
+        info.mode = 0o4750
+        with self._make_tar([(info, None)]) as tar:
+            index_snapshot._extract_defensively(tar, tmp_path)
+        mode = (tmp_path / "private").stat().st_mode
+        assert mode & 0o777 == 0o750
+        assert not mode & stat.S_ISUID
+
+    def test_failed_copy_leaves_no_partial_target(self, monkeypatch, tmp_path):
+        info = tarfile.TarInfo("app.py")
+        info.size = 5
+
+        def fail_copy(source, output):
+            output.write(source.read(2))
+            raise OSError("simulated copy failure")
+
+        monkeypatch.setattr(index_snapshot.shutil, "copyfileobj", fail_copy)
+        with self._make_tar([(info, b"hello")]) as tar:
+            with pytest.raises(OSError, match="simulated copy failure"):
+                index_snapshot._extract_defensively(tar, tmp_path)
+
+        assert not (tmp_path / "app.py").exists()
+        assert list(tmp_path.iterdir()) == []
+
+    def test_extract_archive_end_to_end_rejects_traversal(self, tmp_path):
         buf = BytesIO()
         info = tarfile.TarInfo("../evil.txt")
         info.size = 4
@@ -714,9 +738,10 @@ class TestExtractDefensively:
             def getmembers(self) -> list[tarfile.TarInfo]:
                 return [pax_member, file_member]
 
-            def extract(self, member: tarfile.TarInfo, path: Path) -> None:
+            def extractfile(self, member: tarfile.TarInfo) -> BytesIO:
                 if member is file_member:
-                    (Path(path) / member.name).write_bytes(b"hello")
+                    return BytesIO(b"hello")
+                raise AssertionError("PAX headers must not be extracted")
 
         index_snapshot._extract_defensively(_FakeTar(), tmp_path)  # type: ignore[arg-type]
         assert (tmp_path / "app.py").read_bytes() == b"hello"
@@ -1367,40 +1392,46 @@ class TestFindSnykBinary:
         monkeypatch.setenv("PATH", str(on_path.parent))
         assert snyk_cli.find_snyk_binary() == str(on_path)
 
-    def test_stale_sidecar_pin_falls_back_to_path(self, monkeypatch, tmp_path):
-        self._pin(str(tmp_path / "uninstalled" / "snyk"))
+    def test_non_file_sidecar_does_not_fall_back_to_path(self, monkeypatch, tmp_path):
+        sidecar = Path(os.path.expanduser("~")) / ".snyk-studio" / "cli-path"
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.mkdir()
         on_path = self._fake_cli_on_path(tmp_path / "npm-bin")
         monkeypatch.setenv("PATH", str(on_path.parent))
-        assert snyk_cli.find_snyk_binary() == str(on_path)
+        assert snyk_cli.find_snyk_binary() is None
+
+    def test_missing_pinned_cli_wins_over_path(self, monkeypatch, tmp_path):
+        pinned = tmp_path / "uninstalled" / "snyk"
+        self._pin(str(pinned))
+        on_path = self._fake_cli_on_path(tmp_path / "npm-bin")
+        monkeypatch.setenv("PATH", str(on_path.parent))
+        assert snyk_cli.find_snyk_binary() == str(pinned)
 
     @pytest.mark.skipif(os.name == "nt", reason="X_OK is not meaningful on Windows")
-    def test_non_executable_pin_falls_back_to_path(self, monkeypatch, tmp_path):
-        self._pin(str(self._fake_cli(tmp_path / "standalone" / "snyk", executable=False)))
+    def test_non_executable_pin_wins_over_path(self, monkeypatch, tmp_path):
+        pinned = self._fake_cli(tmp_path / "standalone" / "snyk", executable=False)
+        self._pin(str(pinned))
         on_path = self._fake_cli_on_path(tmp_path / "npm-bin")
         monkeypatch.setenv("PATH", str(on_path.parent))
-        assert snyk_cli.find_snyk_binary() == str(on_path)
+        assert snyk_cli.find_snyk_binary() == str(pinned)
 
-    def test_relative_pin_is_ignored(self, monkeypatch, tmp_path):
-        # A relative pin would resolve against the scan workspace -- a
-        # snapshot of the content being committed -- not the install dir.
-        self._fake_cli(tmp_path / "cwd" / "snyk")
+    def test_relative_pin_is_resolved_from_the_hook_working_directory(self, monkeypatch, tmp_path):
+        pinned = self._fake_cli(tmp_path / "cwd" / "snyk")
         monkeypatch.chdir(tmp_path / "cwd")
         self._pin("snyk")
         on_path = self._fake_cli_on_path(tmp_path / "npm-bin")
         monkeypatch.setenv("PATH", str(on_path.parent))
-        assert snyk_cli.find_snyk_binary() == str(on_path)
+        assert snyk_cli.find_snyk_binary() == str(pinned)
 
-    def test_pin_containing_shell_metacharacter_is_rejected_for_a_cmd_on_windows(
+    def test_pin_containing_shell_metacharacter_is_selected_for_a_cmd_on_windows(
         self, monkeypatch, tmp_path
     ):
-        # Only a .cmd/.bat pin reaches a shell=True subprocess call (see
-        # lib.proc.needs_shell) -- only there is a metacharacter unsafe.
         monkeypatch.setattr(proc, "IS_WINDOWS", True)
         pinned = self._fake_cli(tmp_path / "std&alone" / "snyk.cmd")
         self._pin(str(pinned))
         on_path = self._fake_cli_on_path(tmp_path / "npm-bin")
         monkeypatch.setenv("PATH", str(on_path.parent))
-        assert snyk_cli.find_snyk_binary() == str(on_path)
+        assert snyk_cli.find_snyk_binary() == str(pinned)
 
     def test_pin_containing_shell_metacharacter_is_allowed_for_a_native_exe(
         self, monkeypatch, tmp_path
@@ -1500,7 +1531,14 @@ class TestFindSnykBinary:
         pinned = self._fake_cli(tmp_path / "standalone" / "snyk")
         self._pin(str(pinned))
         monkeypatch.setenv("PATH", "/usr/bin")
-        assert snyk_cli._snyk_env()["PATH"].split(os.pathsep)[0] == str(pinned.parent)
+        assert snyk_cli.build_snyk_env()["PATH"].split(os.pathsep)[0] == str(pinned.parent)
+
+    def test_discovered_cli_dir_is_prepended_to_scan_env(self, monkeypatch, tmp_path):
+        earlier = self._fake_cli(tmp_path / "earlier" / "snyk")
+        discovered = self._fake_cli(tmp_path / "selected" / "snyk")
+        monkeypatch.setenv("PATH", os.pathsep.join([str(earlier.parent), "/usr/bin"]))
+        env = snyk_cli.build_snyk_env(str(discovered))
+        assert env["PATH"].split(os.pathsep)[0] == str(discovered.parent)
 
     def test_stale_sidecar_is_named_in_the_not_found_message(self, tmp_path):
         missing = tmp_path / "uninstalled" / "snyk"
@@ -1526,6 +1564,15 @@ class TestFindSnykBinary:
         assert snyk_cli._snyk_cli_from_sidecar() is None
         assert "could not be read" in capsys.readouterr().err
 
+    def test_unreadable_sidecar_does_not_augment_path(self, monkeypatch, tmp_path):
+        self._pin("")
+        sidecar = Path(os.path.expanduser("~")) / ".snyk-studio" / "cli-path"
+        sidecar.write_bytes(b"\xff\xfe/snyk")
+        monkeypatch.setattr(snyk_cli, "_search_paths_unix", lambda _env: [str(tmp_path)])
+        env = {"PATH": ""}
+        snyk_cli._augment_path_for_snyk(env)
+        assert env["PATH"] == ""
+
     def test_interior_empty_path_entry_is_dropped(self, tmp_path):
         pinned = self._fake_cli(tmp_path / "standalone" / "snyk")
         self._pin(str(pinned))
@@ -1536,9 +1583,17 @@ class TestFindSnykBinary:
     def test_pin_problem_names_the_failed_check(self, tmp_path):
         missing = tmp_path / "gone" / "snyk"
         assert snyk_cli._pin_problem(str(missing)) == f'pins "{missing}", which does not exist'
-        assert snyk_cli._pin_problem("snyk") == 'pins "snyk", which is not an absolute path'
         assert snyk_cli._pin_problem("") == "is empty or unreadable"
         assert snyk_cli._pin_problem(str(self._fake_cli(tmp_path / "ok" / "snyk"))) is None
+
+    def test_pin_problem_accepts_a_relative_path(self, monkeypatch, tmp_path):
+        pinned = self._fake_cli(tmp_path / "bin" / "snyk")
+        monkeypatch.chdir(pinned.parent)
+        assert snyk_cli._pin_problem("snyk") is None
+
+    def test_pin_problem_allows_shell_characters(self, tmp_path):
+        pinned = self._fake_cli(tmp_path / "std&alone" / "snyk.cmd")
+        assert snyk_cli._pin_problem(str(pinned)) is None
 
     @pytest.mark.skipif(os.name == "nt", reason="X_OK is not meaningful on Windows")
     def test_pin_problem_reports_a_non_executable_pin(self, tmp_path):
@@ -1552,13 +1607,12 @@ class TestFindSnykBinary:
         self._pin(pinned)
         assert pinned in secrets_hook._cli_not_found_message()
 
-    def test_stale_message_does_not_suggest_falling_back_to_path(self, tmp_path):
-        # find_snyk_binary() probes PATH before this message is reached, so
-        # deleting the sidecar to "fall back to PATH" is a guaranteed no-op.
+    def test_stale_message_does_not_claim_path_was_checked(self, tmp_path):
         self._pin(str(tmp_path / "uninstalled" / "snyk"))
         message = secrets_hook._cli_not_found_message()
         assert "delete" not in message
-        assert "no snyk on PATH either" in message
+        assert "no snyk on PATH either" not in message
+        assert "contact your Snyk administrator" in message
 
     def test_not_found_message_without_a_sidecar_suggests_npm(self):
         assert "npm install -g snyk" in secrets_hook._cli_not_found_message()
@@ -1593,6 +1647,16 @@ class TestCheckSnykAuth:
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
         assert snyk_cli.check_snyk_auth() is None
 
+    def test_relative_xdg_config_home_is_rejected(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("SNYK_TOKEN", raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("XDG_CONFIG_HOME", "controlled-config")
+        config_dir = tmp_path / "controlled-config" / "configstore"
+        config_dir.mkdir(parents=True)
+        (config_dir / "snyk.json").write_text('{"api": "untrusted-token"}')
+        with pytest.raises(snyk_cli.InvalidConfigError, match="must be an absolute path"):
+            snyk_cli.check_snyk_auth()
+
     def test_malformed_config_json_returns_none(self, monkeypatch, tmp_path):
         monkeypatch.delenv("SNYK_TOKEN", raising=False)
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
@@ -1618,7 +1682,7 @@ class TestRunSecretsScan:
             return subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr="")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        snyk_cli.run_secrets_scan(tmp_path, snyk_cli.ScanInvocation(snyk_bin="snyk"), timeout=3.5)
+        snyk_cli.run_secrets_scan(tmp_path, snyk_cli.ScanInvocation(), timeout=3.5)
         assert captured["timeout"] == 3.5
 
     def test_scan_uses_workspace_root_as_single_snyk_input(self, monkeypatch, tmp_path):
@@ -1632,9 +1696,7 @@ class TestRunSecretsScan:
             return subprocess.CompletedProcess(args=[], returncode=0, stdout=clean_sarif, stderr="")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        status, out = snyk_cli.run_secrets_scan(
-            tmp_path, snyk_cli.ScanInvocation(snyk_bin="snyk"), timeout=1
-        )
+        status, out = snyk_cli.run_secrets_scan(tmp_path, snyk_cli.ScanInvocation(), timeout=1)
         assert status == "success"
         assert out == []
         assert captured["args"] == ["snyk", "secrets", "test", ".", "--json"]
@@ -1647,9 +1709,7 @@ class TestRunSecretsScan:
             return subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr="")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        invocation = snyk_cli.ScanInvocation(
-            snyk_bin="snyk", remote_url="git@github.com:acme/repo.git"
-        )
+        invocation = snyk_cli.ScanInvocation(remote_url="git@github.com:acme/repo.git")
         snyk_cli.run_secrets_scan(tmp_path, invocation, timeout=1)
         assert captured["args"] == [
             "snyk",
@@ -1665,9 +1725,7 @@ class TestRunSecretsScan:
             raise subprocess.TimeoutExpired(cmd="snyk", timeout=1)
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        status, out = snyk_cli.run_secrets_scan(
-            tmp_path, snyk_cli.ScanInvocation(snyk_bin="snyk"), timeout=1
-        )
+        status, out = snyk_cli.run_secrets_scan(tmp_path, snyk_cli.ScanInvocation(), timeout=1)
         assert status == "timeout"
         assert out == []
 
@@ -1678,10 +1736,196 @@ class TestRunSecretsScan:
             )
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        status, _ = snyk_cli.run_secrets_scan(
-            tmp_path, snyk_cli.ScanInvocation(snyk_bin="snyk"), timeout=1
+        with pytest.raises(snyk_cli.AuthRequiredError):
+            snyk_cli.run_secrets_scan(tmp_path, snyk_cli.ScanInvocation(), timeout=1)
+
+    def test_auth_error_pattern_classified_for_real_cli_message(self, monkeypatch, tmp_path):
+        # The actual message this CLI version emits when unauthenticated
+        # (confirmed by running it directly) -- didn't match any pre-existing
+        # pattern, so this pins the fix down.
+        def fake_run(*args, **kwargs):
+            return subprocess.CompletedProcess(
+                args=[],
+                returncode=2,
+                stdout="",
+                stderr='{"ok": false, "error": "Use `snyk auth` to authenticate.", "path": "."}',
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(snyk_cli.AuthRequiredError) as exc_info:
+            snyk_cli.run_secrets_scan(tmp_path, snyk_cli.ScanInvocation(), timeout=1)
+        assert exc_info.value.message == "Use `snyk auth` to authenticate."
+
+    def test_not_entitled_pattern_captures_cli_message(self, monkeypatch, tmp_path):
+        def fake_run(*args, **kwargs):
+            return subprocess.CompletedProcess(
+                args=[],
+                returncode=2,
+                stdout=(
+                    '{"ok": false, "error": "Snyk Secrets is not supported for org '
+                    'abc: enable it in Settings > Snyk Secrets", "path": "."}'
+                ),
+                stderr="",
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(snyk_cli.NotEntitledError) as exc_info:
+            snyk_cli.run_secrets_scan(tmp_path, snyk_cli.ScanInvocation(), timeout=1)
+        assert exc_info.value.message == (
+            "Snyk Secrets is not supported for org abc: enable it in Settings > Snyk Secrets"
         )
-        assert status == "auth_required"
+
+    def test_not_entitled_message_unescapes_json_html_chars(self, monkeypatch, tmp_path):
+        # Go's encoding/json HTML-escapes < > & by default -- the CLI's raw
+        # `--json` output literally contains ">", not a real ">".
+        # Real JSON parsing must undo that.
+        def fake_run(*args, **kwargs):
+            return subprocess.CompletedProcess(
+                args=[],
+                returncode=2,
+                stdout=(
+                    '{"ok": false, "error": "Snyk Secrets is not supported for org '
+                    'abc: enable it in Settings \\u003e Snyk Secrets", "path": "."}'
+                ),
+                stderr="",
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(snyk_cli.NotEntitledError) as exc_info:
+            snyk_cli.run_secrets_scan(tmp_path, snyk_cli.ScanInvocation(), timeout=1)
+        assert exc_info.value.message == (
+            "Snyk Secrets is not supported for org abc: enable it in Settings > Snyk Secrets"
+        )
+
+    def test_not_entitled_pattern_without_valid_json_raises_with_no_message(
+        self, monkeypatch, tmp_path
+    ):
+        def fake_run(*args, **kwargs):
+            return subprocess.CompletedProcess(
+                args=[],
+                returncode=2,
+                stdout="Snyk Secrets is not supported for org -- not valid json",
+                stderr="",
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(snyk_cli.NotEntitledError) as exc_info:
+            snyk_cli.run_secrets_scan(tmp_path, snyk_cli.ScanInvocation(), timeout=1)
+        assert exc_info.value.message is None
+
+    def test_entitlement_check_failed_pattern_raises(self, monkeypatch, tmp_path):
+        def fake_run(*args, **kwargs):
+            return subprocess.CompletedProcess(
+                args=[],
+                returncode=2,
+                stdout=(
+                    '{"ok": false, "error": "Workflow execution failed: Unable to '
+                    'check if the Secrets feature is enabled.: some cause", "path": "."}'
+                ),
+                stderr="",
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(snyk_cli.EntitlementCheckFailedError) as exc_info:
+            snyk_cli.run_secrets_scan(tmp_path, snyk_cli.ScanInvocation(), timeout=1)
+        assert exc_info.value.message == (
+            "Workflow execution failed: Unable to check if the Secrets feature is enabled.: "
+            "some cause"
+        )
+
+    def test_no_supported_files_pattern_raises_permanent_failure(self, monkeypatch, tmp_path):
+        def fake_run(*args, **kwargs):
+            return subprocess.CompletedProcess(
+                args=[],
+                returncode=2,
+                stdout='{"ok": false, "error": "No supported files found.", "path": "."}',
+                stderr="",
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(snyk_cli.PermanentScanFailureError) as exc_info:
+            snyk_cli.run_secrets_scan(tmp_path, snyk_cli.ScanInvocation(), timeout=1)
+        assert exc_info.value.message == "No supported files found."
+        assert exc_info.value.fallback == (
+            "Snyk couldn't detect any supported files to scan; confirm you are committing "
+            "the intended files"
+        )
+
+    def test_file_count_limit_pattern_raises_permanent_failure(self, monkeypatch, tmp_path):
+        def fake_run(*args, **kwargs):
+            return subprocess.CompletedProcess(
+                args=[],
+                returncode=2,
+                stdout=(
+                    '{"ok": false, "error": "File count limit reached: too many files: '
+                    '550 exceeds limit of 500", "path": "."}'
+                ),
+                stderr="",
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(snyk_cli.PermanentScanFailureError) as exc_info:
+            snyk_cli.run_secrets_scan(tmp_path, snyk_cli.ScanInvocation(), timeout=1)
+        assert exc_info.value.fallback == (
+            "this commit has more files than Snyk Secrets can scan at once -- try "
+            "committing in smaller batches"
+        )
+
+    def test_size_limit_pattern_raises_permanent_failure(self, monkeypatch, tmp_path):
+        def fake_run(*args, **kwargs):
+            return subprocess.CompletedProcess(
+                args=[],
+                returncode=2,
+                stdout=(
+                    '{"ok": false, "error": "file big.bin size 900000000 exceeds limit '
+                    'of 800000000 bytes", "path": "."}'
+                ),
+                stderr="",
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(snyk_cli.PermanentScanFailureError) as exc_info:
+            snyk_cli.run_secrets_scan(tmp_path, snyk_cli.ScanInvocation(), timeout=1)
+        assert exc_info.value.fallback == (
+            "a file (or the total commit) is too large for Snyk Secrets to scan"
+        )
+
+    def test_invalid_remote_url_pattern_raises_permanent_failure(self, monkeypatch, tmp_path):
+        def fake_run(*args, **kwargs):
+            return subprocess.CompletedProcess(
+                args=[],
+                returncode=2,
+                stdout=(
+                    '{"ok": false, "error": "Invalid --remote-repo-url: must be a valid '
+                    'git URL (e.g., ...)", "path": "."}'
+                ),
+                stderr="",
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(snyk_cli.PermanentScanFailureError) as exc_info:
+            snyk_cli.run_secrets_scan(tmp_path, snyk_cli.ScanInvocation(), timeout=1)
+        assert exc_info.value.fallback == (
+            "the detected git remote URL isn't valid for Snyk Secrets -- check "
+            "`git remote get-url origin`"
+        )
+
+    def test_no_org_pattern_raises_permanent_failure(self, monkeypatch, tmp_path):
+        def fake_run(*args, **kwargs):
+            return subprocess.CompletedProcess(
+                args=[],
+                returncode=2,
+                stdout='{"ok": false, "error": "No org provided.", "path": "."}',
+                stderr="",
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(snyk_cli.PermanentScanFailureError) as exc_info:
+            snyk_cli.run_secrets_scan(tmp_path, snyk_cli.ScanInvocation(), timeout=1)
+        assert exc_info.value.fallback == (
+            "Snyk couldn't determine which org to scan against -- run "
+            "`snyk config set org=<your-org-id>`, or ask your Snyk administrator"
+        )
 
     def test_malformed_stdout_on_success_exit_code_is_an_error_not_a_clean_scan(
         self, monkeypatch, tmp_path
@@ -1695,13 +1939,11 @@ class TestRunSecretsScan:
             return subprocess.CompletedProcess(args=[], returncode=0, stdout="not json", stderr="")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        status, out = snyk_cli.run_secrets_scan(
-            tmp_path, snyk_cli.ScanInvocation(snyk_bin="snyk"), timeout=1
-        )
+        status, out = snyk_cli.run_secrets_scan(tmp_path, snyk_cli.ScanInvocation(), timeout=1)
         assert status == "unparseable"
         assert out == []
 
-    def test_shell_and_creationflags_match_invocation(self, monkeypatch, tmp_path):
+    def test_never_uses_a_shell(self, monkeypatch, tmp_path):
         captured = {}
 
         def fake_run(*args, **kwargs):
@@ -1709,12 +1951,34 @@ class TestRunSecretsScan:
             return subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr="")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        for needs_shell in (True, False):
-            captured.clear()
-            invocation = snyk_cli.ScanInvocation(snyk_bin="snyk", needs_shell=needs_shell)
-            snyk_cli.run_secrets_scan(tmp_path, invocation, timeout=1)
-            assert captured["shell"] == needs_shell
-            assert captured["creationflags"] == proc.CREATE_NO_WINDOW
+        snyk_cli.run_secrets_scan(tmp_path, snyk_cli.ScanInvocation(needs_shell=True), timeout=1)
+        assert captured["shell"] is False
+        assert captured["creationflags"] == proc.CREATE_NO_WINDOW
+
+    def test_windows_uses_an_explicit_cmd_launcher(self, monkeypatch, tmp_path):
+        captured = {}
+
+        def fake_run(*args, **kwargs):
+            captured["args"] = args[0]
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr="")
+
+        monkeypatch.setattr(proc, "IS_WINDOWS", True)
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        snyk_cli.run_secrets_scan(tmp_path, snyk_cli.ScanInvocation(needs_shell=True), timeout=1)
+        assert captured["args"][:3] == ["cmd.exe", "/d", "/s"]
+
+    def test_windows_drops_an_unsafe_remote_url(self, monkeypatch, tmp_path):
+        captured = {}
+
+        def fake_run(*args, **kwargs):
+            captured["args"] = args[0]
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr="")
+
+        monkeypatch.setattr(proc, "IS_WINDOWS", True)
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        invocation = snyk_cli.ScanInvocation(remote_url="https://example.test/repo&calc.exe")
+        snyk_cli.run_secrets_scan(tmp_path, invocation, timeout=1)
+        assert "--remote-repo-url" not in captured["args"][-1]
 
 
 class TestRunSecretsScanWithRetries:
@@ -1725,7 +1989,7 @@ class TestRunSecretsScanWithRetries:
             return results.pop(0)
 
         monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_scan)
-        invocation = snyk_cli.ScanInvocation(snyk_bin="snyk")
+        invocation = snyk_cli.ScanInvocation()
         attempt = snyk_cli.run_secrets_scan_with_retries(
             tmp_path, invocation, time.monotonic() + 30
         )
@@ -1739,7 +2003,7 @@ class TestRunSecretsScanWithRetries:
             return "error", []
 
         monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_scan)
-        invocation = snyk_cli.ScanInvocation(snyk_bin="snyk")
+        invocation = snyk_cli.ScanInvocation()
         attempt = snyk_cli.run_secrets_scan_with_retries(
             tmp_path, invocation, time.monotonic() + 30
         )
@@ -1757,7 +2021,7 @@ class TestRunSecretsScanWithRetries:
             return "error", []
 
         monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_scan)
-        invocation = snyk_cli.ScanInvocation(snyk_bin="snyk")
+        invocation = snyk_cli.ScanInvocation()
         attempt = snyk_cli.run_secrets_scan_with_retries(tmp_path, invocation, time.monotonic() - 1)
         assert (attempt.status, attempt.attempts) == ("timeout", 0)
         assert calls == []
@@ -1770,7 +2034,7 @@ class TestRunSecretsScanWithRetries:
             return "unparseable", []
 
         monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_scan)
-        invocation = snyk_cli.ScanInvocation(snyk_bin="snyk")
+        invocation = snyk_cli.ScanInvocation()
         attempt = snyk_cli.run_secrets_scan_with_retries(
             tmp_path, invocation, time.monotonic() + 30
         )
@@ -1782,14 +2046,51 @@ class TestRunSecretsScanWithRetries:
 
         def fake_scan(workspace, invocation, timeout):
             calls.append(1)
-            return "auth_required", []
+            raise snyk_cli.AuthRequiredError("abc")
 
         monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_scan)
-        invocation = snyk_cli.ScanInvocation(snyk_bin="snyk")
-        attempt = snyk_cli.run_secrets_scan_with_retries(
-            tmp_path, invocation, time.monotonic() + 30
-        )
-        assert (attempt.status, attempt.attempts) == ("auth_required", 1)
+        invocation = snyk_cli.ScanInvocation()
+        with pytest.raises(snyk_cli.AuthRequiredError):
+            snyk_cli.run_secrets_scan_with_retries(tmp_path, invocation, time.monotonic() + 30)
+        assert len(calls) == 1
+
+    def test_not_entitled_is_not_retried(self, monkeypatch, tmp_path):
+        calls = []
+
+        def fake_scan(workspace, invocation, timeout):
+            calls.append(1)
+            raise snyk_cli.NotEntitledError("abc")
+
+        monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_scan)
+        invocation = snyk_cli.ScanInvocation()
+        with pytest.raises(snyk_cli.NotEntitledError):
+            snyk_cli.run_secrets_scan_with_retries(tmp_path, invocation, time.monotonic() + 30)
+        assert len(calls) == 1
+
+    def test_entitlement_check_failed_is_not_retried(self, monkeypatch, tmp_path):
+        calls = []
+
+        def fake_scan(workspace, invocation, timeout):
+            calls.append(1)
+            raise snyk_cli.EntitlementCheckFailedError()
+
+        monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_scan)
+        invocation = snyk_cli.ScanInvocation()
+        with pytest.raises(snyk_cli.EntitlementCheckFailedError):
+            snyk_cli.run_secrets_scan_with_retries(tmp_path, invocation, time.monotonic() + 30)
+        assert len(calls) == 1
+
+    def test_permanent_scan_failure_is_not_retried(self, monkeypatch, tmp_path):
+        calls = []
+
+        def fake_scan(workspace, invocation, timeout):
+            calls.append(1)
+            raise snyk_cli.PermanentScanFailureError("fallback wording", "abc")
+
+        monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_scan)
+        invocation = snyk_cli.ScanInvocation()
+        with pytest.raises(snyk_cli.PermanentScanFailureError):
+            snyk_cli.run_secrets_scan_with_retries(tmp_path, invocation, time.monotonic() + 30)
         assert len(calls) == 1
 
     def test_passes_invocation_through_to_run_secrets_scan(self, monkeypatch, tmp_path):
@@ -1800,9 +2101,7 @@ class TestRunSecretsScanWithRetries:
             return "success", []
 
         monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_scan)
-        invocation = snyk_cli.ScanInvocation(
-            snyk_bin="snyk", remote_url="git@github.com:acme/repo.git"
-        )
+        invocation = snyk_cli.ScanInvocation(remote_url="git@github.com:acme/repo.git")
         snyk_cli.run_secrets_scan_with_retries(tmp_path, invocation, time.monotonic() + 30)
         assert received == [invocation]
 
@@ -1817,7 +2116,7 @@ class TestRunConcurrentScans:
 
         monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_run_secrets_scan)
         current_dir, baseline_dir = tmp_path / "current", tmp_path / "baseline"
-        invocation = snyk_cli.ScanInvocation(snyk_bin="snyk")
+        invocation = snyk_cli.ScanInvocation()
         snyk_cli.run_concurrent_scans(current_dir, baseline_dir, invocation, time.monotonic() + 5)
         assert current_dir in calls
         assert baseline_dir in calls
@@ -1834,9 +2133,7 @@ class TestRunConcurrentScans:
 
         monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_run_secrets_scan)
         current_dir, baseline_dir = tmp_path / "current", tmp_path / "baseline"
-        invocation = snyk_cli.ScanInvocation(
-            snyk_bin="snyk", remote_url="git@github.com:acme/repo.git"
-        )
+        invocation = snyk_cli.ScanInvocation(remote_url="git@github.com:acme/repo.git")
         snyk_cli.run_concurrent_scans(current_dir, baseline_dir, invocation, time.monotonic() + 5)
         assert received[str(current_dir)] == invocation
         assert received[str(baseline_dir)] == invocation
@@ -1846,7 +2143,7 @@ class TestRunConcurrentScans:
             return ("success", []) if "current" in str(workspace) else ("timeout", [])
 
         monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_run_secrets_scan)
-        invocation = snyk_cli.ScanInvocation(snyk_bin="snyk")
+        invocation = snyk_cli.ScanInvocation()
         (current_result, baseline_result) = snyk_cli.run_concurrent_scans(
             tmp_path / "current", tmp_path / "baseline", invocation, time.monotonic() + 5
         )
@@ -1862,7 +2159,7 @@ class TestRunConcurrentScans:
             return "success", []
 
         monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_run_secrets_scan)
-        invocation = snyk_cli.ScanInvocation(snyk_bin="snyk")
+        invocation = snyk_cli.ScanInvocation()
         start = time.monotonic()
         snyk_cli.run_concurrent_scans(
             tmp_path / "current", tmp_path / "baseline", invocation, time.monotonic() + 5
@@ -1887,7 +2184,7 @@ class TestRunConcurrentScans:
         deadline = time.monotonic() + 0.05
 
         start = time.monotonic()
-        invocation = snyk_cli.ScanInvocation(snyk_bin="snyk")
+        invocation = snyk_cli.ScanInvocation()
         current, baseline = snyk_cli.run_concurrent_scans(
             tmp_path / "current", tmp_path / "baseline", invocation, deadline
         )
@@ -1900,6 +2197,68 @@ class TestRunConcurrentScans:
         # was actively scanning -- report 1, not a misleading 0.
         assert current.attempts == 1
         assert baseline.attempts == 1
+
+    def test_expected_exceptions_propagate_unwrapped(self, monkeypatch, tmp_path):
+        def fake_run_secrets_scan(workspace, invocation, timeout):
+            raise snyk_cli.NotEntitledError("org not entitled")
+
+        monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_run_secrets_scan)
+        invocation = snyk_cli.ScanInvocation()
+        with pytest.raises(snyk_cli.NotEntitledError) as exc_info:
+            snyk_cli.run_concurrent_scans(
+                tmp_path / "current", tmp_path / "baseline", invocation, time.monotonic() + 5
+            )
+        assert exc_info.value.message == "org not entitled"
+
+    def test_baseline_expected_exception_falls_back_to_an_error_result(self, monkeypatch, tmp_path):
+        current_workspace = tmp_path / "current"
+        baseline_workspace = tmp_path / "baseline"
+
+        def fake_run_secrets_scan(workspace, invocation, timeout):
+            if workspace == baseline_workspace:
+                raise snyk_cli.PermanentScanFailureError("too many files")
+            return "success", []
+
+        monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_run_secrets_scan)
+        current, baseline = snyk_cli.run_concurrent_scans(
+            current_workspace,
+            baseline_workspace,
+            snyk_cli.ScanInvocation(),
+            time.monotonic() + 5,
+        )
+        assert current.status == "success"
+        assert baseline.status == "error"
+
+    def test_baseline_exception_propagates_when_current_scan_failed(self, monkeypatch, tmp_path):
+        current_workspace = tmp_path / "current"
+        baseline_workspace = tmp_path / "baseline"
+
+        def fake_run_secrets_scan(workspace, invocation, timeout):
+            if workspace == baseline_workspace:
+                raise snyk_cli.AuthRequiredError("authenticate")
+            return "error", []
+
+        monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_run_secrets_scan)
+        with pytest.raises(snyk_cli.AuthRequiredError):
+            snyk_cli.run_concurrent_scans(
+                current_workspace,
+                baseline_workspace,
+                snyk_cli.ScanInvocation(),
+                time.monotonic() + 5,
+            )
+
+    def test_unexpected_exception_is_wrapped(self, monkeypatch, tmp_path):
+        def fake_run_secrets_scan(workspace, invocation, timeout):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(snyk_cli, "run_secrets_scan", fake_run_secrets_scan)
+        invocation = snyk_cli.ScanInvocation()
+        with pytest.raises(snyk_cli.UnexpectedScanError) as exc_info:
+            snyk_cli.run_concurrent_scans(
+                tmp_path / "current", tmp_path / "baseline", invocation, time.monotonic() + 5
+            )
+        assert str(exc_info.value) == "RuntimeError: boom"
+        assert isinstance(exc_info.value.__cause__, RuntimeError)
 
 
 # ============================================================================
@@ -2260,54 +2619,67 @@ class TestSummaryLine:
         # introduced -- say so, instead of a bare "3 blocking" that reads
         # as inconsistent next to 4 printed lines.
         line = timing.summary_line(timing.Timer(), 3, under_review_count=1, added_ignored_count=1)
-        assert line.endswith("4 new findings introduced, 3 blocking (1 already under review)")
+        assert line.endswith(
+            "4 new findings introduced, 3 blocking (1 already under review), 1 already ignored"
+        )
 
     def test_added_ignored_count_without_under_review(self):
         line = timing.summary_line(timing.Timer(), 1, added_ignored_count=1)
-        assert line.endswith("2 new findings introduced, 1 blocking")
+        assert line.endswith("2 new findings introduced, 1 blocking, 1 already ignored")
 
     def test_added_ignored_count_reconciles_even_when_nothing_blocks(self):
         # Nothing is blocking, but a new finding was still introduced (and
         # covered by an existing ignore) -- "no secrets found" would
-        # contradict the "already covered by an ignore" notice above it.
+        # contradict that.
         line = timing.summary_line(timing.Timer(), 0, added_ignored_count=1)
-        assert line.endswith("1 new finding introduced, 0 blocking")
+        assert line.endswith("1 new finding introduced, 0 blocking, 1 already ignored")
         assert "no secrets found" not in line
 
-    def test_pre_existing_notice_singular(self):
-        assert (
-            timing.pre_existing_notice(1)
-            == "1 finding classified as pre-existing; not blocking this commit"
-        )
-
-    def test_pre_existing_notice_plural(self):
-        assert (
-            timing.pre_existing_notice(2)
-            == "2 findings classified as pre-existing; not blocking this commit"
-        )
-
-    def test_summary_line_omits_pre_existing_notice(self):
+    def test_summary_line_omits_pre_existing_detail(self):
+        # Detail belongs to history_line; the headline stays consistent.
         line = timing.summary_line(timing.Timer(), 0, pre_existing_count=1)
         assert line.endswith("no blocking secrets found")
         assert "pre-existing" not in line
 
-    def test_pre_existing_ignored_notice(self):
-        assert timing.pre_existing_ignored_notice(1) == (
-            "1 previously-ignored finding still present; not blocking this commit"
-        )
+    def test_summary_line_removed_count_also_avoids_no_secrets_found(self):
+        # A cleanup-only run still has history to report.
+        line = timing.summary_line(timing.Timer(), 0, removed_count=1)
+        assert line.endswith("no blocking secrets found")
 
-    def test_added_ignored_notice(self):
-        assert timing.added_ignored_notice(1) == (
-            "1 new finding already covered by an ignore; not blocking this commit"
-        )
+    def test_summary_line_truly_nothing_says_no_secrets_found(self):
+        line = timing.summary_line(timing.Timer(), 0, pre_existing_count=0, removed_count=0)
+        assert line.endswith("no secrets found")
 
-    def test_removed_notice(self):
-        assert timing.removed_notice(2) == "cleaned up 2 pre-existing secrets, nice job"
+    def test_highlight_blocking_colors_only_the_blocking_clause(self):
+        line = timing.summary_line(timing.Timer(), 2, highlight_blocking=True)
+        colored = f"{timing._ANSI_BOLD_RED}2 findings blocking{timing._ANSI_RESET}"
+        assert line.endswith(f"{colored} commit")
 
-    def test_removed_ignored_notice(self):
-        assert (
-            timing.removed_ignored_notice(1) == "cleaned up 1 previously-ignored secret, nice job"
+    def test_highlight_blocking_is_absent_when_nothing_blocks(self):
+        line = timing.summary_line(
+            timing.Timer(), 0, added_ignored_count=1, highlight_blocking=True
         )
+        assert "\033[" not in line
+
+
+class TestHistoryLine:
+    def test_nothing_to_report_is_empty(self):
+        assert timing.history_line(0, 0) == ""
+
+    def test_pre_existing_only_singular(self):
+        assert timing.history_line(1, 0) == "history: 1 pre-existing finding"
+
+    def test_pre_existing_only_plural(self):
+        assert timing.history_line(2, 0) == "history: 2 pre-existing findings"
+
+    def test_removed_only_singular(self):
+        assert timing.history_line(0, 1) == "history: 1 secret cleaned up"
+
+    def test_removed_only_plural(self):
+        assert timing.history_line(0, 2) == "history: 2 secrets cleaned up"
+
+    def test_both_combined(self):
+        assert timing.history_line(1, 1) == "history: 1 pre-existing finding, 1 secret cleaned up"
 
 
 # ============================================================================
@@ -3456,6 +3828,11 @@ class TestWrapForPrefix:
         assert len(new) < len(old_uniform)
         assert all(len(line) <= secrets_hook._WRAP_WIDTH for line in new)
 
+    def test_colored_span_stays_intact_when_wrapped(self):
+        colored = f"{timing._ANSI_BOLD_RED}1 blocking{timing._ANSI_RESET}"
+        lines = secrets_hook._wrap_for_prefix(f"before {colored} after", "", width=20)
+        assert any(line.strip() == colored for line in lines)
+
 
 class TestLogColor:
     """`color=` is a display-only concern: it wraps the printed line, but
@@ -3483,6 +3860,15 @@ class TestLogColor:
         assert "\033" not in persisted
         assert "hello" in persisted
 
+    def test_embedded_color_is_not_persisted(self, monkeypatch, tmp_path):
+        log_file = str(tmp_path / "log.txt")
+        monkeypatch.setattr(secrets_hook, "_LOG_FILE", log_file)
+        message = f"1 {timing._ANSI_BOLD_RED}blocking{timing._ANSI_RESET} finding"
+        secrets_hook.log_cont(message)
+        persisted = Path(log_file).read_text()
+        assert "\033" not in persisted
+        assert persisted.endswith("1 blocking finding\n")
+
 
 # ============================================================================
 # 11. Output scenarios -- each asserts on and prints the hook's actual
@@ -3501,6 +3887,9 @@ class TestOutputScenarios:
     SYNTHETIC_SCAN_EXCEPTION = (
         "<UNEXPECTED_SCAN_ERROR_FROM_RUN_SECRETS_SCAN: real exception message would appear here>"
     )
+    # Fake org id, UUID-shaped only to match what the real CLI would emit --
+    # not a credential, but named explicitly so it doesn't read as one.
+    FAKE_ORG_ID = "13d16b4e-9c09-46e6-92ca-57aa867a1075"
     NEW_FINDING = findings.Finding(
         id="aws-access-token",
         title="Aws-Access-Token",
@@ -3650,15 +4039,11 @@ class TestOutputScenarios:
         rc, err = self._run(capsys, "clean commit, pre-existing secret", [])
         assert rc == secrets_hook.EXIT_OK
         assert re.search(
-            r"^  1 finding classified as pre-existing; not blocking this commit$",
-            err,
-            re.M,
-        )
-        assert re.search(
             r"^  done in [\d.]+s -- no blocking secrets found$",
             err,
             re.M,
         )
+        assert re.search(r"^  history: 1 pre-existing finding$", err, re.M)
 
     def _fake_classify(self, monkeypatch, added=(), pre_existing=(), removed=()):
         """Bypasses classify_by_content's real matching -- these tests are
@@ -3682,11 +4067,10 @@ class TestOutputScenarios:
         self._fake_classify(monkeypatch, added=[finding])
         rc, err = self._run(capsys, "added finding already ignored", [])
         assert rc == secrets_hook.EXIT_OK
-        assert "1 new finding already covered by an ignore; not blocking this commit" in err
+        assert "1 new finding introduced, 0 blocking, 1 already ignored" in err
 
-    def test_added_and_ignored_still_shows_its_position(self, monkeypatch, capsys):
-        # The count-only notice above doesn't say *which* new instance it
-        # is -- print its file/line like a blocking finding would.
+    def test_added_and_ignored_is_not_itemized(self, monkeypatch, capsys):
+        # Only blocking findings need file/line detail.
         finding = findings.Finding(
             id="aws-access-token",
             title="Aws-Access-Token",
@@ -3699,13 +4083,10 @@ class TestOutputScenarios:
         self._fake_classify(monkeypatch, added=[finding])
         rc, err = self._run(capsys, "added finding already ignored, with position", [])
         assert rc == secrets_hook.EXIT_OK
-        assert "config.py(1,1):" in err
-        assert "(already ignored)" in err
+        assert "config.py(1,1):" not in err
         assert "snyk ignore create" not in err
 
-    def test_blocking_and_added_ignored_together_are_separated_and_reconciled(
-        self, monkeypatch, capsys
-    ):
+    def test_blocking_and_added_ignored_together_only_itemizes_blocking(self, monkeypatch, capsys):
         blocking_finding = findings.Finding(
             id="aws-access-token",
             title="Aws-Access-Token",
@@ -3726,34 +4107,30 @@ class TestOutputScenarios:
         self._fake_classify(monkeypatch, added=[blocking_finding, ignored_finding])
         rc, err = self._run(capsys, "blocking and added-ignored together", [])
         assert rc == secrets_hook.EXIT_BLOCK
-        assert "done in 0.0s -- 2 new findings introduced, 1 blocking" in err
-        assert re.search(
-            r"new_secret\.py.*\n.*\(not blocking -- already covered by an existing ignore\)"
-            r"\n.*config\.py",
-            err,
-        )
+        assert "done in 0.0s -- 2 new findings introduced, 1 blocking, 1 already ignored" in err
+        assert "new_secret.py" in err
+        assert "config.py" not in err
 
-    def test_pre_existing_ignored_gets_its_own_notice(self, monkeypatch, capsys):
+    def test_pre_existing_ignored_collapses_into_history(self, monkeypatch, capsys):
         finding = findings.Finding(id="x", file_path="app.py", start_line=1, suppression="accepted")
         self._fake_classify(monkeypatch, pre_existing=[finding])
         rc, err = self._run(capsys, "pre-existing finding already ignored", [])
         assert rc == secrets_hook.EXIT_OK
-        assert "1 previously-ignored finding still present; not blocking this commit" in err
-        assert "classified as pre-existing" not in err
+        assert re.search(r"^  history: 1 pre-existing finding$", err, re.M)
 
-    def test_removed_finding_shows_cleanup_notice(self, monkeypatch, capsys):
+    def test_removed_finding_shows_history_line(self, monkeypatch, capsys):
         finding = findings.Finding(id="x", file_path="app.py", start_line=1)
         self._fake_classify(monkeypatch, removed=[finding])
         rc, err = self._run(capsys, "pre-existing secret removed", [])
         assert rc == secrets_hook.EXIT_OK
-        assert "cleaned up 1 pre-existing secret" in err
+        assert re.search(r"^  history: 1 secret cleaned up$", err, re.M)
 
-    def test_removed_ignored_finding_shows_nice_job_notice(self, monkeypatch, capsys):
+    def test_removed_ignored_finding_also_counts_toward_history(self, monkeypatch, capsys):
         finding = findings.Finding(id="x", file_path="app.py", start_line=1, suppression="accepted")
         self._fake_classify(monkeypatch, removed=[finding])
         rc, err = self._run(capsys, "previously-ignored secret removed", [])
         assert rc == secrets_hook.EXIT_OK
-        assert "cleaned up 1 previously-ignored secret, nice job" in err
+        assert re.search(r"^  history: 1 secret cleaned up$", err, re.M)
 
     def test_under_review_added_finding_still_blocks_but_is_flagged(self, monkeypatch, capsys):
         finding = findings.Finding(
@@ -3797,15 +4174,14 @@ class TestOutputScenarios:
             re.M,
         )
 
-    def test_pre_existing_under_review_gets_its_own_notice(self, monkeypatch, capsys):
+    def test_pre_existing_under_review_collapses_into_history(self, monkeypatch, capsys):
         finding = findings.Finding(
             id="x", file_path="app.py", start_line=1, suppression="underReview"
         )
         self._fake_classify(monkeypatch, pre_existing=[finding])
         rc, err = self._run(capsys, "pre-existing finding under review", [])
         assert rc == secrets_hook.EXIT_OK
-        assert "1 pre-existing finding awaiting ignore review; not blocking this commit" in err
-        assert "classified as pre-existing" not in err
+        assert re.search(r"^  history: 1 pre-existing finding$", err, re.M)
 
     def test_blocking_no_pre_existing(self, monkeypatch, capsys, tmp_path):
         monkeypatch.setattr(
@@ -3902,15 +4278,11 @@ class TestOutputScenarios:
         rc, err = self._run(capsys, "blocking, with pre-existing also present", [])
         assert rc == secrets_hook.EXIT_BLOCK
         assert re.search(
-            r"^  1 finding classified as pre-existing; not blocking this commit$",
-            err,
-            re.M,
-        )
-        assert re.search(
             r"^  done in [\d.]+s -- 1 finding blocking commit$",
             err,
             re.M,
         )
+        assert re.search(r"^  history: 1 pre-existing finding$", err, re.M)
 
     def test_snyk_cli_not_found(self, monkeypatch, capsys):
         monkeypatch.setattr(secrets_hook, "find_snyk_binary", lambda: None)
@@ -3924,23 +4296,43 @@ class TestOutputScenarios:
         monkeypatch.setattr(secrets_hook, "check_snyk_auth", lambda: None)
         rc, err = self._run(capsys, "Snyk CLI not authenticated (fail-closed, default)", [])
         assert rc == secrets_hook.EXIT_BLOCK
-        assert "Snyk CLI not authenticated -- run `/usr/bin/snyk auth`" in err
-        assert "blocking commit" in err
+        assert "Snyk CLI not authenticated; blocking commit" in err
+        assert "run `/usr/bin/snyk auth`" in err
+        assert "if that doesn't work, contact your Snyk administrator" in err
         assert "set SECRETS_BLOCK_ON_SCAN_FAILURE=0 to allow the commit" in err
+
+    def test_relative_xdg_config_path_is_actionable(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            secrets_hook,
+            "check_snyk_auth",
+            lambda: (_ for _ in ()).throw(
+                secrets_hook.InvalidConfigError(
+                    "XDG_CONFIG_HOME must be an absolute path; unset it or set it to an absolute directory"
+                )
+            ),
+        )
+        rc, err = self._run(capsys, "relative XDG config path", [])
+        assert rc == secrets_hook.EXIT_BLOCK
+        assert "XDG_CONFIG_HOME must be an absolute path" in err
+        assert "blocking commit" in err
 
     def test_scan_auth_failure_hint_names_the_resolved_binary(self, monkeypatch, capsys):
         # A standalone-pin user may have no `snyk` on PATH to run at all.
         monkeypatch.setattr(secrets_hook, "find_snyk_binary", lambda: "/opt/snyk/snyk")
-        monkeypatch.setattr(
-            secrets_hook, "run_secrets_scan_with_retries", lambda *a, **kw: ("auth_required", [])
-        )
-        rc, err = self._run(capsys, "scan reported auth_required (fail-closed, default)", [])
+
+        def _raise_auth_required(*a, **kw):
+            raise secrets_hook.AuthRequiredError()
+
+        monkeypatch.setattr(secrets_hook, "run_secrets_scan_with_retries", _raise_auth_required)
+        rc, err = self._run(capsys, "scan reported auth required (fail-closed, default)", [])
         assert rc == secrets_hook.EXIT_BLOCK
         assert re.search(
-            r"^  Snyk CLI not authenticated -- run `/opt/snyk/snyk auth`; blocking commit$",
+            r"^  Snyk CLI not authenticated; blocking commit$",
             err,
             re.M,
         )
+        assert re.search(r"^  run `/opt/snyk/snyk auth`$", err, re.M)
+        assert re.search(r"^  if that doesn't work, contact your Snyk administrator$", err, re.M)
 
     def test_scan_error_hint_names_the_resolved_binary(self, monkeypatch, capsys):
         monkeypatch.setattr(secrets_hook, "find_snyk_binary", lambda: "/opt/snyk/snyk")
@@ -3961,6 +4353,111 @@ class TestOutputScenarios:
         assert rc == secrets_hook.EXIT_BLOCK
         assert "scan output could not be parsed; blocking commit" in err
 
+    def test_not_entitled_passes_cli_message_through(self, monkeypatch, capsys):
+        monkeypatch.setenv("SECRETS_BLOCK_ON_SCAN_FAILURE", "1")
+        cli_message = (
+            f"Snyk Secrets is not supported for org {self.FAKE_ORG_ID}: "
+            "enable it in Settings > Snyk Secrets"
+        )
+
+        def _raise_not_entitled(*a, **kw):
+            raise secrets_hook.NotEntitledError(cli_message)
+
+        monkeypatch.setattr(secrets_hook, "run_secrets_scan_with_retries", _raise_not_entitled)
+        rc, err = self._run(capsys, "org not entitled to Snyk Secrets", [])
+        assert rc == secrets_hook.EXIT_OK
+        expected = cli_message.replace(
+            "Settings > Snyk Secrets", "Settings\u00a0>\u00a0Snyk\u00a0Secrets"
+        )
+        assert f"{expected} -- allowing commit without scanning" in self._dewrap(err)
+        # The non-breaking spaces keep this phrase from being split across a
+        # wrapped line -- confirm it actually lands on one printed line.
+        assert any("Settings > Snyk Secrets" in line for line in err.splitlines())
+
+    def test_auth_required_passes_cli_message_through(self, monkeypatch, capsys):
+        # Unlike NotEntitledError, auth failures still respect
+        # SECRETS_BLOCK_ON_SCAN_FAILURE (blocks by default) -- a fresh
+        # `snyk auth` fixes this, so it's not an unconditional allow.
+        cli_message = "Use `snyk auth` to authenticate."
+
+        def _raise_auth_required(*a, **kw):
+            raise secrets_hook.AuthRequiredError(cli_message)
+
+        monkeypatch.setattr(secrets_hook, "run_secrets_scan_with_retries", _raise_auth_required)
+        rc, err = self._run(capsys, "auth failure passes CLI message through", [])
+        assert rc == secrets_hook.EXIT_BLOCK
+        assert f"{cli_message}; blocking commit" in err
+        assert "run `/usr/bin/snyk auth`" in err
+        assert "if that doesn't work, contact your Snyk administrator" in err
+
+    def test_permanent_scan_failure_passes_cli_message_through(self, monkeypatch, capsys):
+        cli_message = "No supported files found."
+
+        def _raise_permanent_failure(*a, **kw):
+            raise secrets_hook.PermanentScanFailureError(
+                "no files in this commit are eligible to scan", cli_message
+            )
+
+        monkeypatch.setattr(secrets_hook, "run_secrets_scan_with_retries", _raise_permanent_failure)
+        rc, err = self._run(capsys, "permanent scan failure passes CLI message through", [])
+        assert rc == secrets_hook.EXIT_BLOCK
+        assert f"{cli_message}; blocking commit" in err
+        assert "run `/usr/bin/snyk secrets test` manually to check" in err
+
+    def test_permanent_scan_failure_falls_back_when_no_cli_message(self, monkeypatch, capsys):
+        def _raise_permanent_failure(*a, **kw):
+            raise secrets_hook.PermanentScanFailureError(
+                "this commit has more files than Snyk Secrets can scan at once"
+            )
+
+        monkeypatch.setattr(secrets_hook, "run_secrets_scan_with_retries", _raise_permanent_failure)
+        rc, err = self._run(capsys, "permanent scan failure falls back", [])
+        assert rc == secrets_hook.EXIT_BLOCK
+        assert (
+            "this commit has more files than Snyk Secrets can scan at once; blocking commit" in err
+        )
+
+    def test_not_entitled_without_a_message_falls_back_to_generic_wording(
+        self, monkeypatch, capsys
+    ):
+        def _raise_not_entitled(*a, **kw):
+            raise secrets_hook.NotEntitledError(None)
+
+        monkeypatch.setattr(secrets_hook, "run_secrets_scan_with_retries", _raise_not_entitled)
+        rc, err = self._run(capsys, "org not entitled, no message parsed", [])
+        assert rc == secrets_hook.EXIT_OK
+        assert (
+            "org is not entitled to Snyk Secrets -- allowing commit without scanning"
+            in self._dewrap(err)
+        )
+
+    def test_entitlement_check_failed_always_allows_even_with_block_on_failure(
+        self, monkeypatch, capsys
+    ):
+        monkeypatch.setenv("SECRETS_BLOCK_ON_SCAN_FAILURE", "1")
+
+        def _raise_check_failed(*a, **kw):
+            raise secrets_hook.EntitlementCheckFailedError()
+
+        monkeypatch.setattr(secrets_hook, "run_secrets_scan_with_retries", _raise_check_failed)
+        rc, err = self._run(capsys, "couldn't confirm Snyk Secrets entitlement", [])
+        assert rc == secrets_hook.EXIT_OK
+        assert (
+            "couldn't confirm whether Snyk Secrets is enabled for this Snyk Org -- allowing "
+            "commit without scanning" in self._dewrap(err)
+        )
+
+    def test_entitlement_check_failed_passes_cli_message_through(self, monkeypatch, capsys):
+        cli_message = "Workflow execution failed: Unable to check if the Secrets feature is enabled.: network error"
+
+        def _raise_check_failed(*a, **kw):
+            raise secrets_hook.EntitlementCheckFailedError(cli_message)
+
+        monkeypatch.setattr(secrets_hook, "run_secrets_scan_with_retries", _raise_check_failed)
+        rc, err = self._run(capsys, "entitlement check failed, CLI message passed through", [])
+        assert rc == secrets_hook.EXIT_OK
+        assert f"{cli_message} -- allowing commit without scanning" in self._dewrap(err)
+
     def test_exhausted_retries_message_reports_real_attempt_count(self, monkeypatch, capsys):
         def fake_concurrent(current_ws, baseline_ws, invocation, deadline):
             return (
@@ -3973,22 +4470,23 @@ class TestOutputScenarios:
         assert rc == secrets_hook.EXIT_BLOCK
         assert "scan did not complete after 3 attempts" in err
 
-    def test_stale_pin_falling_back_to_path_warns_outside_debug(self, monkeypatch, capsys):
-        # Otherwise the user believes they're scanning with the pinned
-        # standalone CLI while the hook quietly used the npm one.
+    def test_unusable_pinned_cli_is_a_prerequisite_failure(self, monkeypatch, capsys):
         sidecar = Path(os.path.expanduser("~")) / ".snyk-studio" / "cli-path"
         sidecar.parent.mkdir(parents=True, exist_ok=True)
         sidecar.write_text("/gone/snyk", encoding="utf-8")
+        monkeypatch.setattr(secrets_hook, "find_snyk_binary", lambda: "/gone/snyk")
         monkeypatch.setattr(
-            secrets_hook, "run_secrets_scan_with_retries", lambda *a, **kw: ("success", [])
+            secrets_hook,
+            "run_secrets_scan_with_retries",
+            lambda *args: pytest.fail("scan should not start"),
         )
-        rc, err = self._run(capsys, "stale pin, scanned with PATH fallback", [])
-        assert rc == secrets_hook.EXIT_OK
-        assert f"[snyk] {sidecar}" in err
-        assert (
-            'pins "/gone/snyk", which does not exist; scanning with /usr/bin/snyk instead'
-            in self._dewrap(err)
-        )
+
+        rc, err = self._run(capsys, "unusable pinned CLI", [])
+
+        assert rc == secrets_hook.EXIT_BLOCK
+        assert str(sidecar) in err
+        assert "does not exist" in err
+        assert "scan did not complete" not in err
 
     def test_no_sidecar_emits_no_stale_pin_warning(self, monkeypatch, capsys):
         monkeypatch.setattr(
@@ -4183,11 +4681,7 @@ class TestOutputScenarios:
         log_text = self._persisted_log_text(tmp_path)
         assert "[debug] scan scope: 1 file, 0 binary files" in log_text
         assert f"[debug] scan workspace: {self.current_snapshot_dir} (staged snapshot)" in log_text
-        assert re.search(
-            r"^  1 finding classified as pre-existing; not blocking this commit$",
-            err,
-            re.M,
-        )
+        assert re.search(r"^  history: 1 pre-existing finding$", err, re.M)
         assert re.search(
             r"^  done in [\d.]+s -- no blocking secrets found$",
             err,
@@ -4213,9 +4707,6 @@ class TestOutputScenarios:
         assert "[debug] remote-repo-url: git@github.com:acme/repo.git" in err
 
     def test_unsafe_remote_url_is_rejected_when_resolved_cli_is_a_cmd(self, monkeypatch, capsys):
-        # The decision is made once, right after find_snyk_binary()
-        # resolves -- everything downstream (the scan invocation, the
-        # printed ignore hint) sees the same already-rejected value.
         monkeypatch.setattr(secrets_hook, "find_snyk_binary", lambda: r"C:\snyk\snyk.cmd")
         monkeypatch.setattr(proc, "IS_WINDOWS", True)
         monkeypatch.setattr(
@@ -4224,6 +4715,11 @@ class TestOutputScenarios:
             lambda *a, **kw: git_ops.RemoteUrlDecision.ok("https://example.com&calc.exe"),
         )
         captured = {}
+        monkeypatch.setattr(
+            secrets_hook,
+            "build_snyk_env",
+            lambda discovered: captured.update(snyk_bin=discovered) or {"PATH": ""},
+        )
 
         def fake_retries(workspace, invocation, deadline):
             captured["invocation"] = invocation
@@ -4233,15 +4729,13 @@ class TestOutputScenarios:
         monkeypatch.setattr(secrets_hook, "DEBUG", True)
         rc, err = self._run(capsys, "cmd-resolved CLI, unsafe remote", [])
         assert rc == secrets_hook.EXIT_OK
+        assert captured["snyk_bin"] == r"C:\snyk\snyk.cmd"
         assert captured["invocation"].remote_url is None
         assert captured["invocation"].needs_shell is True
         assert "[debug] remote-repo-url: (none -- origin remote unsafe" in err
 
-    def test_unsafe_looking_remote_url_is_kept_when_resolved_cli_is_a_native_exe(
-        self, monkeypatch, capsys
-    ):
-        # A native .exe never reaches a shell, even on Windows, so the
-        # same URL that gets rejected for a .cmd stays usable here.
+    def test_unsafe_remote_url_is_rejected_for_windows_native_exe(self, monkeypatch, capsys):
+        # Every Windows scan uses cmd.exe.
         monkeypatch.setattr(secrets_hook, "find_snyk_binary", lambda: r"C:\snyk\snyk.exe")
         monkeypatch.setattr(proc, "IS_WINDOWS", True)
         monkeypatch.setattr(
@@ -4256,9 +4750,9 @@ class TestOutputScenarios:
             return "success", [self.PRE_EXISTING_FINDING]
 
         monkeypatch.setattr(secrets_hook, "run_secrets_scan_with_retries", fake_retries)
-        rc, _ = self._run(capsys, "exe-resolved CLI, unsafe-looking remote", [])
+        rc, _ = self._run(capsys, "exe-resolved CLI, unsafe remote", [])
         assert rc == secrets_hook.EXIT_OK
-        assert captured["invocation"].remote_url == "https://example.com&calc.exe"
+        assert captured["invocation"].remote_url is None
         assert captured["invocation"].needs_shell is False
 
     def test_empty_commit_skips_scan_entirely(self, monkeypatch, capsys):
@@ -4570,7 +5064,7 @@ class TestHookScriptSubprocessWithFakeSnyk:
         result = self._run_hook(repo, fake_snyk_env)
 
         assert result.returncode == secrets_hook.EXIT_OK
-        assert "1 finding classified as pre-existing; not blocking this commit" in result.stderr
+        assert "history: 1 pre-existing finding" in result.stderr
         assert "done in " in result.stderr
         assert "no blocking secrets found" in result.stderr
 

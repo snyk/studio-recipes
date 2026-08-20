@@ -1,9 +1,9 @@
 """Materializes the staged index, or an arbitrary ref, into a temp dir so
 a scan sees exactly that content, not the working tree."""
 
+import os
 import shutil
 import subprocess
-import sys
 import tarfile
 import tempfile
 from contextlib import contextmanager
@@ -103,20 +103,14 @@ def _extract_archive(archive_bytes: bytes, dest: Path) -> bool:
     """Extracts a `git archive` tar stream into `dest`. False on error."""
     try:
         with tarfile.open(fileobj=BytesIO(archive_bytes)) as tar:
-            if sys.version_info >= (3, 12):
-                tar.extractall(dest, filter="data")
-            else:
-                _extract_defensively(tar, dest)
+            _extract_defensively(tar, dest)
     except (tarfile.TarError, OSError):
         return False
     return True
 
 
 def _extract_defensively(tar: tarfile.TarFile, dest: Path) -> None:
-    """Pre-3.12 stand-in for `filter="data"` (PEP 706): rejects path
-    traversal, strips setuid bits, raises TarError. More conservative
-    than the real filter on one point -- it rejects every symlink
-    outright -- which just means no baseline for this run."""
+    """Extract regular archive members into `dest` after validating paths."""
     dest = dest.resolve()
     for member in tar.getmembers():
         if member.type in (tarfile.XHDTYPE, tarfile.XGLTYPE):
@@ -126,8 +120,25 @@ def _extract_defensively(tar: tarfile.TarFile, dest: Path) -> None:
         target = (dest / member.name).resolve()
         if target != dest and dest not in target.parents:
             raise tarfile.TarError(f"refusing to extract path outside destination: {member.name}")
-        member.mode &= 0o777
-        tar.extract(member, dest)
+        permissions = member.mode & 0o777
+        if member.isdir():
+            target.mkdir(parents=True, exist_ok=True, mode=permissions)
+            target.chmod(permissions)
+            continue
+        source = tar.extractfile(member)
+        if source is None:
+            raise tarfile.TarError(f"could not read archive member: {member.name}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(dir=str(target.parent), prefix=f".{target.name}.")
+        temp_path = Path(temp_name)
+        try:
+            with source, os.fdopen(fd, "wb") as output:
+                shutil.copyfileobj(source, output)
+            os.replace(temp_path, target)
+        except BaseException:
+            temp_path.unlink(missing_ok=True)
+            raise
+        target.chmod(permissions)
 
 
 @contextmanager

@@ -59,7 +59,6 @@ def run_text(
     cwd: Optional[Path] = None,
     timeout: Optional[float] = None,
     env: Optional[Dict[str, str]] = None,
-    shell: bool = False,
 ) -> "subprocess.CompletedProcess[str]":
     """subprocess.run, decoded as UTF-8 text (errors="replace") instead of
     the OS locale default. May raise OSError or subprocess.TimeoutExpired."""
@@ -73,7 +72,7 @@ def run_text(
         env=env,
         timeout=timeout,
         check=False,
-        shell=shell,
+        shell=False,
         creationflags=CREATE_NO_WINDOW,
     )
 

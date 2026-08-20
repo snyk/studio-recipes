@@ -27,6 +27,14 @@ def _plural(count: int, noun: str) -> str:
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
+_ANSI_RESET = "\033[0m"
+_ANSI_BOLD_RED = "\033[1;31m"
+
+
+def _blocking_clause(text: str, highlight: bool) -> str:
+    return f"{_ANSI_BOLD_RED}{text}{_ANSI_RESET}" if highlight else text
+
+
 def summary_line(
     timer: Timer,
     findings_count: int,
@@ -34,48 +42,39 @@ def summary_line(
     pre_existing_count: int = 0,
     under_review_count: int = 0,
     added_ignored_count: int = 0,
+    removed_count: int = 0,
+    highlight_blocking: bool = False,
 ) -> str:
-    """The closing "done in ..." line for a *successful* scan -- a failed
-    scan gets its own message instead (see _handle_scan_failure)."""
+    """The closing "done in ..." line for a *successful* scan."""
     prefix = f"done in {timer.total_ms() / 1000:.1f}s"
+    highlight = highlight_blocking and findings_count > 0
     under_review_suffix = (
         f" ({under_review_count} already under review)" if under_review_count else ""
     )
     if added_ignored_count:
-        # The printed list below still shows the already-ignored ones --
-        # say so, or "no secrets found" would look inconsistent with it.
         total = findings_count + added_ignored_count
+        blocking = _blocking_clause(f"{findings_count} blocking", highlight)
         return (
             f"{prefix} -- {_plural(total, 'new finding')} introduced, "
-            f"{findings_count} blocking{under_review_suffix}"
+            f"{blocking}{under_review_suffix}, {added_ignored_count} already ignored"
         )
     if findings_count == 0:
-        noun = "no blocking secrets found" if pre_existing_count else "no secrets found"
+        # Keep the headline consistent with the history line below.
+        noun = (
+            "no blocking secrets found"
+            if (pre_existing_count or removed_count)
+            else "no secrets found"
+        )
         return f"{prefix} -- {noun}"
-    return f"{prefix} -- {_plural(findings_count, 'finding')} blocking commit{under_review_suffix}"
+    blocking = _blocking_clause(f"{_plural(findings_count, 'finding')} blocking", highlight)
+    return f"{prefix} -- {blocking} commit{under_review_suffix}"
 
 
-def pre_existing_notice(count: int) -> str:
-    return f"{_plural(count, 'finding')} classified as pre-existing; not blocking this commit"
-
-
-def pre_existing_ignored_notice(count: int) -> str:
-    return f"{_plural(count, 'previously-ignored finding')} still present; not blocking this commit"
-
-
-def pre_existing_under_review_notice(count: int) -> str:
-    return (
-        f"{_plural(count, 'pre-existing finding')} awaiting ignore review; not blocking this commit"
-    )
-
-
-def added_ignored_notice(count: int) -> str:
-    return f"{_plural(count, 'new finding')} already covered by an ignore; not blocking this commit"
-
-
-def removed_notice(count: int) -> str:
-    return f"cleaned up {_plural(count, 'pre-existing secret')}, nice job"
-
-
-def removed_ignored_notice(count: int) -> str:
-    return f"cleaned up {_plural(count, 'previously-ignored secret')}, nice job"
+def history_line(pre_existing_count: int, removed_count: int) -> str:
+    """Brief recap of pre-existing and removed findings."""
+    parts = []
+    if pre_existing_count:
+        parts.append(_plural(pre_existing_count, "pre-existing finding"))
+    if removed_count:
+        parts.append(f"{_plural(removed_count, 'secret')} cleaned up")
+    return f"history: {', '.join(parts)}" if parts else ""

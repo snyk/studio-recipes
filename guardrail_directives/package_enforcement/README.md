@@ -63,9 +63,17 @@ When an AI agent adds new dependencies to a project, these guardrails ensure:
 | `yarn.lock` | Yarn lockfile |
 | `pnpm-lock.yaml` | pnpm lockfile |
 
+## Variants
+
+Two complementary gates on dependency installation:
+
+- **Scan-before-install** (this directory) — installs are blocked until a Snyk scan of the manifest changes passes.
+- **[Malicious Code Defense registry enforcement](./mcd_registry/)** — installs are blocked unless they are served through the tenant's Snyk Malicious Code Defense registry proxy, which screens packages for malicious code before serving them. *Experimental Preview: requires a feature flag enabled for your tenant by Snyk.*
+
 ## Implementation
 
 - **[Cursor Hooks](./cursor/hooks/)** - Python hook script that enforces the scan-before-install gate
+- **[MCD Registry Enforcement](./mcd_registry/)** - Python hook script (Claude Code and Cursor) that enforces installation through the Malicious Code Defense registry
 
 ## See Also
 

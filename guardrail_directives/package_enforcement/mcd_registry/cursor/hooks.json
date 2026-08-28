@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      { "command": "python3 .cursor/hooks/enforce_mcd_registry.py" }
+    ]
+  }
+}

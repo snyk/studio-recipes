@@ -36,6 +36,15 @@ Blocks dependency installation until security scans pass.
 |---|---|
 | **[Cursor](./package_enforcement/cursor/)** | Deterministic (hooks) |
 
+### Malicious Code Defense Registry Enforcement — Experimental Preview
+
+Blocks dependency installation unless packages are served through the tenant's [Snyk Malicious Code Defense](./package_enforcement/mcd_registry/) registry proxy, which screens npm and PyPI packages for malicious code before serving them. Requires a feature flag enabled for your tenant by Snyk.
+
+| Coding Assistant | Enforcement |
+|---|---|
+| **[Claude Code](./package_enforcement/mcd_registry/)** | Deterministic (hooks) |
+| **[Cursor](./package_enforcement/mcd_registry/)** | Deterministic (hooks) |
+
 ---
 
 ## Choosing the enforcement model

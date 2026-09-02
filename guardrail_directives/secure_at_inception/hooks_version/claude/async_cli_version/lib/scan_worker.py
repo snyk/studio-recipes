@@ -26,8 +26,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from platform_utils import STUDIO_VERSION as SNYK_STUDIO_VERSION
+from platform_utils import (
+    ensure_process_in_kill_on_close_job,
+    needs_shell,
+    prepend_to_path,
+    snyk_cli_from_sidecar,
+)
 from platform_utils import log as _platform_log
-from platform_utils import prepend_to_path, snyk_cli_from_sidecar
 
 WORKSPACE = ""
 CACHE_DIR = ""
@@ -36,7 +41,6 @@ PID_FILE = ""
 DONE_FILE = ""
 LOG_FILE: Optional[str] = None
 
-_IS_WINDOWS = sys.platform == "win32"
 # Console apps (snyk / the cmd.exe shim) spawned from this windowless background
 # worker allocate a new console window on Windows; CREATE_NO_WINDOW suppresses the
 # flash. The flag only exists on Windows; elsewhere this is 0 (subprocess's
@@ -83,7 +87,14 @@ def finish(
 
     if PID_FILE and os.path.exists(PID_FILE):
         try:
-            os.remove(PID_FILE)
+            # Only remove the PID file if it still names this process: a
+            # cancelled worker that gets here after scan_runner already
+            # overwrote the file for a newer worker must not delete that
+            # newer worker's PID out from under it.
+            with open(PID_FILE) as f:
+                owned = f.read().strip() == str(os.getpid())
+            if owned:
+                os.remove(PID_FILE)
         except OSError:
             pass
 
@@ -108,6 +119,12 @@ def main() -> None:
 
     sys.path.insert(0, LIB_DIR)
     from scan_runner import parse_sarif_results
+
+    # Must happen before the snyk subprocess is spawned below: on Windows this
+    # binds the worker (and any child it spawns from here on) to a
+    # KILL_ON_JOB_CLOSE job, so cancel_scan/cancel_sca_scan terminating this
+    # process also reaches the snyk CLI child instead of orphaning it.
+    ensure_process_in_kill_on_close_job()
 
     started_at = datetime.now().isoformat()
     log("Scan worker started")
@@ -159,9 +176,16 @@ def main() -> None:
     except Exception:
         pass
 
+    cmd = [snyk_bin, "code", "test", ".", "--json"]
+    if needs_shell(snyk_bin):
+        # Only .cmd/.bat shims (e.g. an npm-installed snyk.cmd) need cmd.exe's
+        # own parsing; wrap explicitly here rather than passing shell=True
+        # unconditionally, which would route every scan through an extra
+        # cmd.exe process that "cancelling" this worker can't reach.
+        cmd = ["cmd.exe", "/d", "/s", "/c", subprocess.list2cmdline(cmd)]
     try:
         result = subprocess.run(
-            [snyk_bin, "code", "test", ".", "--json"],
+            cmd,
             capture_output=True,
             text=True,
             # snyk always emits UTF-8 JSON regardless of platform; text=True
@@ -176,7 +200,7 @@ def main() -> None:
             timeout=300,
             cwd=WORKSPACE,
             env=env,
-            shell=_IS_WINDOWS,
+            shell=False,
             creationflags=_CREATE_NO_WINDOW,
         )
         exit_code = result.returncode

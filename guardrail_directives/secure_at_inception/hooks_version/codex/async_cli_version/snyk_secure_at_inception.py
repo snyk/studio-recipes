@@ -72,6 +72,7 @@ from scan_runner import (  # noqa: E402 — imports follow sys.path setup
     save_manifest_hash_last_scan,
     snapshot_manifest_hashes,
     trigger_sca_scan,
+    trigger_scan,
     wait_for_sca_baseline_scan,
     wait_for_sca_scan,
     wait_for_scan,
@@ -748,15 +749,22 @@ def _track_code_file_edit(
     file_path: str,
     new_ranges: List[Dict[str, int]],
 ) -> int:
-    """Merge new_ranges into state[code_files][file_path]; return total range count."""
+    """Merge new_ranges into state[code_files][file_path]; return total range count.
+
+    Keyed with separators unified (backslash -> forward slash) so the same
+    file reported via differently-separated paths across separate tool calls
+    (both forms seen from Windows tooling) accumulates into one entry
+    instead of silently splitting into two.
+    """
+    file_key = file_path.replace("\\", "/")
     code_files = state.get("code_files", {})
-    existing = code_files.get(file_path, {}).get("modified_ranges", [])
-    code_files[file_path] = {
+    existing = code_files.get(file_key, {}).get("modified_ranges", [])
+    code_files[file_key] = {
         "modified_ranges": _accumulate_ranges(existing, new_ranges),
         "last_edit": datetime.now().isoformat(),
     }
     state["code_files"] = code_files
-    return len(code_files[file_path]["modified_ranges"])
+    return len(code_files[file_key]["modified_ranges"])
 
 
 def _whole_file_ranges(file_path: str) -> List[Dict[str, int]]:
@@ -1046,8 +1054,7 @@ def _evaluate_sast(
 
         if last_edit_ts and started_at and last_edit_ts > started_at:
             log_to_panel("[SAI] Edits after scan started, re-scanning...")
-            clear_scan_state(workspace)
-            launch_background_scan(workspace)
+            trigger_scan(workspace)
             scan_status = wait_for_scan(workspace, log_fn=log_to_panel)
             scan_succeeded = scan_status == "success"
             scan_info = None

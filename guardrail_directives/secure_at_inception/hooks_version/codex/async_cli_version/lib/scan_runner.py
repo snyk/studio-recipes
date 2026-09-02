@@ -34,6 +34,7 @@ from platform_utils import (
     prepend_to_path,
     resolve_log_file,
     snyk_cli_from_sidecar,
+    terminate_process_tree,
 )
 
 # =============================================================================
@@ -212,7 +213,7 @@ def check_snyk_auth() -> Optional[str]:
     try:
         with open(_get_snyk_config_path()) as f:
             config = json.load(f)
-        api_key = config.get("api")
+        api_key: object = config.get("api")
         if api_key and isinstance(api_key, str):
             return api_key
         if config.get("INTERNAL_OAUTH_TOKEN_STORAGE"):
@@ -385,6 +386,31 @@ class _ScanChannel:
                     os.remove(path)
                 except OSError:
                     pass
+
+    def cancel(self, workspace: str) -> None:
+        """Terminate any running worker's whole process tree, then clear state.
+
+        Terminating only the worker (and not the snyk CLI child it's blocked
+        on) would leave that child running orphaned, still consuming CPU —
+        see terminate_process_tree.
+        """
+        pid_file = self.pid_file(workspace)
+        try:
+            with file_lock(pid_file + ".lock"):
+                try:
+                    mtime = os.path.getmtime(pid_file)
+                    if time.time() - mtime > PID_STALENESS_TIMEOUT:
+                        raise OSError("stale pid file")
+                    with open(pid_file) as f:
+                        pid = int(f.read().strip())
+                    if not is_pid_alive(pid):
+                        raise ProcessLookupError(pid)
+                    terminate_process_tree(pid)
+                except (FileNotFoundError, ValueError, ProcessLookupError, OSError):
+                    pass
+        except OSError:
+            pass
+        self.clear_state(workspace)
 
 
 _sast = _ScanChannel("scan.pid", "scan.done", "scan_worker.py", "scan")
@@ -621,6 +647,17 @@ def clear_scan_state(workspace: str) -> None:
     _sast.clear_state(workspace)
 
 
+def cancel_scan(workspace: str) -> None:
+    """Terminate any running SAST worker (and its snyk child), then clear state."""
+    _sast.cancel(workspace)
+
+
+def trigger_scan(workspace: str) -> bool:
+    """Launch a SAST scan, cancelling any in-flight scan first."""
+    cancel_scan(workspace)
+    return launch_background_scan(workspace)
+
+
 # =============================================================================
 # SCAN STATE MANAGEMENT — public API (SCA)
 # =============================================================================
@@ -688,21 +725,8 @@ def clear_sca_scan_state(workspace: str) -> None:
 
 
 def cancel_sca_scan(workspace: str) -> None:
-    """SIGTERM any running SCA worker, then clear PID + done files."""
-    import signal
-
-    pid_file = get_sca_pid_file(workspace)
-    try:
-        if time.time() - os.path.getmtime(pid_file) > PID_STALENESS_TIMEOUT:
-            clear_sca_scan_state(workspace)
-            return
-        with open(pid_file) as f:
-            pid = int(f.read().strip())
-        if is_pid_alive(pid):
-            os.kill(pid, signal.SIGTERM)
-    except (FileNotFoundError, ValueError, ProcessLookupError, OSError):
-        pass
-    clear_sca_scan_state(workspace)
+    """Terminate any running SCA worker (and its snyk child), then clear state."""
+    _sca.cancel(workspace)
 
 
 def trigger_sca_scan(workspace: str) -> bool:

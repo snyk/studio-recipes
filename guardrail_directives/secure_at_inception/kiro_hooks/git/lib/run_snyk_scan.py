@@ -71,7 +71,7 @@ def check_snyk_auth() -> str | None:
             config = json.load(f)
     except (OSError, json.JSONDecodeError):
         return None
-    api_key = config.get("api")
+    api_key: object = config.get("api")
     if api_key and isinstance(api_key, str):
         return api_key
     if config.get("INTERNAL_OAUTH_TOKEN_STORAGE"):

@@ -1980,10 +1980,11 @@ def get_target_ades(
 
     if auto_yes or not hasattr(sys.stdin, "isatty") or not sys.stdin.isatty():
         print(
-            "  Error: no ADE detected; pass --ade to run non-interactively.",
+            f"  {C.yellow('WARNING')} no ADE detected; skipping ADE-scoped recipes "
+            "(pass --ade to target one explicitly)",
             file=sys.stderr,
         )
-        sys.exit(1)
+        return []
 
     print(f"  {C.yellow('WARNING')} No supported ADE detected")
     print()

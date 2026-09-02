@@ -68,6 +68,7 @@ from scan_runner import (  # noqa: E402 — imports follow sys.path setup
     save_manifest_hash_last_scan,
     snapshot_manifest_hashes,
     trigger_sca_scan,
+    trigger_scan,
     wait_for_sca_baseline_scan,
     wait_for_sca_scan,
     wait_for_scan,
@@ -641,6 +642,14 @@ def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
         pass
 
     if is_code:
+        # Tracked with separators unified so the same file edited via
+        # backslash- vs forward-slash-separated paths (both reported by
+        # Windows tooling across separate tool calls) accumulates into one
+        # entry instead of silently splitting into two. Only the separator
+        # is touched -- unlike normalize_path, the rest of the path (leading
+        # slash, ./ prefix) is left alone since this key never needs to be
+        # suffix-matched, only self-consistent across calls.
+        file_key = file_path.replace("\\", "/")
         with _state_lock(workspace):
             state = read_state(workspace)
 
@@ -656,8 +665,8 @@ def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
 
                 new_ranges = compute_modified_ranges(file_content, edits)
                 code_files = state.get("code_files", {})
-                existing = code_files.get(file_path, {}).get("modified_ranges", [])
-                code_files[file_path] = {
+                existing = code_files.get(file_key, {}).get("modified_ranges", [])
+                code_files[file_key] = {
                     "modified_ranges": _accumulate_ranges(existing, new_ranges),
                     "last_edit": datetime.now().isoformat(),
                 }
@@ -667,7 +676,7 @@ def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
                 content = tool_input.get("content", "")
                 line_count = content.count("\n") + 1 if content else 1
                 code_files = state.get("code_files", {})
-                code_files[file_path] = {
+                code_files[file_key] = {
                     "modified_ranges": [{"start": 1, "end": line_count}],
                     "last_edit": datetime.now().isoformat(),
                 }
@@ -675,7 +684,7 @@ def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
 
             state["last_edit_ts"] = datetime.now().isoformat()
             write_state(workspace, state)
-            range_count = len(state["code_files"][file_path]["modified_ranges"])
+            range_count = len(state["code_files"][file_key]["modified_ranges"])
 
         log_to_panel(f"[SAI] Tracked: {Path(file_path).name} ({range_count} range(s))")
 
@@ -792,8 +801,7 @@ def _evaluate_sast(
 
         if last_edit_ts and started_at and last_edit_ts > started_at:
             log_to_panel("[SAI] Edits after scan started, re-scanning...")
-            clear_scan_state(workspace)
-            launch_background_scan(workspace)
+            trigger_scan(workspace)
             scan_status = wait_for_scan(workspace, log_fn=log_to_panel)
             scan_succeeded = scan_status == "success"
             scan_info = None

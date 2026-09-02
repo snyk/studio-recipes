@@ -82,6 +82,177 @@ def _is_pid_alive_unix(pid: int) -> bool:
 
 
 # =============================================================================
+# PROCESS TREE TERMINATION
+# =============================================================================
+
+
+def terminate_process_tree(pid: int) -> None:
+    """Terminate a process and any children it spawned.
+
+    Signalling only ``pid`` is not enough here: the worker spends most of its
+    life blocked in a subprocess.run() call waiting on the real ``snyk``
+    child, and killing just the parent leaves that child running, orphaned,
+    doing real scan work with nothing left to reap it. Workers are launched
+    detached into their own session/process group (see
+    get_detached_popen_kwargs), so on POSIX the whole tree shares one pgid
+    and a single killpg reaches it. Windows has no process-group signal;
+    instead the worker binds itself (and any child it spawns) to a
+    KILL_ON_JOB_CLOSE job object at startup (see
+    ensure_process_in_kill_on_close_job), so simply terminating the worker's
+    own PID is enough -- Windows tears down the whole job the moment its last
+    handle closes, which also covers a worker that dies some other way
+    (crash, force-kill) without anyone calling this function at all.
+    """
+    if _IS_WINDOWS:
+        _terminate_process_tree_windows(pid)
+    else:
+        _terminate_process_tree_unix(pid)
+
+
+def _terminate_process_tree_unix(pid: int) -> None:
+    import signal
+
+    try:
+        pgid = os.getpgid(pid)
+    except OSError:
+        return
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except OSError:
+        pass
+
+
+def _terminate_process_tree_windows(pid: int) -> None:
+    import signal
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pass
+
+
+# =============================================================================
+# WINDOWS JOB OBJECT (kill-on-close)
+# =============================================================================
+
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
+
+# Kept alive for the lifetime of the process once set: closing the last
+# handle to the job is what triggers KILL_ON_JOB_CLOSE, so this must never be
+# allowed to go out of scope (and be garbage-collected/closed) while the
+# worker is still meant to be protected.
+_job_handle_keepalive: Optional[int] = None
+
+
+def _build_job_object_structs() -> type:
+    """Defines the ctypes structs lazily so importing this module never
+    touches ctypes.Structure on a platform where it might behave oddly.
+    Field layouts match WinNT.h; sizes/order are ABI-stable and unchanged
+    since Windows NT."""
+    import ctypes
+
+    class IoCounters(ctypes.Structure):
+        _fields_ = [
+            ("ReadOperationCount", ctypes.c_uint64),
+            ("WriteOperationCount", ctypes.c_uint64),
+            ("OtherOperationCount", ctypes.c_uint64),
+            ("ReadTransferCount", ctypes.c_uint64),
+            ("WriteTransferCount", ctypes.c_uint64),
+            ("OtherTransferCount", ctypes.c_uint64),
+        ]
+
+    class JobObjectBasicLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", ctypes.c_uint32),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", ctypes.c_uint32),
+            ("Affinity", ctypes.c_void_p),
+            ("PriorityClass", ctypes.c_uint32),
+            ("SchedulingClass", ctypes.c_uint32),
+        ]
+
+    class JobObjectExtendedLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", JobObjectBasicLimitInformation),
+            ("IoInfo", IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    return JobObjectExtendedLimitInformation
+
+
+def ensure_process_in_kill_on_close_job() -> None:
+    """Bind this process (and any child it later spawns) to a Windows Job
+    Object with KILL_ON_JOB_CLOSE, so the whole tree dies the moment this
+    process's job handle closes -- on clean exit, on being killed by
+    cancel_scan/cancel_sca_scan (terminate_process_tree), or on an
+    ungraceful crash that never runs any cleanup code at all. Child
+    processes join their creator's job automatically unless they opt out
+    with CREATE_BREAKAWAY_FROM_JOB, which this codebase never sets.
+
+    No-op on non-Windows. Best-effort: any failure (old Windows version,
+    security software blocking job creation, an ABI surprise) is swallowed
+    and the worker proceeds unprotected, exactly like before this existed.
+    Must be called before the snyk subprocess is spawned.
+    """
+    global _job_handle_keepalive
+    if not _IS_WINDOWS:
+        return
+    try:
+        import ctypes
+
+        JobObjectExtendedLimitInformation = _build_job_object_structs()
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+        kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p)
+        kernel32.SetInformationJobObject.restype = ctypes.c_int
+        kernel32.SetInformationJobObject.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+        )
+        kernel32.AssignProcessToJobObject.restype = ctypes.c_int
+        kernel32.AssignProcessToJobObject.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+        kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+        kernel32.GetCurrentProcess.argtypes = ()
+        kernel32.CloseHandle.restype = ctypes.c_int
+        kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return
+
+        info = JobObjectExtendedLimitInformation()
+        info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        ok = kernel32.SetInformationJobObject(
+            job,
+            _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        )
+        if not ok:
+            kernel32.CloseHandle(job)
+            return
+
+        if not kernel32.AssignProcessToJobObject(job, kernel32.GetCurrentProcess()):
+            kernel32.CloseHandle(job)
+            return
+
+        _job_handle_keepalive = job
+    except OSError:
+        pass
+
+
+# =============================================================================
 # SNYK BINARY SEARCH PATHS
 # =============================================================================
 
@@ -155,6 +326,18 @@ def _get_snyk_search_paths_unix(env: Dict[str, str]) -> List[str]:
 def get_snyk_binary_names() -> List[str]:
     """Return the possible filenames for the Snyk CLI."""
     return ["snyk.cmd", "snyk.exe", "snyk"]
+
+
+def needs_shell(binary_path: str) -> bool:
+    """True only when launching ``binary_path`` requires cmd.exe's own parsing.
+
+    Windows reroutes .cmd/.bat targets (e.g. an npm-installed ``snyk.cmd``
+    shim) through cmd.exe regardless of how the caller invokes them; a native
+    .exe launches directly via CreateProcess, no shell involved at all. This
+    keeps ``shell=True`` (and the extra cmd.exe hop it spawns) scoped to the
+    one case that actually needs it, instead of every Windows invocation.
+    """
+    return _IS_WINDOWS and binary_path.lower().endswith((".cmd", ".bat"))
 
 
 # =============================================================================

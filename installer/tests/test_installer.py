@@ -1986,7 +1986,7 @@ class TestDetectAdes:
 
 
 class TestGetTargetAdes:
-    def test_auto_yes_exits_when_no_ade_detected(self, monkeypatch, capsys):
+    def test_auto_yes_warns_and_returns_empty_when_no_ade_detected(self, monkeypatch, capsys):
         monkeypatch.setattr(installer, "detect_ades", lambda: [])
 
         def _no_input(*_a, **_kw):
@@ -1994,8 +1994,7 @@ class TestGetTargetAdes:
 
         monkeypatch.setattr("builtins.input", _no_input)
 
-        with pytest.raises(SystemExit):
-            installer.get_target_ades(None, auto_yes=True)
+        assert installer.get_target_ades(None, auto_yes=True) == []
         assert "no ADE detected" in capsys.readouterr().err
 
     def test_not_required_returns_empty_list_instead_of_exiting(self, monkeypatch, capsys):
@@ -2004,10 +2003,10 @@ class TestGetTargetAdes:
         assert installer.get_target_ades(None, auto_yes=True, required=False) == []
         assert "no ADE detected" in capsys.readouterr().out
 
-    def test_non_tty_stdin_exits_even_without_auto_yes(self, monkeypatch, capsys):
-        # Non-interactive stdin + no ADE detected/specified: must fail fast,
-        # not block on input(), even when auto_yes is False (e.g. --verify
-        # invoked with a piped/closed stdin).
+    def test_non_tty_stdin_warns_and_returns_empty_without_auto_yes(self, monkeypatch, capsys):
+        # Non-interactive stdin + no ADE detected/specified: must not block
+        # on input(), even when auto_yes is False (e.g. --verify invoked
+        # with a piped/closed stdin), and must not fail the run.
         monkeypatch.setattr(installer, "detect_ades", lambda: [])
         monkeypatch.setattr(sys.stdin, "isatty", lambda: False, raising=False)
 
@@ -2016,8 +2015,7 @@ class TestGetTargetAdes:
 
         monkeypatch.setattr("builtins.input", _no_input)
 
-        with pytest.raises(SystemExit):
-            installer.get_target_ades(None, auto_yes=False)
+        assert installer.get_target_ades(None, auto_yes=False) == []
         assert "no ADE detected" in capsys.readouterr().err
 
 

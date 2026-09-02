@@ -86,7 +86,7 @@ def _optional_string(parent: Dict[str, Any], key: str, default: str) -> str:
 
 
 def _optional_int(parent: Dict[str, Any], key: str, default: int = 0) -> int:
-    value = parent.get(key, default)
+    value: object = parent.get(key, default)
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{key} must be an integer")
     return value

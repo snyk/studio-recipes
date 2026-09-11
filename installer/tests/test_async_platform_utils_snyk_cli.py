@@ -175,3 +175,84 @@ def test_async_worker_uses_sidecar_cli_and_prepends_path(
 
     assert captured["cmd"] == [str(pinned), *expected_args]
     assert captured["env"]["PATH"].split(os.pathsep)[0] == str(pinned.parent)
+
+
+def _run_worker_capture(ade, worker_name, stdout, monkeypatch, tmp_path, session_id=None):
+    """Run an async worker with the SAI_* env a real launch supplies, capturing
+    the argv/env handed to the Snyk CLI. ``session_id`` (when not None) is set as
+    SAI_SESSION_ID — the transport var scan_runner._do_launch writes."""
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    cache_dir = tmp_path / "cache"
+    workspace.mkdir()
+    cache_dir.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", str(tmp_path / "path"))
+    monkeypatch.setenv("SNYK_TOKEN", "token")
+    monkeypatch.setenv("SAI_WORKSPACE", str(workspace))
+    monkeypatch.setenv("SAI_CACHE_DIR", str(cache_dir))
+    monkeypatch.setenv("SAI_LIB_DIR", str(HOOKS_ROOT / ade / "async_cli_version" / "lib"))
+    if session_id is None:
+        monkeypatch.delenv("SAI_SESSION_ID", raising=False)
+    else:
+        monkeypatch.setenv("SAI_SESSION_ID", session_id)
+    pinned = _make_executable(tmp_path / "pin" / "snyk")
+    sidecar = home / ".snyk-studio" / "cli-path"
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text(str(pinned), encoding="utf-8")
+    worker = _load_worker(ade, worker_name, monkeypatch)
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs["env"]
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+    try:
+        worker.main()
+    finally:
+        lib_dir = str(HOOKS_ROOT / ade / "async_cli_version" / "lib")
+        while lib_dir in sys.path:
+            sys.path.remove(lib_dir)
+    return captured
+
+
+# INTERNAL_SNYK_AGENT_SESSION_ID is currently wired only for the Claude ADE
+# (session-id threading). Broaden the ``ade`` parametrize as the other ADEs
+# gain the change.
+@pytest.mark.parametrize("ade", ["claude"])
+@pytest.mark.parametrize(("worker_name", "expected_args", "stdout"), ASYNC_WORKERS)
+def test_async_worker_forwards_session_id(
+    ade, worker_name, expected_args, stdout, monkeypatch, tmp_path
+):
+    """SAI_SESSION_ID (the Claude session id, set by scan_runner._do_launch) is
+    forwarded to the Snyk CLI env as INTERNAL_SNYK_AGENT_SESSION_ID."""
+    captured = _run_worker_capture(
+        ade, worker_name, stdout, monkeypatch, tmp_path, session_id="sess-abc-123"
+    )
+    assert captured["env"]["INTERNAL_SNYK_AGENT_SESSION_ID"] == "sess-abc-123"
+
+
+@pytest.mark.parametrize("ade", ["claude"])
+@pytest.mark.parametrize(("worker_name", "expected_args", "stdout"), ASYNC_WORKERS)
+def test_async_worker_omits_session_id_when_unset(
+    ade, worker_name, expected_args, stdout, monkeypatch, tmp_path
+):
+    """No SAI_SESSION_ID -> the CLI env carries no session id (best-effort)."""
+    captured = _run_worker_capture(
+        ade, worker_name, stdout, monkeypatch, tmp_path, session_id=None
+    )
+    assert "INTERNAL_SNYK_AGENT_SESSION_ID" not in captured["env"]
+
+
+@pytest.mark.parametrize("ade", ["claude"])
+@pytest.mark.parametrize(("worker_name", "expected_args", "stdout"), ASYNC_WORKERS)
+def test_async_worker_omits_session_id_when_blank(
+    ade, worker_name, expected_args, stdout, monkeypatch, tmp_path
+):
+    """Whitespace-only SAI_SESSION_ID is treated as unset (matches .strip())."""
+    captured = _run_worker_capture(
+        ade, worker_name, stdout, monkeypatch, tmp_path, session_id="   "
+    )
+    assert "INTERNAL_SNYK_AGENT_SESSION_ID" not in captured["env"]

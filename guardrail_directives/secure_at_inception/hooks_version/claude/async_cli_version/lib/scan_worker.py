@@ -176,6 +176,12 @@ def main() -> None:
     except Exception:
         pass
 
+    # Forward the Claude session ID (best-effort) so the CLI can attribute the
+    # scan to the agent session that triggered it. Set by scan_runner._do_launch.
+    _session_id = os.environ.get("SAI_SESSION_ID", "").strip()
+    if _session_id:
+        env["INTERNAL_SNYK_AGENT_SESSION_ID"] = _session_id
+
     cmd = [snyk_bin, "code", "test", ".", "--json"]
     if needs_shell(snyk_bin):
         # Only .cmd/.bat shims (e.g. an npm-installed snyk.cmd) need cmd.exe's

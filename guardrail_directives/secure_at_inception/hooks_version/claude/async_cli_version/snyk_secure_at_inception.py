@@ -515,6 +515,7 @@ def handle_session_start(data: Dict[str, Any], workspace: str) -> None:
     launches a background scan to warm Snyk's internal analysis cache.
     """
     source = data.get("source", "")
+    session_id = data.get("session_id", "")
     log_to_panel(f"[SAI] SessionStart source={source!r}")
     if source not in KNOWN_SESSION_START_SOURCES:
         log_to_panel(f"[SAI] Unrecognized SessionStart source {source!r}, treating as resume")
@@ -574,14 +575,14 @@ def handle_session_start(data: Dict[str, Any], workspace: str) -> None:
     if source in ("startup", "clear"):
         clear_state(workspace)
         clear_baseline(workspace)
-        if launch_background_sca_baseline_scan(workspace):
+        if launch_background_sca_baseline_scan(workspace, session_id=session_id):
             log_to_panel("[SAI] SCA baseline scan launched")
             save_manifest_hash_baseline(workspace, MANIFEST_FILES, MANIFEST_SUFFIXES)
         else:
             debug_log("SCA baseline scan not launched (already running or complete)")
 
     # SAST has no baseline concept -- always safe to warm.
-    if launch_background_scan(workspace):
+    if launch_background_scan(workspace, session_id=session_id):
         log_to_panel("[SAI] Cache-warming scan launched")
     else:
         debug_log("Cache-warm scan not launched (already running or complete)")
@@ -589,9 +590,9 @@ def handle_session_start(data: Dict[str, Any], workspace: str) -> None:
     output_response({})
 
 
-def _trigger_sca_and_save(workspace: str, snapshot: Dict[str, str]) -> None:
+def _trigger_sca_and_save(workspace: str, snapshot: Dict[str, str], session_id: str = "") -> None:
     """Trigger an SCA scan and record snapshot as the new last-scan reference."""
-    if trigger_sca_scan(workspace):
+    if trigger_sca_scan(workspace, session_id=session_id):
         log_to_panel("[SAI] Background SCA scan launched")
         save_manifest_hash_last_scan(workspace, MANIFEST_FILES, MANIFEST_SUFFIXES, hashes=snapshot)
 
@@ -600,6 +601,7 @@ def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
     """Track file edits and launch background scans."""
     tool_name = data.get("tool_name", "")
     tool_input = data.get("tool_input", {})
+    session_id = data.get("session_id", "")
 
     # Bash commands that mutate manifests (npm install, pip install, etc.) bypass
     # the Edit|Write file_path path. Detect them by checking whether any manifest
@@ -617,7 +619,7 @@ def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
             log_to_panel(
                 f"[SAI] Manifest change detected: {', '.join(Path(f).name for f in changed)}"
             )
-            _trigger_sca_and_save(workspace, snapshot)
+            _trigger_sca_and_save(workspace, snapshot, session_id=session_id)
         output_response({})
         return
 
@@ -714,7 +716,7 @@ def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
                 output_response({"decision": "block", "reason": reason})
                 return
 
-        if launch_background_scan(workspace):
+        if launch_background_scan(workspace, session_id=session_id):
             log_to_panel("[SAI] Background scan launched")
 
     # NOTE: keeping is_manifest for now. But SCA scans usually need
@@ -723,12 +725,14 @@ def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
     if is_manifest:
         log_to_panel(f"[SAI] Manifest edit tracked: {Path(file_path).name}")
         snapshot = snapshot_manifest_hashes(workspace, MANIFEST_FILES, MANIFEST_SUFFIXES)
-        _trigger_sca_and_save(workspace, snapshot)
+        _trigger_sca_and_save(workspace, snapshot, session_id=session_id)
 
     output_response({})
 
 
-def _check_stop_preconditions(workspace: str) -> Tuple[Optional[Dict[str, Any]], StopContext]:
+def _check_stop_preconditions(
+    workspace: str, session_id: str = ""
+) -> Tuple[Optional[Dict[str, Any]], StopContext]:
     """Read state, compute manifest-hash diffs, and handle the no-pending-changes
     and max-cycles-reached early exits. Runs under _state_lock.
 
@@ -767,7 +771,7 @@ def _check_stop_preconditions(workspace: str) -> Tuple[Optional[Dict[str, Any]],
             clear_state(workspace)
             # clear and reset the sca baseline to accept the current state
             clear_baseline(workspace)
-            if launch_background_sca_baseline_scan(workspace):
+            if launch_background_sca_baseline_scan(workspace, session_id=session_id):
                 save_manifest_hash_baseline(workspace, MANIFEST_FILES, MANIFEST_SUFFIXES)
             return {}, ctx
 
@@ -781,13 +785,14 @@ def _evaluate_sast(
     state: Dict[str, Any],
     workspace: str,
     code_files: Dict[str, Dict[str, Any]],
+    session_id: str = "",
 ) -> SastResult:
     """Wait for the SAST scan, re-scanning once if stale, and filter results
     down to newly introduced vulns on agent-modified lines."""
     if not code_files:
         return SastResult()
 
-    scan_status = wait_for_scan(workspace, log_fn=log_to_panel)
+    scan_status = wait_for_scan(workspace, log_fn=log_to_panel, session_id=session_id)
     scan_succeeded = scan_status == "success"
     scan_info: Optional[Dict[str, Any]] = None
 
@@ -801,8 +806,8 @@ def _evaluate_sast(
 
         if last_edit_ts and started_at and last_edit_ts > started_at:
             log_to_panel("[SAI] Edits after scan started, re-scanning...")
-            trigger_scan(workspace)
-            scan_status = wait_for_scan(workspace, log_fn=log_to_panel)
+            trigger_scan(workspace, session_id=session_id)
+            scan_status = wait_for_scan(workspace, log_fn=log_to_panel, session_id=session_id)
             scan_succeeded = scan_status == "success"
             scan_info = None
 
@@ -886,6 +891,7 @@ def _evaluate_sca(
     hash_changed_from_last_scan: List[str],
     current_hashes: Dict[str, str],
     hashes: Dict[str, Any],
+    session_id: str = "",
 ) -> ScaResult:
     """Wait for the SCA scan, re-scanning once if stale, and diff dependency
     vulns against the session-start baseline."""
@@ -903,14 +909,14 @@ def _evaluate_sca(
         # Re-run SCA only if manifests changed since the last scan
         if hash_changed_from_last_scan:
             log_to_panel("[SAI] Manifest changes detected — re-running SCA scan")
-            if trigger_sca_scan(workspace):
+            if trigger_sca_scan(workspace, session_id=session_id):
                 log_to_panel("[SAI] Background SCA scan launched")
                 save_manifest_hash_last_scan(
                     workspace, MANIFEST_FILES, MANIFEST_SUFFIXES, hashes=current_hashes
                 )
 
     # Ensure the session-start baseline is complete before comparing
-    wait_for_sca_baseline_scan(workspace, log_fn=log_to_panel)
+    wait_for_sca_baseline_scan(workspace, log_fn=log_to_panel, session_id=session_id)
     baseline_info = get_sca_baseline_completion_info(workspace)
     if baseline_info and baseline_info.get("status") == "success":
         baseline_vulns = baseline_info.get("vulnerabilities", [])
@@ -920,18 +926,18 @@ def _evaluate_sca(
             for v in baseline_vulns
         )
 
-    sca_status = wait_for_sca_scan(workspace, log_fn=log_to_panel)
+    sca_status = wait_for_sca_scan(workspace, log_fn=log_to_panel, session_id=session_id)
 
     # A manifest-triggered scan can occasionally vanish without leaving a done file
     # (worker launch/termination race). Re-trigger once so a clean follow-up edit
     # does not spuriously fail the whole Stop cycle.
     if manifests_changed and sca_status in (None, "launch_failed"):
         log_to_panel("[SAI] SCA scan missing or terminated unexpectedly, retrying once...")
-        if trigger_sca_scan(workspace):
+        if trigger_sca_scan(workspace, session_id=session_id):
             save_manifest_hash_last_scan(
                 workspace, MANIFEST_FILES, MANIFEST_SUFFIXES, hashes=current_hashes
             )
-            sca_status = wait_for_sca_scan(workspace, log_fn=log_to_panel)
+            sca_status = wait_for_sca_scan(workspace, log_fn=log_to_panel, session_id=session_id)
 
     # Stale detection: re-scan if the result predates our last trigger.
     # Guards against scans that completed before npm install updated the lockfile.
@@ -947,9 +953,9 @@ def _evaluate_sca(
             and sca_started_dt < last_triggered_dt
         ):
             log_to_panel("[SAI] SCA result predates last manifest trigger, re-scanning...")
-            if trigger_sca_scan(workspace):
+            if trigger_sca_scan(workspace, session_id=session_id):
                 save_manifest_hash_last_scan(workspace, MANIFEST_FILES, MANIFEST_SUFFIXES)
-            sca_status = wait_for_sca_scan(workspace, log_fn=log_to_panel)
+            sca_status = wait_for_sca_scan(workspace, log_fn=log_to_panel, session_id=session_id)
 
     if sca_status == "success":
         sca_info = get_sca_completion_info(workspace)
@@ -1005,7 +1011,8 @@ def _evaluate_sca(
 
 def handle_stop(data: Dict[str, Any], workspace: str) -> None:
     """Evaluate scan results and block if new vulnerabilities were introduced."""
-    early_response, ctx = _check_stop_preconditions(workspace)
+    session_id = data.get("session_id", "")
+    early_response, ctx = _check_stop_preconditions(workspace, session_id=session_id)
     if early_response is not None:
         output_response(early_response)
         return
@@ -1014,7 +1021,7 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
     code_files = state.get("code_files", {})
     manifests_changed = bool(ctx.hash_changed_from_baseline) or bool(ctx.hashes.get("last_scan"))
 
-    sast = _evaluate_sast(state, workspace, code_files)
+    sast = _evaluate_sast(state, workspace, code_files, session_id=session_id)
     sca = _evaluate_sca(
         workspace,
         code_files,
@@ -1023,6 +1030,7 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
         ctx.hash_changed_from_last_scan,
         ctx.current_hashes,
         ctx.hashes,
+        session_id=session_id,
     )
 
     # --- Handle SAST scan failure early return ---

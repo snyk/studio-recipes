@@ -20,7 +20,7 @@ The Snyk SAI hook uses this to enforce the scan/fix loop:
 
 ## Authentication
 
-The hook checks Snyk CLI authentication before starting a background scan in `postToolUse`. If the user is not logged in, the scan is skipped and an `auth_required` status is recorded; edits are not blocked at that moment. At `agentStop` the hook then blocks with an **MCP fallback** message that prompts Copilot to use the `snyk_auth` and `snyk_code_scan` MCP tools (and `snyk_sca_scan` when dependency manifests changed). Operators should run `snyk auth` once so subsequent scans run automatically.
+The hook checks Snyk CLI authentication before starting a background scan in `postToolUse`. If the user is not logged in, the scan is skipped and an `auth_required` status is recorded; edits are not blocked at that moment. At `agentStop` the hook then blocks **once per session** with a message telling Copilot to have the user run `snyk auth` in a terminal. No MCP tool is named: the Snyk MCP server is the same CLI that just failed, so delegating the scan to it buys nothing and costs a full scan's worth of context. Every later unscanned turn is allowed through with a warning in the panel log. Operators should run `snyk auth` once so subsequent scans run automatically.
 
 ## How It Works
 
@@ -38,7 +38,7 @@ Agent tries to end the turn
   -> agentStop: wait for the background scan (bounded timeout)
   -> New vulns in modified ranges? -> block with /snyk-batch-fix and a vuln table
   -> Manifest changes since session start? -> include SCA findings in the block reason
-  -> Scan timed out or never ran? -> block with the MCP fallback prompt
+  -> Scan timed out or never ran? -> allow, warn in the panel log, re-arm for the next turn
   -> Loop cap reached (3 scan-fix cycles)? -> let the turn end; recorded for audit
   -> Otherwise: let the turn end
 ```

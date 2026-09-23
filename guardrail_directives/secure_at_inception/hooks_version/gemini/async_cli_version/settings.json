@@ -8,7 +8,8 @@
             "name": "snyk_secure_at_inception_session_start",
             "type": "command",
             "command": "uv run \"$HOME/.gemini/hooks/snyk_secure_at_inception.py\"",
-            "description": "Run initial Snyk security scan on session start"
+            "description": "Run initial Snyk security scan on session start",
+            "timeout": 60000
           }
         ]
       }
@@ -21,7 +22,8 @@
             "name": "snyk_secure_at_inception_after_tool_edit",
             "type": "command",
             "command": "uv run \"$HOME/.gemini/hooks/snyk_secure_at_inception.py\"",
-            "description": "Scans code changes for vulnerabilities using Snyk"
+            "description": "Scans code changes for vulnerabilities using Snyk",
+            "timeout": 30000
           }
         ]
       }

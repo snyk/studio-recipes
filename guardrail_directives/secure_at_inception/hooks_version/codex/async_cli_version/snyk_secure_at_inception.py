@@ -32,6 +32,7 @@ PREREQUISITES:
 
 import json
 import os
+import re
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -160,14 +161,61 @@ MANIFEST_FILES = {
     "pubspec.lock",
 }
 
-MANIFEST_SUFFIXES = {".csproj", ".lock", ".fsproj", ".vbproj"}
+# No blanket ".lock": it matched any application runtime lock as a dependency
+# manifest (observed triggering SCA on scheduled_tasks.lock and .venv/.lock).
+# All 10 real lockfiles are named explicitly in MANIFEST_FILES.
+MANIFEST_SUFFIXES = {".csproj", ".fsproj", ".vbproj"}
 
 MAX_STOP_CYCLES = 3
+
+# How each unscanned status reads in a log line and, where it differs, to the
+# user. A status absent from this map is one where the scan actually ran and
+# burned wall clock, and is reported by its raw status.
+_UNSCANNED_REASON = {
+    "auth_required": "Snyk CLI not authenticated",
+    "snyk_not_found": "Snyk CLI not found on PATH",
+}
 
 # Per Codex's hooks docs: startup, resume, clear, compact.
 KNOWN_SESSION_START_SOURCES = {"startup", "resume", "clear", "compact"}
 
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+# Scan error detail is raw CLI stderr and can be multi-line. Panel log entries are
+# one timestamped line each; the degraded-scan notice is a single line in the
+# same log, so it gets the tighter cap. The workers already cap what they write;
+# these guard the read side, which parses a done-file that a worker from a
+# different install may have written.
+LOG_DETAIL_MAX_LEN = 200
+NOTICE_DETAIL_MAX_LEN = 160
+
+# Emitted at most once per session when a scan could not run because the CLI is
+# unauthenticated. Authenticating repairs the configstore every later background
+# scan reads, so it is worth one round trip -- but it is handed to the user, not
+# to an MCP tool: `snyk auth` is an interactive browser flow and the scan worker
+# runs detached with DEVNULL stdin, so neither the hook nor the agent can
+# complete it. Nothing here delegates scanning either; the MCP scan tools are
+# the same binary that just failed.
+# The opening clause names only the engine(s) that actually hit auth. SAST and
+# SCA authenticate independently in practice -- a token good for `snyk code` can
+# still 401 on `snyk test` -- so asserting the whole turn went unscanned would
+# contradict a code scan that did complete.
+_AUTH_PROMPT_SCOPE = {
+    (True, True): "so this turn was not scanned",
+    (True, False): "so this turn's code was not scanned",
+    (False, True): "so this turn's dependencies were not scanned",
+}
+
+
+def _auth_prompt_reason(sast_unauthed: bool, sca_unauthed: bool) -> str:
+    """One-per-session auth prompt, scoped to the engine(s) that failed."""
+    scope = _AUTH_PROMPT_SCOPE.get((sast_unauthed, sca_unauthed), "so this turn was not scanned")
+    return (
+        f"Snyk security scanning is not authenticated, {scope}.\n\n"
+        "Tell the user to run `snyk auth` in a terminal.\n\n"
+        "Do NOT run any Snyk scan tools yourself -- the scan runs automatically in the "
+        "background and will pick up this turn's changes on your next stop."
+    )
 
 
 # =============================================================================
@@ -191,15 +239,16 @@ class SastResult:
     new_vulns: List[Dict[str, Any]] = field(default_factory=list)
     clean_file_paths: List[str] = field(default_factory=list)
     dirty_file_paths: List[str] = field(default_factory=list)
-    failed: bool = False
-    fallback: str = ""
+    unscanned_status: str = ""
+    unscanned_detail: str = ""
     scan_info: Optional[Dict[str, Any]] = None
 
 
 @dataclass
 class ScaResult:
     new_sca_vulns: List[Dict[str, Any]] = field(default_factory=list)
-    fallback: str = ""
+    unscanned_status: str = ""
+    unscanned_detail: str = ""
     duration: Optional[float] = None
 
 
@@ -262,7 +311,19 @@ def log_to_panel(message: str) -> None:
         _shared_log(message, _LOG_FILE, debug=False)
 
 
-def output_response(response: Dict[str, Any]) -> None:
+def output_response(response: Dict[str, Any], system_message: str = "") -> None:
+    """Emit the hook's JSON verdict, optionally with a warning for the user.
+
+    systemMessage is one of the universal fields Codex accepts on every hook
+    including Stop -- "surfaced as a warning in the UI or event stream" -- and
+    never reaches the model's context, which is what makes it the right channel
+    for "scanning degraded" notices. Attaching it here keeps the
+    never-emit-an-empty-one rule in one place, which matters more than usual
+    on Codex: the Stop schema rejects unknown fields, so every field that goes
+    out wants exactly one origin.
+    """
+    if system_message:
+        response = dict(response, systemMessage=system_message)
     print(json.dumps(response))
     # Flush explicitly: under `uvw run --gui-script` (pythonw) on Windows stdout is
     # a fully-buffered pipe, so the findings JSON must be flushed to reach the ADE.
@@ -283,6 +344,34 @@ def get_workspace(data: Dict[str, Any]) -> str:
 
 def is_code_file(file_path: str) -> bool:
     return Path(file_path).suffix.lower() in CODE_EXTENSIONS
+
+
+def _within_workspace(file_path: str, workspace: str) -> bool:
+    """Whether an edited path belongs to the workspace we are securing.
+
+    Defence-in-depth behind the extension allowlist, which already rejects the
+    scratch files agents actually write (.md, .sh, .json, .txt). This exists so
+    that widening CODE_EXTENSIONS later cannot silently start scanning outside
+    the tree, and so a code-extension scratch file elsewhere on disk cannot
+    trigger a scan of an unrelated workspace.
+
+    Relative paths resolve against the workspace rather than the hook process's
+    cwd, so "src/app.py" is contained while "../../escape/app.py" is not.
+
+    Deliberately no separate tempdir denylist: containment already rejects a
+    /tmp scratch file when the project lives elsewhere, and an explicit tempdir
+    rule would reject a workspace that legitimately *is* a temp dir -- which is
+    how every test fixture and many CI checkouts are laid out.
+    """
+    try:
+        candidate = Path(file_path)
+        if not candidate.is_absolute():
+            candidate = Path(workspace) / candidate
+        resolved = candidate.resolve()
+        root = Path(workspace).resolve()
+    except (OSError, ValueError):
+        return False
+    return resolved == root or root in resolved.parents
 
 
 def is_manifest_file(file_path: str) -> bool:
@@ -554,6 +643,11 @@ def _evaluate_files(
     return per_file
 
 
+def _truncate(text: str, max_len: int) -> str:
+    """Truncate text to max_len, marking the cut with an ellipsis."""
+    return text if len(text) <= max_len else text[: max_len - 3] + "..."
+
+
 def _format_vuln_table(vulns: List[Dict[str, Any]]) -> str:
     if not vulns:
         return ""
@@ -612,6 +706,15 @@ def _state_lock(workspace: str) -> Generator[None, None, None]:
         yield
 
 
+@contextmanager
+def _mutate_state(workspace: str) -> Generator[Dict[str, Any], None, None]:
+    """Read-modify-write state.json under the workspace lock."""
+    with _state_lock(workspace):
+        state = read_state(workspace)
+        yield state
+        write_state(workspace, state)
+
+
 def read_state(workspace: str) -> Dict[str, Any]:
     state_file = get_state_file_path(workspace)
     try:
@@ -653,6 +756,24 @@ def clear_baseline(workspace: str) -> None:
     clear_manifest_hashes(workspace)
 
 
+def _log_unscanned(
+    engine: str, status: Optional[str], info: Optional[Dict[str, Any]]
+) -> Tuple[str, str]:
+    """Record why `engine` produced no results. Returns (status, flat detail).
+
+    The detail is raw CLI stderr: flattened to one line here so it can go in a
+    single timestamped log entry, and capped again at the narrower
+    NOTICE_DETAIL_MAX_LEN by whoever renders it.
+    """
+    status = status or "unknown"
+    detail = " ".join(((info or {}).get("error_detail") or "").split())
+    suffix = f" (detail: {_truncate(detail, LOG_DETAIL_MAX_LEN)})" if detail else ""
+    reason = _UNSCANNED_REASON.get(status)
+    label = f"{engine} unscanned: {reason}" if reason else f"{engine} unscanned (status: {status})"
+    log_to_panel(f"[SAI] {label}{suffix}")
+    return status, detail
+
+
 def has_pending_changes(state: Dict[str, Any]) -> bool:
     return bool(state.get("code_files"))
 
@@ -673,6 +794,16 @@ def handle_session_start(data: Dict[str, Any], workspace: str) -> None:
     log_to_panel(f"[SAI] SessionStart source={source!r}")
     if source not in KNOWN_SESSION_START_SOURCES:
         log_to_panel(f"[SAI] Unrecognized SessionStart source {source!r}, treating as resume")
+
+    # One auth prompt per session, so a new session gets its prompt back. This
+    # runs before the checks below deliberately: they return early when auth is
+    # missing, which is precisely the session that needs the prompt re-armed.
+    # Unconditional rather than guarded on `source`: the clear_state() further
+    # down would make it a no-op on startup/clear anyway, and an unrecognised
+    # future source cannot silently skip it.
+    with _mutate_state(workspace) as state:
+        state.pop("auth_prompted", None)
+
     issues: List[str] = []
 
     # 1. Check Snyk auth
@@ -778,6 +909,65 @@ def _whole_file_ranges(file_path: str) -> List[Dict[str, int]]:
     return [{"start": 1, "end": line_count}]
 
 
+# Package managers whose mutate verbs can rewrite a dependency manifest or
+# lockfile. Matched against the whole Bash command string, so `cd api && npm
+# install` and `sudo pip install -r reqs.txt` are both caught.
+_PKG_MANAGERS = (
+    "npm",
+    "yarn",
+    "pnpm",
+    "pip",
+    "pip3",
+    "pipenv",
+    "poetry",
+    "uv",
+    "go",
+    "cargo",
+    "bundle",
+    "composer",
+    "mvn",
+    "gradle",
+    "dotnet",
+)
+_PKG_MUTATE_VERBS = (
+    "install",
+    "add",
+    "update",
+    "upgrade",
+    "remove",
+    "uninstall",
+    "tidy",
+    "sync",
+    "get",
+    "restore",
+    "require",
+    "ci",
+    "vendor",
+)
+# JVM build tools spell dependency resolution as a goal/flag rather than a verb.
+# They need their own pattern because the token that gives them away ("build",
+# with a refresh flag) would match `go build` and `cargo build` if it were
+# folded into the generic verb list above.
+_JVM_BUILD_TOOLS = ("mvn", "gradle", "gradlew")
+_JVM_DEP_TOKENS = ("dependency", "dependencies", "refresh-dependencies", "resolve")
+_PKG_COMMAND_RE = re.compile(
+    r"\b(?:" + "|".join(_PKG_MANAGERS) + r")\b[^&|;]*?\b(?:" + "|".join(_PKG_MUTATE_VERBS) + r")\b"
+    r"|\b(?:" + "|".join(_JVM_BUILD_TOOLS) + r")\b[^&|;]*?(?:" + "|".join(_JVM_DEP_TOKENS) + r")",
+    re.IGNORECASE,
+)
+
+
+def _may_touch_manifests(command: str) -> bool:
+    """Whether a Bash command plausibly mutates a dependency manifest.
+
+    The Bash branch used to walk and hash the entire workspace on *every*
+    command -- 43s and 11k files when the session was started from $HOME. This
+    is only a fast path: the Stop hook's hash diff is still the authoritative
+    check, so a mutation this misses is caught at the end of the turn.
+    """
+    return bool(command) and bool(_PKG_COMMAND_RE.search(command))
+
+
 def _trigger_sca_and_save(workspace: str, snapshot: Dict[str, str]) -> None:
     """Trigger an SCA scan and record snapshot as the new last-scan reference."""
     if trigger_sca_scan(workspace):
@@ -794,7 +984,12 @@ def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
     # the apply_patch/Edit/Write file_path path. Detect them by checking whether any
     # manifest file actually changed on disk after the command ran.
     if tool_name == "Bash":
-        log_to_panel("[SAI] Bash tool use encountered. Checking if manifests changed.")
+        command = str(tool_input.get("command", "")) if isinstance(tool_input, dict) else ""
+        if not _may_touch_manifests(command):
+            debug_log(f"Bash command cannot touch manifests, skipping walk: {command[:120]}")
+            output_response({})
+            return
+        log_to_panel("[SAI] Package-manager command detected. Checking if manifests changed.")
         hashes = load_manifest_hashes(workspace) or {}
         # Before any scan has run this session, the only thing to compare against
         # is the session-start baseline; once last_scan is populated it's the
@@ -840,6 +1035,10 @@ def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
                     debug_log(f"apply_patch delete: {file_path} (skipped)")
                     continue
 
+                if not _within_workspace(file_path, workspace):
+                    debug_log(f"File outside workspace, ignoring: {file_path}")
+                    continue
+
                 is_code = is_code_file(file_path)
                 is_manifest = is_manifest_file(file_path)
 
@@ -883,6 +1082,11 @@ def handle_post_tool_use(data: Dict[str, Any], workspace: str) -> None:
     elif tool_name in ("Edit", "Write"):
         file_path = tool_input.get("file_path", "") if isinstance(tool_input, dict) else ""
         if not file_path:
+            output_response({})
+            return
+
+        if not _within_workspace(file_path, workspace):
+            debug_log(f"File outside workspace, ignoring: {file_path}")
             output_response({})
             return
 
@@ -1024,9 +1228,10 @@ def _check_stop_preconditions(workspace: str) -> Tuple[Optional[Dict[str, Any]],
                 save_manifest_hash_baseline(workspace, MANIFEST_FILES, MANIFEST_SUFFIXES)
             return {}, ctx
 
-        state["stop_cycles"] = stop_cycles + 1
-        write_state(workspace, state)
-
+    # The cycle counter is advanced by the paths that actually block. A Stop
+    # that ends in an unscanned turn must not burn a fix cycle: three of those
+    # would trip the max-cycles reset above, which clears tracking *and*
+    # rebaselines SCA, hiding real dependency vulns once scanning recovers.
     return None, ctx
 
 
@@ -1099,36 +1304,8 @@ def _evaluate_sast(
         )
 
     scan_info = get_scan_completion_info(workspace)
-    error_detail = scan_info.get("error_detail", "") if scan_info else ""
-    file_list = ", ".join(Path(f).name for f in code_files)
-
-    if scan_status == "auth_required":
-        log_to_panel(
-            f"[SAI] Snyk CLI not authenticated: {error_detail}"
-            if error_detail
-            else "[SAI] Snyk CLI not authenticated"
-        )
-        fallback = (
-            "The Snyk CLI is not authenticated. Run snyk_auth to authenticate, "
-            "then run snyk_code_scan on the current directory to check for "
-            f"vulnerabilities in: {file_list}. Fix only NEWLY INTRODUCED issues."
-        )
-    elif scan_status == "snyk_not_found":
-        log_to_panel("[SAI] Snyk CLI not found, falling back to MCP")
-        fallback = (
-            "Security scan could not complete. "
-            "Run snyk_code_scan on the current directory to check for vulnerabilities "
-            f"in: {file_list}. Fix only NEWLY INTRODUCED issues."
-        )
-    else:
-        log_to_panel(f"[SAI] Scan failed (status: {scan_status}), falling back to MCP")
-        fallback = (
-            "Security scan could not complete. "
-            "Run snyk_code_scan on the current directory to check for vulnerabilities "
-            f"in: {file_list}. Fix only NEWLY INTRODUCED issues."
-        )
-
-    return SastResult(failed=True, fallback=fallback, scan_info=scan_info)
+    status, detail = _log_unscanned("SAST", scan_status, scan_info)
+    return SastResult(unscanned_status=status, unscanned_detail=detail, scan_info=scan_info)
 
 
 def _evaluate_sca(
@@ -1145,11 +1322,9 @@ def _evaluate_sca(
     if not manifests_changed:
         return ScaResult()
 
-    manifest_list = ""
     baseline_keys = None
 
     if manifests_changed:
-        manifest_list = ", ".join(Path(f).name for f in hash_changed_from_baseline)
         if hash_changed_from_baseline:
             debug_log(f"[SAI] Detected manifest change(s): {hash_changed_from_baseline}")
 
@@ -1218,37 +1393,99 @@ def _evaluate_sca(
         log_to_panel(f"[SAI] SCA: {len(new_sca_vulns)} new dependency vuln(s)")
         return ScaResult(new_sca_vulns=new_sca_vulns, duration=sca_duration)
 
-    if manifests_changed:
-        if sca_status == "auth_required":
-            log_to_panel("[SAI] SCA skipped: Snyk not authenticated (run `snyk auth`)")
-            fallback = (
-                "The Snyk CLI is not authenticated. Run snyk_auth to authenticate, "
-                "then run snyk_sca_scan on the current directory to check for "
-                f"dependency vulnerabilities in: {manifest_list}. Fix only NEWLY INTRODUCED issues."
-            )
-        else:
-            log_to_panel(f"[SAI] SCA scan did not complete (status: {sca_status})")
-            fallback = (
-                "Security scan could not complete. "
-                "Run snyk_sca_scan on the current directory to check for "
-                f"dependency vulnerabilities in: {manifest_list}. Fix only NEWLY INTRODUCED issues."
-            )
-        return ScaResult(fallback=fallback)
+    status, detail = _log_unscanned("SCA", sca_status, get_sca_completion_info(workspace))
+    return ScaResult(unscanned_status=status, unscanned_detail=detail)
 
-    if sca_status == "auth_required":
-        log_to_panel("[SAI] SCA skipped: Snyk not authenticated (run `snyk auth`)")
-    elif sca_status == "snyk_not_found":
-        log_to_panel("[SAI] SCA skipped: Snyk CLI not found on PATH")
-    elif sca_status is None:
-        log_to_panel("[SAI] SCA scan timed out, continuing with SAST results only")
-    else:
-        log_to_panel(f"[SAI] SCA scan did not complete (status: {sca_status})")
 
-    return ScaResult()
+def _rearm_unscanned(workspace: str, sast: SastResult, sca: ScaResult) -> None:
+    """Drop the done-files of engines that produced no results.
+
+    wait_for_scan short-circuits on an existing done-file, so leaving a failed
+    marker in place would make every later Stop replay the same failure instead
+    of retrying it.
+    """
+    for result, clear in ((sast, clear_scan_state), (sca, clear_sca_scan_state)):
+        if result.unscanned_status:
+            clear(workspace)
+
+
+def _unscanned_notice(
+    sast: SastResult,
+    sca: ScaResult,
+    code_files: Dict[str, Dict[str, Any]],
+    workspace: str,
+) -> str:
+    """The user-facing warning for a turn that was not fully scanned.
+
+    Sole builder of these strings: they go out as systemMessage, which Codex
+    surfaces as a warning in the UI without adding anything to the model's
+    context. Kept ASCII -- the same text is written to the panel log.
+    """
+    files = f"{len(code_files)} file(s) from this turn were not scanned"
+    engines = (
+        (
+            sast,
+            {
+                "auth_required": f"not authenticated, {files} - run 'snyk auth' in a terminal",
+                "snyk_not_found": (
+                    f"CLI not found on PATH, {files} - install with 'npm install -g snyk'"
+                ),
+            },
+            "code scan did not complete ({status}), " + files,
+        ),
+        (
+            sca,
+            {
+                "auth_required": (
+                    "dependency scan skipped, not authenticated - run 'snyk auth' in a terminal"
+                ),
+                "snyk_not_found": "dependency scan skipped, Snyk CLI not found",
+            },
+            "dependency scan did not complete ({status})",
+        ),
+    )
+
+    clauses: List[str] = []
+    detail = ""
+    ran = False
+    for result, preflight_clause, ran_clause in engines:
+        status = result.unscanned_status
+        if not status:
+            continue
+        # A status the pre-flight map does not name is one where snyk actually
+        # ran, so it has stderr worth surfacing and a log worth pointing at.
+        clause = preflight_clause.get(status)
+        if clause is None:
+            clause = ran_clause.format(status=status)
+            ran = True
+            detail = detail or _truncate(result.unscanned_detail, NOTICE_DETAIL_MAX_LEN)
+        clauses.append(clause)
+
+    if not clauses:
+        return ""
+
+    sentences = ["Snyk: " + "; ".join(clauses) + "."]
+    if detail:
+        sentences.append(detail.rstrip(".") + ".")
+    if ran:
+        # Only point at the log when it holds more than the clause above -- an
+        # unauthenticated CLI has nothing extra to read. Name the path: a
+        # warning that says "see the log" without saying which is a dead end.
+        sentences.append(f"Full output: {resolve_log_file(workspace)}")
+    return " ".join(sentences)
 
 
 def handle_stop(data: Dict[str, Any], workspace: str) -> None:
-    """Evaluate scan results and block if new vulnerabilities were introduced."""
+    """Evaluate scan results and block if new vulnerabilities were introduced.
+
+    A scan that could not run is no longer handed to the Snyk MCP tools: the
+    MCP server is the same Snyk CLI that just failed, after already spending
+    its network and auth retries. Instead the turn is allowed to end with an
+    out-of-band warning to the user and the scan is re-armed for the next Stop.
+    Auth is the one exception worth a round trip: authenticating repairs the
+    configstore every later scan reads, so it gets exactly one block per
+    session -- handed to the user, not to an MCP tool.
+    """
     early_response, ctx = _check_stop_preconditions(workspace)
     if early_response is not None:
         output_response(early_response)
@@ -1274,50 +1511,100 @@ def handle_stop(data: Dict[str, Any], workspace: str) -> None:
         ctx.hashes,
     )
 
-    # --- Handle SAST scan failure early return ---
-    if sast.failed:
-        fallback = sast.fallback
-        if sca.new_sca_vulns:
-            fallback += "\n\n## Newly Introduced Dependency Vulnerabilities\n\n"
-            fallback += _format_sca_vuln_table(sca.new_sca_vulns)
-        elif sca.fallback:
-            fallback += f"\n\n## Dependency Scan Unavailable\n\n{sca.fallback}"
-        clear_state(workspace)
-        output_response({"decision": "block", "reason": fallback})
-        return
+    # An engine that reported nothing leaves a failed done-file behind, and
+    # wait_for_scan short-circuits on one -- so drop it here or every later
+    # Stop replays this failure instead of retrying. No-op when both scanned.
+    _rearm_unscanned(workspace, sast, sca)
+    unscanned = bool(sast.unscanned_status or sca.unscanned_status)
 
-    # --- Update state and decide ---
-    if not sast.new_vulns and not sca.new_sca_vulns and not sca.fallback:
-        log_to_panel("[SAI] No new security issues found.")
-        _log_stop_allow(sast, sca)
-        clear_state(workspace)
-        # Explicitly do NOT clear the baseline. This means we always compare to
-        # the status as of session start, and ignore any possibly improvements
-        # to SCA vulns beyond it.
-        output_response({})
-        return
+    # Three outcomes, one handler each.
+    if sast.new_vulns or sca.new_sca_vulns:
+        _handle_new_vuln_stop(workspace, sast, sca, code_files, unscanned)
+    elif not unscanned:
+        _handle_clean_stop(workspace, sast, sca)
+    else:
+        _handle_unscanned_stop(workspace, sast, sca, code_files)
 
-    # Remove clean files in one locked write
-    with _state_lock(workspace):
-        state = read_state(workspace)
+
+def _handle_new_vuln_stop(
+    workspace: str,
+    sast: SastResult,
+    sca: ScaResult,
+    code_files: Dict[str, Dict[str, Any]],
+    unscanned: bool,
+) -> None:
+    """Findings to fix. They outrank an unscanned engine, which rides along as
+    an out-of-band notice rather than spending the block."""
+    with _mutate_state(workspace) as state:
         code = state.get("code_files", {})
         for fp in sast.clean_file_paths:
             code.pop(fp, None)
         state["code_files"] = code
-        write_state(workspace, state)
+        state["stop_cycles"] = state.get("stop_cycles", 0) + 1
 
-    if not sast.dirty_file_paths:
+    if not sast.unscanned_status and not sast.dirty_file_paths:
         clear_scan_state(workspace)
 
-    reason = _build_block_reason(sast.new_vulns, sca.new_sca_vulns, sca.fallback, workspace)
     _log_stop_block(sast, sca)
-    output_response({"decision": "block", "reason": reason})
+    output_response(
+        {
+            "decision": "block",
+            "reason": _build_block_reason(sast.new_vulns, sca.new_sca_vulns, workspace),
+        },
+        _unscanned_notice(sast, sca, code_files, workspace) if unscanned else "",
+    )
+
+
+def _handle_clean_stop(workspace: str, sast: SastResult, sca: ScaResult) -> None:
+    """Everything scanned, nothing new."""
+    log_to_panel("[SAI] No new security issues found.")
+    _log_stop_allow(sast, sca)
+    clear_state(workspace)
+    # Explicitly do NOT clear the baseline. This means we always compare to
+    # the status as of session start, and ignore any possibly improvements
+    # to SCA vulns beyond it.
+    output_response({})
+
+
+def _handle_unscanned_stop(
+    workspace: str,
+    sast: SastResult,
+    sca: ScaResult,
+    code_files: Dict[str, Dict[str, Any]],
+) -> None:
+    """No findings, but a scan could not run.
+
+    code_files is deliberately left in place so the next Stop re-evaluates this
+    turn's files -- paired with the done-file drop in _rearm_unscanned, that is
+    what makes "we will catch it next Stop" true rather than a slogan.
+    """
+    statuses = (sast.unscanned_status, sca.unscanned_status)
+
+    # One auth prompt per session: authenticating repairs the configstore the
+    # CLI reads, so it is worth a round trip -- but only the first time.
+    if "auth_required" in statuses:
+        with _mutate_state(workspace) as state:
+            first_prompt = not state.get("auth_prompted")
+            if first_prompt:
+                state["auth_prompted"] = True
+                state["stop_cycles"] = state.get("stop_cycles", 0) + 1
+        if first_prompt:
+            reason = _auth_prompt_reason(
+                sast.unscanned_status == "auth_required",
+                sca.unscanned_status == "auth_required",
+            )
+            log_to_panel("Stop: BLOCK - Snyk not authenticated (one auth prompt per session)")
+            output_response({"decision": "block", "reason": reason})
+            return
+
+    notice = _unscanned_notice(sast, sca, code_files, workspace)
+    log_to_panel(f"Stop: ALLOW (unscanned) - {notice}")
+    output_response({}, notice)
 
 
 def _build_block_reason(
     new_vulns: List[Dict[str, Any]],
     new_sca_vulns: List[Dict[str, Any]],
-    sca_fallback: str,
     workspace: str,
 ) -> str:
     reason_parts = [
@@ -1342,9 +1629,6 @@ def _build_block_reason(
             "Pre-existing vulnerabilities in this workspace are out of scope — "
             "address only what you introduced in this session."
         )
-
-    if sca_fallback:
-        reason_parts.append(f"\n## Dependency Scan Unavailable\n\n{sca_fallback}")
 
     total_prevented = len(new_vulns) + len(new_sca_vulns)
     if total_prevented > 0:

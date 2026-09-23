@@ -15,8 +15,12 @@ report vulnerabilities on those lines
 given a detailed vuln table to fix. After fixing, the cycle repeats until clean
 - **Per-file state management**: Clean files are removed from tracking; only files with unresolved
 vulns stay tracked
-- **MCP fallback**: If the CLI scan times out, falls back to prompting the agent to use the
-`snyk_code_scan` MCP tool
+- **Degraded-scan reporting**: If a CLI scan cannot run, the turn is *not* interrupted and no scan
+is handed to the Snyk MCP tools -- the MCP server is the same CLI that just failed. Cursor's `stop`
+hook has no user-visible field that skips the model (`followup_message` is resubmitted as the next
+user message), so the warning goes to the Snyk panel log, and the scan is re-armed for the next
+turn. An unauthenticated CLI is the one exception: it sends one followup per session telling the
+user to run `snyk auth`, which repairs the configstore every later scan reads
 - **Manifest tracking**: Detects changes to dependency manifests (package.json, requirements.txt,
 etc.) and prompts for SCA scanning
 - **Loop prevention**: Caps scan-fix cycles at 3 to prevent infinite loops
@@ -80,8 +84,10 @@ Agent edits a file
   → No error?   → launch background scan, agent keeps working (non-blocking)
 
 Agent runs a shell command
-  → afterShellExecution hook hash-diffs manifest files (catches npm/pip
-    install, etc. that bypass afterFileEdit)
+  → Package-manager command (npm/pip install, etc.)?
+    → afterShellExecution hook hash-diffs manifest files (catches mutations
+      that bypass afterFileEdit)
+    → Anything else? → no-op, the workspace walk is skipped entirely
   → Manifest changed? → trigger an SCA scan
   → No change?        → no-op
 
@@ -90,12 +96,13 @@ Agent finishes responding
   → Filters to only vulns on lines the agent modified (ignores pre-existing issues)
   → New vulns found?  → block with fix instructions (repeats up to 3 cycles)
   → No new vulns?     → pass silently
-  → Scan failed?      → fall back to MCP snyk_code_scan prompt
+  → Scan unavailable? → allow, warn in the panel log, re-arm for the next turn
+                        (except auth: one followup per session to prompt `snyk auth`)
 ```
 
 The cache-warming scan launched at session start primes Snyk's internal analysis cache. When the first file edit triggers an afterFileEdit scan, Snyk can reuse cached analysis results for unchanged files, making the scan faster.
 
-Changes to dependency manifests (package.json, requirements.txt, etc.) trigger a prompt to run `snyk_sca_scan`.
+Changes to dependency manifests (package.json, requirements.txt, etc.) trigger a background SCA scan, compared against the session-start dependency baseline.
 
 ## Configuration
 

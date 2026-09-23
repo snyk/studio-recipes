@@ -26,7 +26,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 
-SNYK_STUDIO_VERSION = "1.0.6"
+SNYK_STUDIO_VERSION = "1.0.17"
 SNYK_CLI_NOT_FOUND_MESSAGE = (
     "Snyk CLI not found. Re-run the Snyk Studio installer, or make Snyk available on PATH."
 )

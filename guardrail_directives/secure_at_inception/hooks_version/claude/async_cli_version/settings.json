@@ -6,7 +6,8 @@
           {
             "type": "command",
             "command": "uv run \"$HOME/.claude/hooks/snyk_secure_at_inception.py\"",
-            "statusMessage": "Initializing Snyk security scanning..."
+            "statusMessage": "Initializing Snyk security scanning...",
+            "timeout": 60
           }
         ]
       }
@@ -18,7 +19,8 @@
           {
             "type": "command",
             "command": "uv run \"$HOME/.claude/hooks/snyk_secure_at_inception.py\"",
-            "statusMessage": "Tracking code changes for security scan..."
+            "statusMessage": "Tracking code changes for security scan...",
+            "timeout": 30
           }
         ]
       }
@@ -29,7 +31,8 @@
           {
             "type": "command",
             "command": "uv run \"$HOME/.claude/hooks/snyk_secure_at_inception.py\"",
-            "statusMessage": "Evaluating security scan results..."
+            "statusMessage": "Evaluating security scan results...",
+            "timeout": 180
           }
         ]
       }

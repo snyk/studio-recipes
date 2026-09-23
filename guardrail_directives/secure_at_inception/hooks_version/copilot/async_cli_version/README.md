@@ -9,7 +9,7 @@ Applies to both **GitHub Copilot CLI** and **GitHub Copilot in VS Code** -- both
 - **New-only filtering**: Tracks which lines the agent modified and filters scan results to only report vulnerabilities on those lines
 - **Automatic fix loop**: When new vulnerabilities are found at session end, Copilot is blocked from stopping and given a detailed vuln table to fix. After fixing, the cycle repeats until clean
 - **Per-file state management**: Clean files are removed from tracking; only files with unresolved vulns stay tracked
-- **MCP fallback**: If the CLI scan fails, times out, or auth is missing, the block message prompts Copilot to use the `snyk_auth` / `snyk_code_scan` MCP tools (and `snyk_sca_scan` when manifests changed)
+- **Degraded-scan reporting**: If a CLI scan cannot run, the turn is *not* blocked and no scan is handed to the Snyk MCP tools -- the MCP server is the same CLI that just failed. Copilot's `agentStop` hook has no user-visible field that bypasses the model's context, so the warning goes to the Snyk panel log (`~/.snyk-studio/...`), and the scan is re-armed for the next turn. An unauthenticated CLI is the one exception: it blocks once per session to tell the user to run `snyk auth`, which repairs the configstore every later scan reads
 - **Manifest tracking**: Detects changes to dependency manifests (package.json, requirements.txt, etc.) and includes SCA findings in the block reason
 - **Stale scan detection**: Re-scans automatically if edits happen after the running scan started
 - **Loop prevention**: Caps scan-fix cycles at 3 to prevent infinite loops
@@ -76,12 +76,19 @@ Copilot edits a file (postToolUse)
      -> Error?  -> block immediately with actionable fix instructions
      -> No error -> launch background scan, Copilot keeps working
 
+Copilot runs a shell command (postToolUse)
+  -> Not a package-manager command? -> no-op, the workspace walk is skipped
+  -> npm/pip/go/cargo/... install-style command?
+     -> Hash-diff manifest files against the last known snapshot
+  -> Manifest changed? -> trigger a background SCA scan and record the snapshot
+
 Copilot finishes the turn (agentStop)
   -> Wait for scan results
   -> Filter to only vulns on lines Copilot modified (ignores pre-existing issues)
   -> New vulns? -> block with fix instructions (repeats up to 3 cycles)
   -> No new vulns? -> pass silently
-  -> Scan failed? -> fall back to MCP snyk_code_scan prompt
+  -> Scan unavailable? -> allow, log the warning, re-arm for the next turn
+                          (except auth: one block per session to prompt `snyk auth`)
 ```
 
 Changes to dependency manifests (package.json, requirements.txt, etc.) trigger a new SCA scan, with results included in the block reason.

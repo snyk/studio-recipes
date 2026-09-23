@@ -43,7 +43,8 @@ Agent finishes responding
   → Filters to only vulns on lines the agent modified
   → New vulns found?  → block with fix instructions (up to 3 cycles)
   → No new vulns?     → pass silently
-  → Scan failed?      → fall back to MCP snyk_code_scan prompt
+  → Scan unavailable? → allow, warn in the panel log, re-arm for the next turn
+                        (except auth: one followup per session to prompt `snyk auth`)
 ```
 
 ### Sync MCP Version

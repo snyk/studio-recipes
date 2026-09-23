@@ -19,13 +19,21 @@ import hashlib
 import os
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Dict, Generator, Iterator, List, Optional
+from pathlib import Path
+from typing import Any, Callable, Dict, Generator, Iterator, List, Optional, Tuple
 
 _IS_WINDOWS = sys.platform == "win32"
 
-STUDIO_VERSION: str = "1.0.6"
+STUDIO_VERSION: str = "1.0.17"
+
+# Console apps (snyk / the cmd.exe shim) spawned from a windowless background
+# worker allocate a new console window on Windows; CREATE_NO_WINDOW suppresses
+# the flash. The flag only exists on Windows; elsewhere this is 0 (subprocess's
+# default creationflags, i.e. a no-op).
+_CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0  # type: ignore[attr-defined]
 
 
 # =============================================================================
@@ -43,6 +51,163 @@ def get_detached_popen_kwargs() -> Dict[str, object]:
             ),
         }
     return {"start_new_session": True}
+
+
+# =============================================================================
+# SNYK CLI SUBPROCESS RETRY
+# =============================================================================
+
+_TRANSIENT_NETWORK_PATTERNS: Tuple[str, ...] = (
+    "connection reset by peer",
+    "read: connection reset",
+    "econnreset",
+    "broken pipe",
+    "epipe",
+    "connection refused",
+    "econnrefused",
+    "no such host",
+    "name or service not known",
+    "getaddrinfo",
+    "tls handshake timeout",
+    "handshake failure",
+    "tls: use of closed connection",
+    "etimedout",
+    "i/o timeout",
+    "connection timed out",
+    "unexpected eof",
+    "502 bad gateway",
+    "503 service unavailable",
+    "504 gateway timeout",
+)
+
+_RETRY_BACKOFFS_SECONDS: Tuple[int, ...] = (5, 15)
+
+# Substrings the Snyk CLI emits when the stored OAuth/API token was rejected
+# server-side. Matched case-insensitively against combined stderr+stdout.
+_AUTH_ERROR_PATTERNS: Tuple[str, ...] = (
+    "missingapitokenerror",
+    "not authenticated",
+    "authentication required",
+    "snyk-0005",
+    # `snyk code test` with a stale token answers
+    # {"ok": false, "error": "Use `snyk auth` to authenticate.", ...} on stdout,
+    # which none of the patterns above match. Getting this wrong now costs more
+    # than it used to: auth_required is the one status the stop hook can offer a
+    # recovery for, so a misclassified auth failure reads to the user as an
+    # opaque CLI error.
+    "snyk auth",
+)
+
+# Short backoff before the single auth-retry: long enough for a sibling
+# `snyk` process that just won the OAuth refresh race to persist the new
+# refresh_token to configstore, short enough to be invisible in a real scan.
+_AUTH_RETRY_BACKOFF_SECONDS = 0.25
+
+
+def is_transient_network_error(text: str) -> bool:
+    lowered = text.lower()
+    return any(pattern in lowered for pattern in _TRANSIENT_NETWORK_PATTERNS)
+
+
+def is_auth_error(text: str) -> bool:
+    lowered = text.lower()
+    return any(pattern in lowered for pattern in _AUTH_ERROR_PATTERNS)
+
+
+def with_attempts(detail: str, attempts: int) -> str:
+    """Prefix a worker error detail with the retry count, when there was one.
+
+    run_snyk_with_retry returns the attempt count; every status a worker can
+    report off the back of it wants to say so, so the formatting lives next to
+    the function that produces the number.
+    """
+    return f"(after {attempts} attempts) {detail}" if attempts > 1 else detail
+
+
+def run_snyk_with_retry(
+    cmd: List[str],
+    env: Dict[str, str],
+    cwd: str,
+    log_fn: Optional[Callable[[str], None]] = None,
+    auth_retry: bool = False,
+) -> Tuple[int, str, str, int]:
+    """Returns (exit_code, stdout, stderr, attempts_used).
+
+    Retries on transient-network patterns up to len(_RETRY_BACKOFFS_SECONDS)
+    additional times. When ``auth_retry=True``, also retries exactly once on
+    an auth-flavored stderr — this covers the loser side of a concurrent
+    OAuth-refresh race (rotating refresh_token, sibling `snyk` process just
+    got a fresh access_token into the configstore) and brief mid-scan token
+    expiries the CLI could not re-refresh in-flight.
+
+    That auth retry is additive rather than borrowed: it gets its own extra
+    attempt instead of consuming one from the transient-network budget, so an
+    auth failure landing on the last scheduled attempt is still retried.
+
+    Propagates subprocess.TimeoutExpired — a 300s hang means the CLI is
+    genuinely stuck, not flaking, and retrying would just multiply the
+    wait.
+    """
+    total_attempts = len(_RETRY_BACKOFFS_SECONDS) + 1
+    result = None
+    auth_backoff_attempted = False
+    # The single auth retry is a bonus attempt, not one borrowed from the
+    # transient-network budget: an auth error arriving on what would have been
+    # the final attempt still has to get its retry, or the spurious
+    # "not authenticated" this flag exists to suppress leaks through anyway.
+    max_attempts = total_attempts
+    attempt = 0
+    while attempt < max_attempts:
+        attempt += 1
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            # snyk always emits UTF-8 JSON regardless of platform; text=True
+            # alone decodes using the ambient locale encoding instead (e.g.
+            # cp1252 on Windows), which crashes on legitimate non-ASCII
+            # characters in vulnerability descriptions (confirmed live:
+            # curly quotes in a real CVE description). errors="replace" is a
+            # belt-and-suspenders fallback if snyk ever emits something that
+            # isn't valid UTF-8.
+            encoding="utf-8",
+            errors="replace",
+            timeout=300,
+            cwd=cwd,
+            env=env,
+            shell=False,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+        if result.returncode <= 1:
+            return result.returncode, result.stdout, result.stderr, attempt
+        combined = (result.stderr or "") + (result.stdout or "")
+        if auth_retry and not auth_backoff_attempted and is_auth_error(combined):
+            max_attempts = max(max_attempts, attempt + 1)
+            if log_fn is not None:
+                log_fn(
+                    f"Attempt {attempt}/{max_attempts} hit auth error, "
+                    f"retrying once after {_AUTH_RETRY_BACKOFF_SECONDS}s "
+                    f"(concurrent OAuth refresh or brief mid-scan expiry)"
+                )
+            time.sleep(_AUTH_RETRY_BACKOFF_SECONDS)
+            # Set only once the backoff has actually been served, so the flag
+            # always reads as "the one auth retry has been spent".
+            auth_backoff_attempted = True
+            continue
+        if not is_transient_network_error(combined):
+            return result.returncode, result.stdout, result.stderr, attempt
+        if attempt < max_attempts:
+            backoff = _RETRY_BACKOFFS_SECONDS[attempt - 1]
+            if log_fn is not None:
+                snippet = (result.stderr or "").strip().splitlines()
+                snippet_str = snippet[0][:120] if snippet else ""
+                log_fn(
+                    f"Attempt {attempt}/{max_attempts} hit transient network error "
+                    f"({snippet_str!r}), retrying in {backoff}s"
+                )
+            time.sleep(backoff)
+    assert result is not None
+    return result.returncode, result.stdout, result.stderr, attempt
 
 
 # =============================================================================
@@ -373,6 +538,38 @@ def prepend_to_path(env: Dict[str, str], bin_dir: str) -> None:
     """Put ``bin_dir`` first on PATH, removing duplicates and empty entries."""
     entries = [p for p in env.get("PATH", "").split(os.pathsep) if p and p != bin_dir]
     env["PATH"] = os.pathsep.join([bin_dir, *entries])
+
+
+# =============================================================================
+# SNYK CONFIGSTORE PATH
+# =============================================================================
+
+
+def get_snyk_config_path() -> str:
+    """Return the path to the Snyk CLI config file.
+
+    Mirrors the ``configstore`` npm package the Snyk CLI bundles, whose
+    directory comes straight from ``xdg-basedir``::
+
+        config = env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config')
+
+    with ``configstore/snyk.json`` appended. ``xdg-basedir`` has no Windows
+    branch, so this is ``~/.config/configstore/snyk.json`` on every platform,
+    Windows included -- ``snyk config --help`` documents the file as "located
+    at ``$XDG_CONFIG_HOME`` or ``~/.config`` followed by
+    ``configstore/snyk.json``".
+
+    ``XDG_CONFIG_HOME`` is honoured deliberately. The CLI honours it, so
+    ignoring it here reports ``auth_required`` for a user who is in fact
+    authenticated. It is not a new exposure: the snyk subprocess we spawn
+    inherits the same variable and would read the same file.
+
+    Kept as the single source of truth so scan_runner (auth precheck) and the
+    worker subprocesses (auth check) never read a different file than the Snyk
+    CLI itself will.
+    """
+    config_home = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return str(Path(config_home) / "configstore" / "snyk.json")
 
 
 # =============================================================================

@@ -29,6 +29,7 @@ from platform_utils import (
     file_lock,
     get_detached_popen_kwargs,
     get_snyk_binary_names,
+    get_snyk_config_path,
     get_snyk_search_paths,
     is_pid_alive,
     prepend_to_path,
@@ -36,6 +37,7 @@ from platform_utils import (
     snyk_cli_from_sidecar,
     terminate_process_tree,
 )
+from platform_utils import log as _shared_log
 
 # =============================================================================
 # CONFIGURATION
@@ -159,19 +161,6 @@ def _augment_path_for_snyk(env: Dict[str, str]) -> None:
 # =============================================================================
 
 
-def _get_snyk_config_path() -> str:
-    """Return the path to the Snyk CLI config file.
-
-    Uses the hardcoded well-known path (~/.config/configstore/snyk.json)
-    rather than trusting XDG_CONFIG_HOME to avoid path-traversal via
-    a manipulated environment variable. This must follow the real user home,
-    not CODEX_HOME: project-scoped installs live under ``<workspace>/.codex``
-    but Snyk CLI credentials remain in the invoking user's home directory.
-    """
-    home = os.environ.get("HOME") or os.environ.get("USERPROFILE") or os.path.expanduser("~")
-    return os.path.join(home, ".config", "configstore", "snyk.json")
-
-
 def _force_disable_snyk_auth() -> bool:
     """Test-harness escape hatch for deterministic unauthenticated-path E2E runs."""
     if os.environ.get("SAI_DISABLE_SNYK_AUTH") == "1":
@@ -211,7 +200,7 @@ def check_snyk_auth() -> Optional[str]:
         return token
 
     try:
-        with open(_get_snyk_config_path()) as f:
+        with open(get_snyk_config_path()) as f:
             config = json.load(f)
         api_key: object = config.get("api")
         if api_key and isinstance(api_key, str):
@@ -283,7 +272,7 @@ def _ensure_snyk_token(env: Dict[str, str]) -> None:
         return
 
     try:
-        with open(_get_snyk_config_path()) as f:
+        with open(get_snyk_config_path()) as f:
             config = json.load(f)
         api_key = config.get("api")
         if api_key and isinstance(api_key, str):
@@ -802,9 +791,56 @@ _MANIFEST_EXCLUSION_DIRS = frozenset(
         ".eggs",
         ".mypy_cache",
         ".ruff_cache",
-        "pytest_cache",
+        ".pytest_cache",  # was "pytest_cache", which never matched anything
+        "Library",  # ~/Library is the bulk of a $HOME-rooted walk
+        "Pods",
+        "site-packages",
+        "coverage",
     }
 )
+
+# Walk caps. A session started from $HOME measured 43.3s over 237,300 dirs
+# hashing 106.7MB -- paid on every Bash command and again at Stop, against a
+# 60s hook timeout. The walk, not the hashing, is the cost, so the
+# dot-directory prune below matters more than the digest cache.
+_WALK_MAX_DIRS = 20_000
+_WALK_MAX_BYTES = 64 * 1024 * 1024
+_WALK_TIME_BUDGET_SECS = 8.0
+
+
+def _is_pruned_dir(name: str) -> bool:
+    """Directories that cannot hold a first-party dependency manifest.
+
+    Dot-directories are pruned wholesale: they cover package caches (.npm, .m2,
+    .cargo, .terraform, .pnpm-store) and tool state (.next, .cache, .Trash)
+    that between them account for most of a home-directory walk. It also drops
+    `.venv/.lock`, which was being picked up as a dependency manifest.
+    """
+    return name.startswith(".") or name in _MANIFEST_EXCLUSION_DIRS
+
+
+def _hash_cache_path(workspace: str) -> str:
+    return os.path.join(get_cache_dir(workspace), "manifest_hash_cache.json")
+
+
+def _load_hash_cache(workspace: str) -> Dict[str, Dict[str, Any]]:
+    try:
+        with open(_hash_cache_path(workspace)) as f:
+            return cast(Dict[str, Dict[str, Any]], json.load(f))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_hash_cache(workspace: str, cache: Dict[str, Dict[str, Any]]) -> None:
+    try:
+        ensure_cache_dirs(workspace)
+        path = _hash_cache_path(workspace)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cache, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass
 
 
 def snapshot_manifest_hashes(
@@ -812,19 +848,82 @@ def snapshot_manifest_hashes(
     manifest_files: Set[str],
     manifest_suffixes: Set[str],
 ) -> Dict[str, str]:
-    """Walk workspace and return SHA-256 hex digests for matching manifest files."""
+    """Walk workspace and return SHA-256 hex digests for matching manifest files.
+
+    Bounded by _WALK_MAX_DIRS / _WALK_MAX_BYTES / _WALK_TIME_BUDGET_SECS so the
+    walk can never eat the hook's timeout. Digests for unchanged files are
+    reused from an on-disk (path, mtime, size) cache.
+
+    If a cap trips, digests for paths we never reached are carried over from the
+    previous snapshot. Without that, diff_manifest_hashes -- which treats "in
+    baseline, absent from current" as a change -- would read a truncated walk as
+    a mass deletion and open the SCA gate on a session that changed nothing.
+    """
+    cache = _load_hash_cache(workspace)
+    fresh: Dict[str, Dict[str, Any]] = {}
     hashes: Dict[str, str] = {}
+    dirs_seen = 0
+    bytes_hashed = 0
+    started = time.time()
+    truncated = False
+
     for dirpath, dirnames, filenames in os.walk(workspace, followlinks=False):
-        dirnames[:] = [d for d in dirnames if d not in _MANIFEST_EXCLUSION_DIRS]
+        dirnames[:] = [d for d in dirnames if not _is_pruned_dir(d)]
+        dirs_seen += 1
+        if (
+            dirs_seen > _WALK_MAX_DIRS
+            or bytes_hashed > _WALK_MAX_BYTES
+            or time.time() - started > _WALK_TIME_BUDGET_SECS
+        ):
+            truncated = True
+            break
         for filename in filenames:
-            if filename in manifest_files or Path(filename).suffix.lower() in manifest_suffixes:
-                abs_path = os.path.join(dirpath, filename)
+            if (
+                filename not in manifest_files
+                and Path(filename).suffix.lower() not in manifest_suffixes
+            ):
+                continue
+            # The outer test only fires between directories, so a single
+            # directory holding thousands of manifests would run to completion
+            # with the byte and time budgets long since blown. Re-test here --
+            # after the suffix filter, so ordinary files still cost nothing.
+            if bytes_hashed > _WALK_MAX_BYTES or time.time() - started > _WALK_TIME_BUDGET_SECS:
+                truncated = True
+                break
+            abs_path = os.path.join(dirpath, filename)
+            try:
+                st = os.stat(abs_path)
+            except OSError:
+                continue
+            entry = cache.get(abs_path)
+            if entry and entry.get("m") == st.st_mtime_ns and entry.get("s") == st.st_size:
+                digest = str(entry.get("d", ""))
+            else:
                 try:
                     with open(abs_path, "rb") as f:
                         digest = hashlib.sha256(f.read()).hexdigest()
-                    hashes[abs_path] = digest
                 except OSError:
-                    pass
+                    continue
+                bytes_hashed += st.st_size
+            hashes[abs_path] = digest
+            fresh[abs_path] = {"m": st.st_mtime_ns, "s": st.st_size, "d": digest}
+
+        if truncated:
+            break
+
+    if truncated:
+        _shared_log(
+            f"[SAI] Manifest walk capped after {dirs_seen} dirs / "
+            f"{bytes_hashed // 1024}KiB / {time.time() - started:.1f}s; "
+            f"reusing {sum(1 for k in cache if k not in hashes)} cached digest(s)",
+            resolve_log_file(workspace),
+        )
+        for path, entry in cache.items():
+            if path not in hashes:
+                hashes[path] = str(entry.get("d", ""))
+                fresh[path] = entry
+
+    _save_hash_cache(workspace, fresh)
     return hashes
 
 

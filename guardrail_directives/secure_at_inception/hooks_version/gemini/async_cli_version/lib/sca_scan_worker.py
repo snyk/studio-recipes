@@ -28,9 +28,13 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from platform_utils import STUDIO_VERSION as SNYK_STUDIO_VERSION
 from platform_utils import (
     ensure_process_in_kill_on_close_job,
+    get_snyk_config_path,
+    is_auth_error,
     needs_shell,
     prepend_to_path,
+    run_snyk_with_retry,
     snyk_cli_from_sidecar,
+    with_attempts,
 )
 from platform_utils import log as _platform_log
 
@@ -41,22 +45,6 @@ PID_FILE = ""
 DONE_FILE = ""
 LOG_FILE: Optional[str] = None
 
-# Console apps (snyk / the cmd.exe shim) spawned from this windowless background
-# worker allocate a new console window on Windows; CREATE_NO_WINDOW suppresses the
-# flash. The flag only exists on Windows; elsewhere this is 0 (subprocess's
-# default creationflags, i.e. a no-op).
-_CREATE_NO_WINDOW = 0
-if sys.platform == "win32":
-    _CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW
-
-_IS_WINDOWS = sys.platform == "win32"
-# Console apps (snyk / the cmd.exe shim) spawned from this windowless background
-# worker allocate a new console window on Windows; CREATE_NO_WINDOW suppresses the
-# flash. The flag only exists on Windows; elsewhere this is 0 (subprocess's
-# default creationflags, i.e. a no-op).
-_CREATE_NO_WINDOW = 0
-if sys.platform == "win32":
-    _CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW
 
 def log(msg: str, *, debug: bool = False) -> None:
     if not LOG_FILE:
@@ -183,11 +171,9 @@ def main() -> None:
         os.remove(DONE_FILE)
 
     if not os.environ.get("SNYK_TOKEN"):
-        config_dir = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
-        snyk_config_path = os.path.join(config_dir, "configstore", "snyk.json")
         has_stored_auth = False
         try:
-            with open(snyk_config_path) as f:
+            with open(get_snyk_config_path()) as f:
                 snyk_cfg = json.load(f)
             has_stored_auth = bool(
                 snyk_cfg.get("api") or snyk_cfg.get("INTERNAL_OAUTH_TOKEN_STORAGE")
@@ -234,53 +220,31 @@ def main() -> None:
         # cmd.exe process that "cancelling" this worker can't reach.
         cmd = ["cmd.exe", "/d", "/s", "/c", subprocess.list2cmdline(cmd)]
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            # snyk always emits UTF-8 JSON regardless of platform; text=True
-            # alone decodes using the ambient locale encoding instead (e.g.
-            # cp1252 on Windows), which crashes on legitimate non-ASCII
-            # characters in vulnerability descriptions (confirmed live:
-            # curly quotes in a real CVE description). errors="replace" is a
-            # belt-and-suspenders fallback if snyk ever emits something that
-            # isn't valid UTF-8.
-            encoding="utf-8",
-            errors="replace",
-            timeout=300,
-            cwd=WORKSPACE,
-            env=env,
-            shell=False,
-            creationflags=_CREATE_NO_WINDOW,
+        exit_code, stdout, stderr, attempts = run_snyk_with_retry(
+            cmd, env, WORKSPACE, log_fn=log, auth_retry=True
         )
-        exit_code = result.returncode
-        stdout = result.stdout
-        stderr = result.stderr
     except subprocess.TimeoutExpired:
         log("SCA scan timed out")
         finish("timeout", started_at=started_at)
         return
 
-    log(f"Snyk test exited with code {exit_code}", debug=True)
+    log(f"Snyk test exited with code {exit_code} (attempts={attempts})", debug=True)
 
     if exit_code > 1:
-        combined_output = (stderr + stdout).lower()
-        if any(
-            pattern in combined_output
-            for pattern in [
-                "missingapitokenerror",
-                "not authenticated",
-                "authentication required",
-                "snyk-0005",
-            ]
-        ):
+        if is_auth_error(stderr + stdout):
             log("Snyk CLI authentication required")
             finish(
-                "auth_required", started_at=started_at, error_detail="Snyk CLI is not authenticated"
+                "auth_required",
+                started_at=started_at,
+                error_detail=with_attempts("Snyk CLI is not authenticated", attempts),
             )
             return
         log(f"SCA scan error: {stderr[:500]}")
-        finish("error", started_at=started_at, error_detail=stderr[:500])
+        finish(
+            "error",
+            started_at=started_at,
+            error_detail=with_attempts(stderr[:500], attempts),
+        )
         return
 
     vulnerabilities = parse_snyk_test_results(stdout)

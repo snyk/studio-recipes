@@ -17,8 +17,11 @@ report vulnerabilities on those lines
 given a detailed vuln table to fix. After fixing, the cycle repeats until clean
 - **Per-file state management**: Clean files are removed from tracking; only files with unresolved
 vulns stay tracked
-- **MCP fallback**: If the CLI scan times out, falls back to prompting Gemini to use the
-`snyk_code_scan` MCP tool
+- **Degraded-scan reporting**: If a CLI scan cannot run, the turn is *not* blocked and no scan is
+handed to the Snyk MCP tools -- the MCP server is the same CLI that just failed. Gemini's
+`systemMessage` warns the user out-of-band (naming the log path), and the scan is re-armed for the
+next turn. An unauthenticated CLI is the one exception: it blocks once per session to tell the user
+to run `snyk auth`, which repairs the configstore every later scan reads
 - **Manifest tracking**: Detects changes to dependency manifests (package.json, requirements.txt,
 etc.) and prompts for SCA scanning
 - **Loop prevention**: Caps scan-fix cycles at 3 to prevent infinite loops
@@ -49,7 +52,8 @@ chmod +x .gemini/hooks/snyk_secure_at_inception.py
             "name": "snyk_secure_at_inception_session_start",
             "type": "command",
             "command": "uv run $HOME/.gemini/hooks/snyk_secure_at_inception.py",
-            "description": "Run initial scan on session start"
+            "description": "Run initial scan on session start",
+            "timeout": 60000
           }
         ]
       }
@@ -62,7 +66,8 @@ chmod +x .gemini/hooks/snyk_secure_at_inception.py
             "name": "snyk_secure_at_inception_after_tool_edit",
             "type": "command",
             "command": "uv run $HOME/.gemini/hooks/snyk_secure_at_inception.py",
-            "description": "Scans code changes for vulnerabilities using Snyk"
+            "description": "Scans code changes for vulnerabilities using Snyk",
+            "timeout": 30000
           }
         ]
       }
@@ -104,7 +109,8 @@ Gemini finishes responding
   → Compares dependency findings against the session-start SCA baseline
   → New vulns found?  → block with fix instructions (repeats up to 3 cycles)
   → No new vulns?     → pass silently
-  → Scan failed?      → fall back to MCP snyk_code_scan prompt
+  → Scan unavailable? → allow, warn the user via systemMessage, re-arm for next turn
+                        (except auth: one block per session to prompt `snyk auth`)
 ```
 
 The cache-warming scan launched at session start primes Snyk's internal analysis cache. When the first file edit triggers a PostToolUse scan, Snyk can reuse cached analysis results for unchanged files, making the scan faster.

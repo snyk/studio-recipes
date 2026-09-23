@@ -20,7 +20,7 @@ from .git_ops import is_safe_for_shell
 # CLI integration metadata published in _snyk_env() as SNYK_INTEGRATION_*.
 # Other Studio hooks carry the same literal today; there is no shared generated
 # version source in the installer payload yet.
-SNYK_STUDIO_VERSION = "1.0.6"
+SNYK_STUDIO_VERSION = "1.0.17"
 _SNYK_BINARY_NAMES = ["snyk.cmd", "snyk.exe", "snyk"] if proc.IS_WINDOWS else ["snyk"]
 
 # A resolved path becomes cmd[0] in a shell=True subprocess call when it's a

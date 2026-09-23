@@ -44,7 +44,8 @@ Claude finishes responding
   → Filters to only vulns on lines Claude modified
   → New vulns found?  → block with fix instructions (up to 3 cycles)
   → No new vulns?     → pass silently
-  → Scan failed?      → fall back to MCP snyk_code_scan prompt
+  → Not authenticated? → block once per session: tell the user to run `snyk auth`
+  → Scan failed?      → allow, warn the user, re-scan on the next Stop
 ```
 
 ### Sync MCP Version

@@ -419,6 +419,7 @@ def _do_launch(
     done_file_fn: Callable[[str], str],
     pid_file_fn: Callable[[str], str],
     worker_script: str,
+    session_id: str = "",
 ) -> bool:
     """Launch a worker subprocess; catches any Exception so callers get False.
 
@@ -445,6 +446,10 @@ def _do_launch(
         env["SAI_LIB_DIR"] = str(Path(__file__).parent.resolve())
         env["SAI_PID_FILE"] = pid_file
         env["SAI_DONE_FILE"] = done
+        # Claude session ID (best-effort): the worker forwards it to the CLI as
+        # INTERNAL_SNYK_AGENT_SESSION_ID for scan attribution.
+        if session_id:
+            env["SAI_SESSION_ID"] = session_id
         # On Windows, network paths (UNC \\server\share or mapped drives such as
         # Y:\) cannot be used as cwd for detached processes — CreateProcess raises
         # [WinError 267]. SAI_WORKSPACE is passed via env, so the scan_worker
@@ -550,11 +555,16 @@ def _cleanup_pid_file(workspace: str) -> None:
     _sast._cleanup_pid(workspace)
 
 
-def launch_background_scan(workspace: str) -> bool:
+def launch_background_scan(workspace: str, session_id: str = "") -> bool:
     """Launch a background Snyk code scan as a detached subprocess.
     PID file is written by the launcher to close the race window."""
     return _do_launch(
-        workspace, is_scan_running, get_scan_done_file, get_scan_pid_file, "scan_worker.py"
+        workspace,
+        is_scan_running,
+        get_scan_done_file,
+        get_scan_pid_file,
+        "scan_worker.py",
+        session_id=session_id,
     )
 
 
@@ -571,14 +581,16 @@ def wait_for_scan(
     workspace: str,
     timeout: float = SCAN_WAIT_TIMEOUT,
     log_fn: Optional[Callable[[str], None]] = None,
+    session_id: str = "",
 ) -> Optional[str]:
     """Wait for a background scan to complete. Returns the status string
-    or None if the wait timed out."""
+    or None if the wait timed out. If _do_wait has to relaunch the scan, the
+    session_id is carried through so the CLI still gets INTERNAL_SNYK_AGENT_SESSION_ID."""
     return _do_wait(
         workspace,
         is_scan_complete,
         is_scan_running,
-        launch_background_scan,
+        lambda ws: launch_background_scan(ws, session_id=session_id),
         _read_scan_status,
         "scan",
         timeout,
@@ -596,10 +608,10 @@ def cancel_scan(workspace: str) -> None:
     _sast.cancel(workspace)
 
 
-def trigger_scan(workspace: str) -> bool:
+def trigger_scan(workspace: str, session_id: str = "") -> bool:
     """Launch a SAST scan, cancelling any in-flight scan first."""
     cancel_scan(workspace)
-    return launch_background_scan(workspace)
+    return launch_background_scan(workspace, session_id=session_id)
 
 
 # =============================================================================
@@ -627,11 +639,16 @@ def _cleanup_sca_pid_file(workspace: str) -> None:
     _sca._cleanup_pid(workspace)
 
 
-def launch_background_sca_scan(workspace: str) -> bool:
+def launch_background_sca_scan(workspace: str, session_id: str = "") -> bool:
     """Launch a background Snyk SCA scan as a detached subprocess.
     PID file is written by the launcher to close the race window."""
     return _do_launch(
-        workspace, is_sca_scan_running, get_sca_done_file, get_sca_pid_file, "sca_scan_worker.py"
+        workspace,
+        is_sca_scan_running,
+        get_sca_done_file,
+        get_sca_pid_file,
+        "sca_scan_worker.py",
+        session_id=session_id,
     )
 
 
@@ -648,14 +665,15 @@ def wait_for_sca_scan(
     workspace: str,
     timeout: float = SCAN_WAIT_TIMEOUT,
     log_fn: Optional[Callable[[str], None]] = None,
+    session_id: str = "",
 ) -> Optional[str]:
     """Wait for a background SCA scan to complete. Returns the status string
-    or None if the wait timed out."""
+    or None if the wait timed out. Relaunches carry the session_id through."""
     return _do_wait(
         workspace,
         is_sca_scan_complete,
         is_sca_scan_running,
-        launch_background_sca_scan,
+        lambda ws: launch_background_sca_scan(ws, session_id=session_id),
         _read_sca_scan_status,
         "SCA scan",
         timeout,
@@ -673,10 +691,10 @@ def cancel_sca_scan(workspace: str) -> None:
     _sca.cancel(workspace)
 
 
-def trigger_sca_scan(workspace: str) -> bool:
+def trigger_sca_scan(workspace: str, session_id: str = "") -> bool:
     """Launch SCA scan, cancelling any in-flight scan."""
     cancel_sca_scan(workspace)
-    return launch_background_sca_scan(workspace)
+    return launch_background_sca_scan(workspace, session_id=session_id)
 
 
 # =============================================================================
@@ -688,7 +706,7 @@ _sca_baseline = _ScanChannel(
 )
 
 
-def launch_background_sca_baseline_scan(workspace: str) -> bool:
+def launch_background_sca_baseline_scan(workspace: str, session_id: str = "") -> bool:
     """Launch a background SCA scan to capture the session-start dependency baseline."""
     return _do_launch(
         workspace,
@@ -696,6 +714,7 @@ def launch_background_sca_baseline_scan(workspace: str) -> bool:
         _sca_baseline.done_file,
         _sca_baseline.pid_file,
         "sca_scan_worker.py",
+        session_id=session_id,
     )
 
 
@@ -708,13 +727,15 @@ def wait_for_sca_baseline_scan(
     workspace: str,
     timeout: float = SCAN_WAIT_TIMEOUT,
     log_fn: Optional[Callable[[str], None]] = None,
+    session_id: str = "",
 ) -> Optional[str]:
-    """Wait for the baseline SCA scan to complete. Returns status string or None on timeout."""
+    """Wait for the baseline SCA scan to complete. Returns status string or None
+    on timeout. Relaunches carry the session_id through."""
     return _do_wait(
         workspace,
         _sca_baseline.is_complete,
         _sca_baseline.is_running,
-        launch_background_sca_baseline_scan,
+        lambda ws: launch_background_sca_baseline_scan(ws, session_id=session_id),
         lambda ws: _sca_baseline._read_status(ws),
         "SCA baseline scan",
         timeout,

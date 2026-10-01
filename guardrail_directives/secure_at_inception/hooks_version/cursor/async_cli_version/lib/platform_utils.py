@@ -27,7 +27,7 @@ from typing import Any, Callable, Dict, Generator, Iterator, List, Optional, Tup
 
 _IS_WINDOWS = sys.platform == "win32"
 
-STUDIO_VERSION: str = "1.0.17"
+STUDIO_VERSION: str = "1.0.18"
 
 # Console apps (snyk / the cmd.exe shim) spawned from a windowless background
 # worker allocate a new console window on Windows; CREATE_NO_WINDOW suppresses

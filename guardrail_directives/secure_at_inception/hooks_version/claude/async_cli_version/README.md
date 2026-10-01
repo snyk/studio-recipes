@@ -11,6 +11,11 @@ internal analysis cache, making subsequent scans faster
 -- non-blocking, Claude keeps working
 - **New-only filtering**: Tracks which lines the agent modified and filters scan results to only
 report vulnerabilities on those lines
+- **Shell-written code**: In `auto` and `bypassPermissions` modes Claude Code has the model edit
+through heredocs, `sed -i` and scripts, and attaches the files each Bash command changed as
+`tool_response.bashEditDiff` (v2.1.269+, public beta). Those files are tracked like an Edit, with
+exact ranges from the diff's hunks (whole-file past the first 5 files of one command). Failing and
+background commands carry no diff and are not tracked yet.
 - **Automatic fix loop**: When new vulnerabilities are found, Claude is blocked from stopping and
 given a detailed vuln table to fix. After fixing, the cycle repeats until clean
 - **Per-file state management**: Clean files are removed from tracking; only files with unresolved

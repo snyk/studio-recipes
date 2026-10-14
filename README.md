@@ -135,6 +135,6 @@ Snyk Studio is built on an open, partner-first, tool-agnostic foundation — the
 
 ## Need help?
 
-Reach out to your Snyk account team, or open an issue in this repository.
+Reach out to your Snyk account team, or [open an issue](https://github.com/snyk/studio-recipes/issues) in this repository.
 
 > This repository is closed to public contributions.

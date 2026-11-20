@@ -5,5 +5,4 @@ metadata:
 spec:
   type: examples
   lifecycle: "-"
-  owner: agentic_dev
-
+  owner: agentic-appsec_agentic-code-security
